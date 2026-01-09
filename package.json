@@ -11,12 +11,12 @@
     "cf-typegen": "wrangler types"
   },
   "devDependencies": {
-    "@cloudflare/workers-types": "^4.20250106.0",
-    "typescript": "^5.7.2",
-    "wrangler": "^3.101.0"
+    "@cloudflare/workers-types": "^4.20260109.0",
+    "typescript": "^5.9.3",
+    "wrangler": "^4.58.0"
   },
   "dependencies": {
-    "hono": "^4.6.0",
-    "openai": "^4.77.0"
+    "hono": "^4.11.3",
+    "openai": "^6.15.0"
   }
 }
