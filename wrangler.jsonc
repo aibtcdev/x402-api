@@ -1,0 +1,67 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "x402stacks-api-host",
+  "main": "src/index.ts",
+  "compatibility_date": "2025-01-08",
+  // nodejs_compat_v2 includes RPC support for service bindings
+  "compatibility_flags": ["nodejs_compat_v2"],
+
+  // Observability for debugging
+  "observability": {
+    "enabled": true
+  },
+
+  /**
+   * Service Bindings
+   * LOGS: Universal logging service (RPC, no API key needed)
+   */
+  "services": [
+    { "binding": "LOGS", "service": "worker-logs", "entrypoint": "LogsRPC" }
+  ],
+
+  /**
+   * Durable Objects
+   * One DO class per API service for isolated state/rate limiting
+   */
+  "durable_objects": {
+    "bindings": [
+      { "name": "OPENROUTER_DO", "class_name": "OpenRouterDO" }
+    ]
+  },
+
+  /**
+   * DO Migrations
+   * Use new_sqlite_classes for SQLite-backed DOs (usage tracking, rate limits)
+   */
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["OpenRouterDO"] }
+  ],
+
+  /**
+   * Environment Variables
+   * Secrets should be set via `wrangler secret put`:
+   * - OPENROUTER_API_KEY: API key for OpenRouter
+   */
+  "vars": {
+    "ENVIRONMENT": "development"
+  },
+
+  /**
+   * Environments
+   */
+  "env": {
+    "staging": {
+      "routes": [{ "pattern": "api-staging.aibtc.dev", "custom_domain": true }],
+      "vars": {
+        "ENVIRONMENT": "staging"
+      }
+    },
+
+    "production": {
+      "routes": [{ "pattern": "api.aibtc.dev", "custom_domain": true }],
+      "vars": {
+        "ENVIRONMENT": "production"
+      }
+    }
+  }
+}
