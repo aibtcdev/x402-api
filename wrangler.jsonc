@@ -14,16 +14,17 @@
     "enabled": true
   },
   /**
-   * Service Bindings
+   * Service Bindings (optional)
    * LOGS: Universal logging service (RPC, no API key needed)
+   * Uncomment if worker-logs service is deployed to your account
    */
-  "services": [
-    {
-      "binding": "LOGS",
-      "service": "worker-logs",
-      "entrypoint": "LogsRPC"
-    }
-  ],
+  // "services": [
+  //   {
+  //     "binding": "LOGS",
+  //     "service": "worker-logs",
+  //     "entrypoint": "LogsRPC"
+  //   }
+  // ],
   /**
    * KV Namespaces
    * METRICS: Usage metrics storage
@@ -32,11 +33,11 @@
   "kv_namespaces": [
     {
       "binding": "METRICS",
-      "id": "TBD_METRICS_ID"
+      "id": "3f11905fdf2346a59822bd412601b789"
     },
     {
       "binding": "STORAGE",
-      "id": "TBD_STORAGE_ID"
+      "id": "e53ab39b253041de87dbebf2fedbb6b3"
     }
   ],
   /**

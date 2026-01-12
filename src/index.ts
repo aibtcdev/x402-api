@@ -10,15 +10,8 @@ import { Hono } from "hono";
 import { cors } from "hono/cors";
 import type { Env, AppContext } from "./types";
 
-// Middleware
-import {
-  x402Simple,
-  x402AI,
-  x402StorageRead,
-  x402StorageWrite,
-  x402StorageWriteLarge,
-  x402Dynamic,
-} from "./middleware/x402";
+// Note: x402 middleware is applied via endpoint base classes (SimpleEndpoint, AIEndpoint, etc.)
+// Direct middleware imports available if needed: x402Simple, x402AI, x402StorageRead, etc.
 
 // Inference endpoints
 import { OpenRouterListModels, OpenRouterChat } from "./endpoints/inference/openrouter";

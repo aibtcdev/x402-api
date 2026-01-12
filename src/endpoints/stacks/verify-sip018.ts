@@ -13,7 +13,6 @@ import {
   serializeCV,
   tupleCV,
   stringAsciiCV,
-  bufferCV,
   uintCV,
 } from "@stacks/transactions";
 import type { AppContext } from "../../types";

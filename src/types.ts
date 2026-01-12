@@ -38,8 +38,8 @@ export interface Env {
   STORAGE: KVNamespace;
   // AI Binding
   AI: Ai;
-  // Service bindings (typed as LogsRPC for RPC calls)
-  LOGS: LogsRPC;
+  // Service bindings (optional - uncomment in wrangler.jsonc if available)
+  LOGS?: LogsRPC;
   // Secrets (set via wrangler secret put)
   OPENROUTER_API_KEY: string;
   HIRO_API_KEY?: string;
