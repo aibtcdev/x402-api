@@ -8,7 +8,9 @@
 import { fromHono } from "chanfana";
 import { Hono } from "hono";
 import { cors } from "hono/cors";
-import type { Env, AppContext } from "./types";
+import type { Env, AppContext, AppVariables, TokenType, PricingTier } from "./types";
+import type { MetricsRecord } from "./durable-objects/MetricsDO";
+import { TIER_PRICING } from "./services/pricing";
 
 // Note: x402 middleware is applied via endpoint base classes (SimpleEndpoint, AIEndpoint, etc.)
 // Direct middleware imports available if needed: x402Simple, x402AI, x402StorageRead, etc.
@@ -66,15 +68,19 @@ import {
   MemoryClear,
 } from "./endpoints/storage";
 
+// Dashboard endpoint
+import { Dashboard } from "./endpoints/dashboard";
+
 // Durable Objects
 export { UsageDO } from "./durable-objects/UsageDO";
 export { StorageDO } from "./durable-objects/StorageDO";
+export { MetricsDO } from "./durable-objects/MetricsDO";
 
 // =============================================================================
 // Hono App
 // =============================================================================
 
-const app = new Hono<{ Bindings: Env }>();
+const app = new Hono<{ Bindings: Env; Variables: AppVariables }>();
 
 // CORS middleware
 app.use(
@@ -91,6 +97,182 @@ app.use(
     exposeHeaders: ["X-PAYMENT-RESPONSE", "X-PAYER-ADDRESS", "X-Request-ID"],
   })
 );
+
+// =============================================================================
+// Global Metrics Middleware
+// =============================================================================
+
+// Endpoint to tier/category mapping for metrics
+const ENDPOINT_CONFIG: Record<string, { tier: PricingTier; category: string }> = {
+  // Inference
+  "/inference/openrouter/chat": { tier: "dynamic", category: "inference" },
+  "/inference/cloudflare/chat": { tier: "ai", category: "inference" },
+  // Stacks
+  "/stacks/address": { tier: "simple", category: "stacks" },
+  "/stacks/decode/clarity": { tier: "simple", category: "stacks" },
+  "/stacks/decode/transaction": { tier: "simple", category: "stacks" },
+  "/stacks/profile": { tier: "simple", category: "stacks" },
+  "/stacks/verify/message": { tier: "simple", category: "stacks" },
+  "/stacks/verify/sip018": { tier: "simple", category: "stacks" },
+  // Hashing
+  "/hashing/sha256": { tier: "simple", category: "hashing" },
+  "/hashing/sha512": { tier: "simple", category: "hashing" },
+  "/hashing/sha512-256": { tier: "simple", category: "hashing" },
+  "/hashing/keccak256": { tier: "simple", category: "hashing" },
+  "/hashing/hash160": { tier: "simple", category: "hashing" },
+  "/hashing/ripemd160": { tier: "simple", category: "hashing" },
+  // Storage - KV
+  "/storage/kv": { tier: "storage_read", category: "storage" },
+  // Storage - Paste
+  "/storage/paste": { tier: "storage_write", category: "storage" },
+  // Storage - DB
+  "/storage/db/query": { tier: "storage_read", category: "storage" },
+  "/storage/db/execute": { tier: "storage_write", category: "storage" },
+  "/storage/db/schema": { tier: "storage_read", category: "storage" },
+  // Storage - Sync
+  "/storage/sync/lock": { tier: "storage_write", category: "storage" },
+  "/storage/sync/unlock": { tier: "storage_write", category: "storage" },
+  "/storage/sync/extend": { tier: "storage_write", category: "storage" },
+  "/storage/sync/status": { tier: "storage_read", category: "storage" },
+  "/storage/sync/list": { tier: "storage_read", category: "storage" },
+  // Storage - Queue
+  "/storage/queue/push": { tier: "storage_write", category: "storage" },
+  "/storage/queue/pop": { tier: "storage_write", category: "storage" },
+  "/storage/queue/peek": { tier: "storage_read", category: "storage" },
+  "/storage/queue/status": { tier: "storage_read", category: "storage" },
+  "/storage/queue/clear": { tier: "storage_write", category: "storage" },
+  // Storage - Memory
+  "/storage/memory/store": { tier: "storage_write_large", category: "storage" },
+  "/storage/memory/search": { tier: "storage_read", category: "storage" },
+  "/storage/memory/delete": { tier: "storage_write", category: "storage" },
+  "/storage/memory/list": { tier: "storage_read", category: "storage" },
+  "/storage/memory/clear": { tier: "storage_write", category: "storage" },
+};
+
+function normalizeEndpoint(path: string): string {
+  // Remove path parameters: /stacks/profile/SP123 -> /stacks/profile
+  return path.replace(/\/[A-Za-z0-9]+$/, "").replace(/\/:[^/]+/g, "");
+}
+
+function getEndpointConfig(path: string): { tier: PricingTier; category: string } {
+  const normalized = normalizeEndpoint(path);
+
+  // Try exact match first
+  if (ENDPOINT_CONFIG[normalized]) {
+    return ENDPOINT_CONFIG[normalized];
+  }
+
+  // Try prefix match
+  for (const [key, config] of Object.entries(ENDPOINT_CONFIG)) {
+    if (normalized.startsWith(key)) {
+      return config;
+    }
+  }
+
+  // Default
+  return { tier: "simple", category: "other" };
+}
+
+function getAmountCharged(tier: PricingTier, tokenType: TokenType): number {
+  const pricing = TIER_PRICING[tier];
+  if (!pricing) return 0;
+
+  switch (tokenType) {
+    case "STX":
+      return Math.round(pricing.stx * 1_000_000);
+    case "sBTC":
+      return Math.round(pricing.stx * 100_000_000 * 0.00005);
+    case "USDCx":
+      return Math.round(pricing.usd * 1_000_000);
+    default:
+      return 0;
+  }
+}
+
+function classifyError(statusCode: number): string {
+  if (statusCode >= 500) return "server_error";
+  if (statusCode === 402) return "payment_required";
+  if (statusCode === 401 || statusCode === 403) return "auth_error";
+  if (statusCode === 404) return "not_found";
+  if (statusCode === 429) return "rate_limited";
+  if (statusCode >= 400) return "client_error";
+  return "unknown";
+}
+
+// Global metrics tracking middleware
+app.use("*", async (c, next) => {
+  const startTime = Date.now();
+
+  await next();
+
+  // Only track metrics for paid requests
+  const paymentHeader = c.req.header("X-PAYMENT");
+  if (!paymentHeader) return;
+
+  // Skip metrics for free endpoints
+  const path = c.req.path;
+  if (path === "/" || path === "/health" || path === "/docs" || path === "/dashboard") {
+    return;
+  }
+
+  const durationMs = Date.now() - startTime;
+  const statusCode = c.res?.status || 500;
+  const isSuccess = statusCode >= 200 && statusCode < 300;
+
+  const tokenTypeStr = c.req.header("X-PAYMENT-TOKEN-TYPE") || c.req.query("tokenType") || "STX";
+  const tokenType = (["STX", "sBTC", "USDCx"].includes(tokenTypeStr) ? tokenTypeStr : "STX") as TokenType;
+
+  const endpoint = normalizeEndpoint(c.req.routePath || path);
+  const { tier, category } = getEndpointConfig(endpoint);
+
+  const requestId = c.req.header("cf-ray") || crypto.randomUUID();
+  const cfData = (c.req.raw as unknown as { cf?: { colo?: string } })?.cf;
+  const colo = cfData?.colo || "UNK";
+
+  const responseBytes = parseInt(c.res?.headers.get("content-length") || "0", 10);
+
+  const x402Context = c.get("x402");
+  const payerAddress = x402Context?.payerAddress;
+  const model = x402Context?.priceEstimate?.model;
+  const inputTokens = x402Context?.priceEstimate?.estimatedInputTokens;
+  const outputTokens = x402Context?.priceEstimate?.estimatedOutputTokens;
+
+  const record: MetricsRecord = {
+    requestId,
+    endpoint,
+    category,
+    method: c.req.method,
+    statusCode,
+    isSuccess,
+    errorType: isSuccess ? undefined : classifyError(statusCode),
+    pricingType: tier === "dynamic" ? "dynamic" : "fixed",
+    tier: tier === "dynamic" ? undefined : tier,
+    amountCharged: getAmountCharged(tier, tokenType),
+    token: tokenType,
+    durationMs,
+    responseBytes,
+    colo,
+    payerAddress,
+    model,
+    inputTokens,
+    outputTokens,
+  };
+
+  // Fire-and-forget metrics recording
+  if (c.env.METRICS_DO) {
+    c.executionCtx.waitUntil(
+      (async () => {
+        try {
+          const id = c.env.METRICS_DO.idFromName("global-metrics");
+          const metricsDO = c.env.METRICS_DO.get(id);
+          await metricsDO.recordMetrics(record);
+        } catch (error) {
+          console.error("Failed to record metrics:", error);
+        }
+      })()
+    );
+  }
+});
 
 // =============================================================================
 // chanfana OpenAPI Registry
@@ -172,6 +354,9 @@ app.get("/health", (c) => {
     timestamp: new Date().toISOString(),
   });
 });
+
+// Dashboard (free, HTML)
+openapi.get("/dashboard", Dashboard);
 
 // =============================================================================
 // Inference Routes

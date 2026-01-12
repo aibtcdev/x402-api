@@ -21,11 +21,13 @@
   "durable_objects": {
     "bindings": [
       { "name": "USAGE_DO", "class_name": "UsageDO" },
-      { "name": "STORAGE_DO", "class_name": "StorageDO" }
+      { "name": "STORAGE_DO", "class_name": "StorageDO" },
+      { "name": "METRICS_DO", "class_name": "MetricsDO" }
     ]
   },
   "migrations": [
-    { "tag": "v1", "new_sqlite_classes": ["UsageDO", "StorageDO"] }
+    { "tag": "v1", "new_sqlite_classes": ["UsageDO", "StorageDO"] },
+    { "tag": "v2", "new_sqlite_classes": ["MetricsDO"] }
   ],
   "vars": {
     "ENVIRONMENT": "development",
@@ -64,7 +66,8 @@
       "durable_objects": {
         "bindings": [
           { "name": "USAGE_DO", "class_name": "UsageDO" },
-          { "name": "STORAGE_DO", "class_name": "StorageDO" }
+          { "name": "STORAGE_DO", "class_name": "StorageDO" },
+          { "name": "METRICS_DO", "class_name": "MetricsDO" }
         ]
       }
     },
@@ -88,7 +91,8 @@
       "durable_objects": {
         "bindings": [
           { "name": "USAGE_DO", "class_name": "UsageDO" },
-          { "name": "STORAGE_DO", "class_name": "StorageDO" }
+          { "name": "STORAGE_DO", "class_name": "StorageDO" },
+          { "name": "METRICS_DO", "class_name": "MetricsDO" }
         ]
       }
     }

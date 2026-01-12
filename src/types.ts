@@ -5,6 +5,7 @@
 import type { Context } from "hono";
 import type { UsageDO } from "./durable-objects/UsageDO";
 import type { StorageDO } from "./durable-objects/StorageDO";
+import type { MetricsDO } from "./durable-objects/MetricsDO";
 
 // =============================================================================
 // Logger Types (matching worker-logs RPC interface)
@@ -33,6 +34,7 @@ export interface Env {
   // Durable Objects
   USAGE_DO: DurableObjectNamespace<UsageDO>;
   STORAGE_DO: DurableObjectNamespace<StorageDO>;
+  METRICS_DO: DurableObjectNamespace<MetricsDO>;
   // KV Namespaces
   METRICS: KVNamespace;
   STORAGE: KVNamespace;
