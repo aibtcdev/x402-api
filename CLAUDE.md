@@ -4,9 +4,9 @@ This file provides guidance to Claude Code when working with this repository.
 
 ## Project Overview
 
-x402 Stacks API Host - A Cloudflare Worker that exposes third-party APIs on a pay-per-use basis using the x402 protocol. Uses one Durable Object per agent (keyed by Stacks address) for isolated state and usage tracking.
+x402 Stacks API Host - A Cloudflare Worker that exposes APIs on a pay-per-use basis using the x402 protocol. Agents pay per request via Stacks blockchain payments (STX, sBTC, USDCx).
 
-**Status**: MVP complete. OpenRouter integration with x402 payments working.
+**Status**: Expanding from MVP to full multi-category API. See REQUIREMENTS.md for migration plan.
 
 ## Commands
 
@@ -30,102 +30,100 @@ npm run deploy:dry-run
 
 | Environment | Domain | Network |
 |-------------|--------|---------|
-| Production | `x402-apis.aibtc.com` | mainnet |
-| Staging | `x402-apis.aibtc.dev` | testnet |
+| Production | `x402.aibtc.com` | mainnet |
+| Staging | `x402.aibtc.dev` | testnet |
 
-## API Endpoints
+> **Pattern**: All aibtc hosted projects follow `{service}.aibtc.com` (prod) / `{service}.aibtc.dev` (staging)
 
-### Global
-| Method | Path | Description |
-|--------|------|-------------|
-| GET | `/` | Service info |
-| GET | `/health` | Health check |
+## API Categories (Target)
 
-### OpenRouter (`/openrouter`)
-| Method | Path | Description |
-|--------|------|-------------|
-| GET | `/openrouter/v1/models` | List models |
-| POST | `/openrouter/v1/chat/completions` | Chat (x402 paid) |
-| GET | `/openrouter/usage` | Usage stats |
+| Category | Endpoints | Pricing |
+|----------|-----------|---------|
+| `/inference/openrouter/*` | list-models, chat | Dynamic |
+| `/inference/cloudflare/*` | list-models, chat | Fixed (ai tier) |
+| `/stacks/*` | address, decode, profile, verify | Fixed (simple) |
+| `/hashing/*` | sha256, sha512, keccak256, etc. | Fixed (simple) |
+| `/storage/*` | kv, paste, db, sync, queue, memory | Fixed (storage tiers) |
+
+See REQUIREMENTS.md for full endpoint specifications.
 
 ## Architecture
 
 **Stack:**
-- Cloudflare Workers for deployment
-- Hono.js for HTTP routing
+- Cloudflare Workers + Chanfana (OpenAPI) + Hono.js
 - Durable Objects with SQLite for per-agent state
 - x402-stacks for payment verification
-- worker-logs service binding for centralized logging
+- worker-logs service binding (RPC to wbd.host)
+- Cloudflare AI binding for embeddings
 
-**Project Structure:**
+**Project Structure (Target):**
 ```
 src/
-├── index.ts              # Hono app + OpenRouterDO class
-├── types.ts              # TypeScript interfaces
+├── index.ts                    # Hono app, Chanfana registry, Scalar at /docs
+├── endpoints/
+│   ├── base.ts                 # BaseEndpoint class with pricing strategy
+│   ├── inference/              # OpenRouter + Cloudflare AI
+│   ├── stacks/                 # Blockchain utilities
+│   ├── hashing/                # Clarity-compatible hashing
+│   └── storage/                # Stateful operations (kv, paste, db, etc.)
 ├── middleware/
-│   └── x402.ts           # x402 payment verification middleware
+│   ├── x402.ts                 # Unified payment (fixed + dynamic)
+│   ├── metrics.ts              # Usage tracking
+│   └── logger.ts               # RPC to wbd.host
+├── durable-objects/
+│   ├── UsageDO.ts              # Per-payer usage for dashboard
+│   └── StorageDO.ts            # Stateful operations
 ├── services/
-│   └── openrouter.ts     # OpenRouter API client
-└── utils/
-    ├── logger.ts         # worker-logs integration
-    └── pricing.ts        # Dynamic price estimation
+│   ├── pricing.ts              # Tier definitions + dynamic estimators
+│   ├── openrouter.ts           # OpenRouter client
+│   ├── hiro.ts                 # Hiro API client
+│   └── tenero.ts               # Tenero API client
+└── types.ts
 ```
 
-## Key Decisions (from REQUIREMENTS.md)
+## Pricing Strategy
 
-| Area | Decision |
-|------|----------|
-| **Pricing** | Pass-through OpenRouter cost + 20% margin |
-| **Payment timing** | Pre-pay estimate based on model + input tokens |
-| **Payment tokens** | STX, sBTC, USDCx (all supported) |
-| **Agent ID** | Stacks address from x402 payment |
-| **DO routing** | `idFromName(stacksAddress)` |
-| **Streaming** | Pass-through SSE, capture usage from final chunk |
-| **Models** | All OpenRouter models (dynamic pricing) |
+**Fixed Tiers:**
+| Tier | STX Amount | Use Case |
+|------|------------|----------|
+| `simple` | 0.001 | Basic compute (hashing, conversion) |
+| `ai` | 0.003 | AI-enhanced operations |
+| `storage_read` | 0.001 | Read from storage |
+| `storage_write` | 0.002 | Write to storage |
 
-## Durable Objects
-
-**OpenRouterDO** - Per-agent state (one DO per Stacks address):
-- Identity storage (agent_id, created_at)
-- Usage tracking (tokens, cost per request)
-- Daily stats aggregation
-- Rate limiting (TODO)
-
-**Best Practices Applied:**
-- `blockConcurrencyWhile()` in constructor for schema init
-- RPC methods instead of fetch() handler
-- SQLite storage (recommended over KV)
-- Error handling with try/catch around all operations
+**Dynamic Pricing (LLM):**
+- Pass-through OpenRouter costs + 20% margin
+- Estimate based on model + input tokens
 
 ## x402 Payment Flow
 
-1. Client POSTs to `/openrouter/v1/chat/completions` without payment
-2. Middleware returns 402 with payment requirements (amount, recipient, token type)
+1. Client requests endpoint without payment
+2. Middleware returns 402 with payment requirements
 3. Client signs transaction and resends with `X-PAYMENT` header
 4. Middleware verifies payment via facilitator
-5. On success, payer address stored in context, request proceeds
-6. Usage recorded in agent's DO, PnL logged
+5. Request processed, usage recorded in Durable Object
+6. Response returned to agent
 
 ## Configuration
 
-**wrangler.jsonc** - Cloudflare Workers config
-
 **Secrets** (set via `wrangler secret put`):
-- `OPENROUTER_API_KEY` - API key for OpenRouter
+- `OPENROUTER_API_KEY` - OpenRouter API access
+- `HIRO_API_KEY` - Hiro API access (better rate limits)
 
 **Environment Variables:**
 - `X402_SERVER_ADDRESS` - Stacks address to receive payments
 - `X402_NETWORK` - `mainnet` or `testnet`
 - `X402_FACILITATOR_URL` - x402 facilitator endpoint
 
-## Service Bindings
+## Reference Patterns
 
-**LOGS** - Universal logging service (RPC binding to worker-logs)
-```typescript
-const log = getLogger(c);
-log.info("Request proxied", { model, tokens });
-log.error("OpenRouter error", { error });
-```
+When implementing `/stacks` endpoints, reference patterns from:
+- `~/dev/whoabuddy/stacks-tracker/src/api/hiro-client.ts` - Hiro API client
+- `~/dev/whoabuddy/stacks-tracker/src/crypto/key-derivation.ts` - Address validation
+- `~/dev/whoabuddy/stacks-tracker/src/utils/clarity-converter.ts` - Clarity types
+
+When migrating endpoints, reference:
+- `~/dev/whoabuddy/stx402/` - Production endpoints to migrate
 
 ## Important: Consult Documentation
 
@@ -134,11 +132,12 @@ log.error("OpenRouter error", { error });
 ### Cloudflare Workers & Durable Objects
 - [Rules of Durable Objects](https://developers.cloudflare.com/durable-objects/best-practices/rules-of-durable-objects/)
 - [SQLite in DOs](https://developers.cloudflare.com/durable-objects/api/sqlite-storage-api/)
+- [Workers AI](https://developers.cloudflare.com/workers-ai/)
 
-### OpenRouter API
-- [API Reference](https://openrouter.ai/docs/api/reference/overview)
-- [Streaming](https://openrouter.ai/docs/api/reference/streaming)
-- [Usage Accounting](https://openrouter.ai/docs/use-cases/usage-accounting)
+### APIs
+- [OpenRouter API](https://openrouter.ai/docs/api/reference/overview)
+- [Hiro API](https://docs.hiro.so/stacks/api)
+- [Tenero API](https://docs.tenero.io/)
 
 ### x402 Protocol
 - [x402 Protocol](https://www.x402.org/)
@@ -146,8 +145,6 @@ log.error("OpenRouter error", { error });
 
 ## Related Projects
 
-**x402 Infrastructure:**
-- `../x402Stacks-sponsor-relay/` - Sponsor relay for gasless transactions
-
-**References:**
-- `~/dev/whoabuddy/worker-logs/` - Universal logging with DOs
+- `~/dev/whoabuddy/worker-logs/` - Universal logging service
+- `~/dev/whoabuddy/stacks-tracker/` - Stacks blockchain tracker (reference patterns)
+- `~/dev/whoabuddy/stx402/` - Production x402 API (source for migration)

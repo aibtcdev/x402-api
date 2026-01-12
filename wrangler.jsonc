@@ -4,39 +4,49 @@
   "main": "src/index.ts",
   "compatibility_date": "2025-01-08",
   // nodejs_compat_v2 includes RPC support for service bindings
-  "compatibility_flags": ["nodejs_compat_v2"],
-
+  "compatibility_flags": [
+    "nodejs_compat_v2"
+  ],
+  "workers_dev": true,
   // Observability for debugging
   "observability": {
     "enabled": true
   },
-
   /**
    * Service Bindings
    * LOGS: Universal logging service (RPC, no API key needed)
    */
   "services": [
-    { "binding": "LOGS", "service": "worker-logs", "entrypoint": "LogsRPC" }
+    {
+      "binding": "LOGS",
+      "service": "worker-logs",
+      "entrypoint": "LogsRPC"
+    }
   ],
-
   /**
    * Durable Objects
    * One DO class per API service for isolated state/rate limiting
    */
   "durable_objects": {
     "bindings": [
-      { "name": "OPENROUTER_DO", "class_name": "OpenRouterDO" }
+      {
+        "name": "OPENROUTER_DO",
+        "class_name": "OpenRouterDO"
+      }
     ]
   },
-
   /**
    * DO Migrations
    * Use new_sqlite_classes for SQLite-backed DOs (usage tracking, rate limits)
    */
   "migrations": [
-    { "tag": "v1", "new_sqlite_classes": ["OpenRouterDO"] }
+    {
+      "tag": "v1",
+      "new_sqlite_classes": [
+        "OpenRouterDO"
+      ]
+    }
   ],
-
   /**
    * Environment Variables
    * Secrets should be set via `wrangler secret put`:
@@ -50,13 +60,17 @@
     // Server address to receive payments (set per environment)
     "X402_SERVER_ADDRESS": ""
   },
-
   /**
    * Environments
    */
   "env": {
     "staging": {
-      "routes": [{ "pattern": "x402-apis.aibtc.dev", "custom_domain": true }],
+      "routes": [
+        {
+          "pattern": "x402-apis.aibtc.dev",
+          "custom_domain": true
+        }
+      ],
       "vars": {
         "ENVIRONMENT": "staging",
         "X402_FACILITATOR_URL": "https://facilitator.x402stacks.xyz",
@@ -64,9 +78,13 @@
         "X402_SERVER_ADDRESS": ""
       }
     },
-
     "production": {
-      "routes": [{ "pattern": "x402-apis.aibtc.com", "custom_domain": true }],
+      "routes": [
+        {
+          "pattern": "x402-apis.aibtc.com",
+          "custom_domain": true
+        }
+      ],
       "vars": {
         "ENVIRONMENT": "production",
         "X402_FACILITATOR_URL": "https://facilitator.x402stacks.xyz",
