@@ -8,6 +8,7 @@
     "nodejs_compat_v2"
   ],
   "workers_dev": true,
+  "preview_urls": true,
   // Observability for debugging
   "observability": {
     "enabled": true
