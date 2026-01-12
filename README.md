@@ -17,8 +17,8 @@ This service acts as an x402-enabled proxy for third-party APIs:
 
 | Environment | Base URL | Network |
 |-------------|----------|---------|
-| **Production** | `https://x402-apis.aibtc.com` | mainnet |
-| **Staging** | `https://x402-apis.aibtc.dev` | testnet |
+| **Production** | `https://x402.aibtc.com` | mainnet |
+| **Staging** | `https://x402.aibtc.dev` | testnet |
 
 ### Global Endpoints
 
@@ -42,7 +42,7 @@ Access 100+ LLM models via [OpenRouter](https://openrouter.ai).
 ### 1. Get Payment Requirements
 
 ```bash
-curl -X POST https://x402-apis.aibtc.com/openrouter/v1/chat/completions \
+curl -X POST https://x402.aibtc.com/openrouter/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
     "model": "openai/gpt-4o-mini",
@@ -72,7 +72,7 @@ Response (HTTP 402):
 Sign the payment transaction with your Stacks wallet and include it in the request:
 
 ```bash
-curl -X POST https://x402-apis.aibtc.com/openrouter/v1/chat/completions \
+curl -X POST https://x402.aibtc.com/openrouter/v1/chat/completions \
   -H "Content-Type: application/json" \
   -H "X-PAYMENT: <signed-transaction-hex>" \
   -d '{
@@ -84,7 +84,7 @@ curl -X POST https://x402-apis.aibtc.com/openrouter/v1/chat/completions \
 ### 3. Check Usage
 
 ```bash
-curl https://x402-apis.aibtc.com/openrouter/usage \
+curl https://x402.aibtc.com/openrouter/usage \
   -H "X-Stacks-Address: SP..."
 ```
 
