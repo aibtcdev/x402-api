@@ -67,7 +67,7 @@
     "staging": {
       "routes": [
         {
-          "pattern": "x402-apis.aibtc.dev",
+          "pattern": "x402.aibtc.dev",
           "custom_domain": true
         }
       ],
@@ -81,7 +81,7 @@
     "production": {
       "routes": [
         {
-          "pattern": "x402-apis.aibtc.com",
+          "pattern": "x402.aibtc.com",
           "custom_domain": true
         }
       ],
