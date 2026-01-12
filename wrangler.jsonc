@@ -90,7 +90,7 @@
         "X402_FACILITATOR_URL": "https://facilitator.x402stacks.xyz",
         "X402_NETWORK": "mainnet",
         "X402_SERVER_ADDRESS": ""
-      }
+      },"name": "x402-api"
     }
   }
 }
