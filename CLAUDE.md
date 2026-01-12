@@ -6,7 +6,7 @@ This file provides guidance to Claude Code when working with this repository.
 
 x402 Stacks API Host - A Cloudflare Worker that exposes APIs on a pay-per-use basis using the x402 protocol. Agents pay per request via Stacks blockchain payments (STX, sBTC, USDCx).
 
-**Status**: Expanding from MVP to full multi-category API. See REQUIREMENTS.md for migration plan.
+**Status**: Multi-category API implemented. See REQUIREMENTS.md for architecture decisions.
 
 ## Commands
 
@@ -35,17 +35,17 @@ npm run deploy:dry-run
 
 > **Pattern**: All aibtc hosted projects follow `{service}.aibtc.com` (prod) / `{service}.aibtc.dev` (staging)
 
-## API Categories (Target)
+## API Categories
 
 | Category | Endpoints | Pricing |
 |----------|-----------|---------|
-| `/inference/openrouter/*` | list-models, chat | Dynamic |
-| `/inference/cloudflare/*` | list-models, chat | Fixed (ai tier) |
+| `/inference/openrouter/*` | models, chat | Dynamic |
+| `/inference/cloudflare/*` | models, chat | Fixed (ai tier) |
 | `/stacks/*` | address, decode, profile, verify | Fixed (simple) |
-| `/hashing/*` | sha256, sha512, keccak256, etc. | Fixed (simple) |
+| `/hashing/*` | sha256, sha512, sha512-256, keccak256, hash160, ripemd160 | Fixed (simple) |
 | `/storage/*` | kv, paste, db, sync, queue, memory | Fixed (storage tiers) |
 
-See REQUIREMENTS.md for full endpoint specifications.
+See `/docs` endpoint for full OpenAPI specification.
 
 ## Architecture
 
@@ -56,29 +56,30 @@ See REQUIREMENTS.md for full endpoint specifications.
 - worker-logs service binding (RPC to wbd.host)
 - Cloudflare AI binding for embeddings
 
-**Project Structure (Target):**
+**Project Structure:**
 ```
 src/
 ├── index.ts                    # Hono app, Chanfana registry, Scalar at /docs
+├── types.ts                    # Shared types and Env interface
 ├── endpoints/
-│   ├── base.ts                 # BaseEndpoint class with pricing strategy
+│   ├── base.ts                 # BaseEndpoint classes with pricing tiers
 │   ├── inference/              # OpenRouter + Cloudflare AI
 │   ├── stacks/                 # Blockchain utilities
 │   ├── hashing/                # Clarity-compatible hashing
-│   └── storage/                # Stateful operations (kv, paste, db, etc.)
+│   └── storage/                # Stateful operations (kv, paste, db, sync, queue, memory)
 ├── middleware/
-│   ├── x402.ts                 # Unified payment (fixed + dynamic)
-│   ├── metrics.ts              # Usage tracking
-│   └── logger.ts               # RPC to wbd.host
+│   └── x402.ts                 # Payment middleware (fixed + dynamic)
 ├── durable-objects/
-│   ├── UsageDO.ts              # Per-payer usage for dashboard
-│   └── StorageDO.ts            # Stateful operations
+│   ├── UsageDO.ts              # Per-payer usage tracking
+│   └── StorageDO.ts            # Per-payer stateful storage
 ├── services/
 │   ├── pricing.ts              # Tier definitions + dynamic estimators
 │   ├── openrouter.ts           # OpenRouter client
 │   ├── hiro.ts                 # Hiro API client
 │   └── tenero.ts               # Tenero API client
-└── types.ts
+└── utils/
+    ├── logger.ts               # Logging utilities
+    └── pricing.ts              # Pricing helpers
 ```
 
 ## Pricing Strategy
@@ -90,6 +91,7 @@ src/
 | `ai` | 0.003 | AI-enhanced operations |
 | `storage_read` | 0.001 | Read from storage |
 | `storage_write` | 0.002 | Write to storage |
+| `storage_write_large` | 0.005 | Large writes (embeddings) |
 
 **Dynamic Pricing (LLM):**
 - Pass-through OpenRouter costs + 20% margin
