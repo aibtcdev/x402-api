@@ -123,7 +123,7 @@ const stacksEndpoints: TestConfig[] = [
     endpoint: `/stacks/address/${FIXTURES.mainnetAddress}`,
     method: "GET",
     validateResponse: (data, tokenType) =>
-      isOk(data) && hasFields(data, ["address", "versions"]) && hasTokenType(data, tokenType),
+      isOk(data) && hasFields(data, ["original", "converted"]) && hasTokenType(data, tokenType),
   },
   {
     name: "decode-clarity",
@@ -131,7 +131,7 @@ const stacksEndpoints: TestConfig[] = [
     method: "POST",
     body: { hex: FIXTURES.clarityHexUint1 },
     validateResponse: (data, tokenType) =>
-      isOk(data) && hasField(data, "decoded") && hasTokenType(data, tokenType),
+      isOk(data) && hasFields(data, ["type", "value"]) && hasTokenType(data, tokenType),
   },
   {
     name: "decode-transaction",
@@ -139,7 +139,7 @@ const stacksEndpoints: TestConfig[] = [
     method: "POST",
     body: { hex: FIXTURES.sampleTxHex },
     validateResponse: (data, tokenType) =>
-      isOk(data) && hasFields(data, ["version", "payload"]) && hasTokenType(data, tokenType),
+      isOk(data) && hasFields(data, ["txType", "sender", "payload"]) && hasTokenType(data, tokenType),
   },
   {
     name: "profile",
@@ -154,8 +154,8 @@ const stacksEndpoints: TestConfig[] = [
     method: "POST",
     body: {
       message: "test message",
-      signature: "0".repeat(130), // Invalid sig, but tests endpoint
-      address: FIXTURES.mainnetAddress,
+      signature: "0".repeat(130), // Invalid sig, but tests endpoint returns valid=false
+      publicKey: "0".repeat(66), // 33-byte compressed pubkey in hex
     },
     validateResponse: (data, tokenType) =>
       isOk(data) && hasField(data, "valid") && hasTokenType(data, tokenType),
@@ -165,10 +165,10 @@ const stacksEndpoints: TestConfig[] = [
     endpoint: "/stacks/verify/sip018",
     method: "POST",
     body: {
-      domain: { name: "test", version: "1" },
-      message: { test: "value" },
-      signature: "0".repeat(130),
-      address: FIXTURES.mainnetAddress,
+      signature: "0".repeat(130), // Invalid sig, but tests endpoint returns valid=false
+      publicKey: "0".repeat(66), // 33-byte compressed pubkey in hex
+      domain: { name: "test", version: "1", chainId: 1 },
+      message: "0x0100000000000000000000000000000001", // Serialized uint 1
     },
     validateResponse: (data, tokenType) =>
       isOk(data) && hasField(data, "valid") && hasTokenType(data, tokenType),
@@ -251,7 +251,7 @@ const pasteEndpoints: TestConfig[] = [
     method: "POST",
     body: { content: "Hello, World! This is a test paste.", language: "text", ttl: 60 },
     validateResponse: (data, tokenType) =>
-      isOk(data) && hasFields(data, ["id", "url"]) && hasTokenType(data, tokenType),
+      isOk(data) && hasFields(data, ["id", "createdAt"]) && hasTokenType(data, tokenType),
   },
   {
     name: "paste-get",
@@ -353,39 +353,39 @@ const queueEndpoints: TestConfig[] = [
     name: "queue-push",
     endpoint: "/storage/queue/push",
     method: "POST",
-    body: { payload: { task: "test" }, priority: 0 },
+    body: { name: "test-queue", items: [{ task: "test" }], priority: 0 },
     validateResponse: (data, tokenType) =>
-      isOk(data) && hasFields(data, ["id", "position"]) && hasTokenType(data, tokenType),
+      isOk(data) && hasField(data, "pushed") && hasTokenType(data, tokenType),
   },
   {
     name: "queue-pop",
     endpoint: "/storage/queue/pop",
     method: "POST",
-    body: { visibility: 60 },
+    body: { name: "test-queue", count: 1 },
     validateResponse: (data, tokenType) =>
-      (isOk(data) && hasField(data, "job")) || hasField(data, "empty") || hasTokenType(data, tokenType),
+      isOk(data) && hasField(data, "items") && hasTokenType(data, tokenType),
   },
   {
     name: "queue-peek",
-    endpoint: "/storage/queue/peek",
+    endpoint: "/storage/queue/peek?name=test-queue",
     method: "GET",
     validateResponse: (data, tokenType) =>
-      (isOk(data) && hasField(data, "job")) || hasField(data, "empty") || hasTokenType(data, tokenType),
+      isOk(data) && hasField(data, "items") && hasTokenType(data, tokenType),
   },
   {
     name: "queue-status",
-    endpoint: "/storage/queue/status",
+    endpoint: "/storage/queue/status?name=test-queue",
     method: "GET",
     validateResponse: (data, tokenType) =>
-      isOk(data) && hasFields(data, ["pending", "processing"]) && hasTokenType(data, tokenType),
+      isOk(data) && hasField(data, "name") && hasTokenType(data, tokenType),
   },
   {
     name: "queue-clear",
     endpoint: "/storage/queue/clear",
     method: "POST",
-    body: {},
+    body: { name: "test-queue" },
     validateResponse: (data, tokenType) =>
-      isOk(data) && hasField(data, "cleared") && hasTokenType(data, tokenType),
+      isOk(data) && hasTokenType(data, tokenType),
   },
 ];
 
@@ -399,12 +399,10 @@ const memoryEndpoints: TestConfig[] = [
     endpoint: "/storage/memory/store",
     method: "POST",
     body: {
-      key: `test-memory-${Date.now()}`,
-      content: "This is a test memory for the API.",
-      metadata: { tags: ["test"], type: "note" },
+      items: [{ id: `test-${Date.now()}`, text: "This is a test memory for the API." }],
     },
     validateResponse: (data, tokenType) =>
-      isOk(data) && hasFields(data, ["key", "stored"]) && hasTokenType(data, tokenType),
+      isOk(data) && hasField(data, "stored") && hasTokenType(data, tokenType),
   },
   {
     name: "memory-search",
@@ -412,22 +410,22 @@ const memoryEndpoints: TestConfig[] = [
     method: "POST",
     body: { query: "test memory", limit: 10 },
     validateResponse: (data, tokenType) =>
-      isOk(data) && hasFields(data, ["results", "count"]) && hasTokenType(data, tokenType),
+      isOk(data) && hasField(data, "results") && hasTokenType(data, tokenType),
   },
   {
     name: "memory-delete",
     endpoint: "/storage/memory/delete",
     method: "POST",
-    body: { key: "nonexistent-memory" },
+    body: { ids: ["nonexistent-memory"] },
     validateResponse: (data, tokenType) =>
-      isOk(data) && hasFields(data, ["deleted", "key"]) && hasTokenType(data, tokenType),
+      isOk(data) && hasField(data, "deleted") && hasTokenType(data, tokenType),
   },
   {
     name: "memory-list",
     endpoint: "/storage/memory/list",
     method: "GET",
     validateResponse: (data, tokenType) =>
-      isOk(data) && hasFields(data, ["memories", "total"]) && hasTokenType(data, tokenType),
+      isOk(data) && hasFields(data, ["items", "total"]) && hasTokenType(data, tokenType),
   },
   {
     name: "memory-clear",
@@ -435,7 +433,7 @@ const memoryEndpoints: TestConfig[] = [
     method: "POST",
     body: {},
     validateResponse: (data, tokenType) =>
-      isOk(data) && hasField(data, "cleared") && hasTokenType(data, tokenType),
+      isOk(data) && hasTokenType(data, tokenType),
   },
 ];
 
