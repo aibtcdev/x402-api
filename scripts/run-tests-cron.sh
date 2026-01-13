@@ -25,9 +25,11 @@ fi
 
 # Configuration - override these in .env if needed
 # X402_NETWORK defaults to testnet for safety
+# URL is derived from network automatically:
+#   testnet  → https://x402.aibtc.dev (staging)
+#   mainnet  → https://x402.aibtc.com (production)
+# Override with X402_WORKER_URL if needed (e.g., for localhost testing)
 export X402_NETWORK="${X402_NETWORK:-testnet}"
-# X402_WORKER_URL defaults to staging
-export X402_WORKER_URL="${X402_WORKER_URL:-https://x402.aibtc.dev}"
 
 # Log directory
 LOG_DIR="logs/test-runs"
@@ -41,7 +43,7 @@ mkdir -p "$LOG_DIR"
 TEMP_LOG=$(mktemp)
 echo "=== Test Run Started: $(date) ===" > "$TEMP_LOG"
 echo "Network: ${X402_NETWORK}" >> "$TEMP_LOG"
-echo "Server: ${X402_WORKER_URL}" >> "$TEMP_LOG"
+echo "Server: (derived from network)" >> "$TEMP_LOG"
 echo "" >> "$TEMP_LOG"
 
 # Run the full test suite

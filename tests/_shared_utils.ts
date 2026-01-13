@@ -17,8 +17,20 @@ export const COLORS = {
 export const X402_CLIENT_PK = process.env.X402_CLIENT_PK;
 export const X402_NETWORK = (process.env.X402_NETWORK || "testnet") as NetworkType;
 
-// Override with X402_WORKER_URL env var for production testing
-export const X402_WORKER_URL = process.env.X402_WORKER_URL || "http://localhost:8787";
+// URL defaults based on network:
+//   testnet  → https://x402.aibtc.dev (staging)
+//   mainnet  → https://x402.aibtc.com (production)
+//   localhost override with X402_WORKER_URL env var
+function getWorkerUrl(): string {
+  if (process.env.X402_WORKER_URL) {
+    return process.env.X402_WORKER_URL;
+  }
+  return X402_NETWORK === "mainnet"
+    ? "https://x402.aibtc.com"
+    : "https://x402.aibtc.dev";
+}
+
+export const X402_WORKER_URL = getWorkerUrl();
 
 export const TEST_TOKENS: TokenType[] = ["STX", "sBTC", "USDCx"];
 
