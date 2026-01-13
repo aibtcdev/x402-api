@@ -14,8 +14,16 @@
    * These are NOT inherited by environments - each env must define its own.
    */
   "kv_namespaces": [
-    { "binding": "METRICS", "id": "3f11905fdf2346a59822bd412601b789", "preview_id": "3f11905fdf2346a59822bd412601b789" },
-    { "binding": "STORAGE", "id": "e53ab39b253041de87dbebf2fedbb6b3", "preview_id": "e53ab39b253041de87dbebf2fedbb6b3" }
+    {
+      "binding": "METRICS",
+      "id": "3f11905fdf2346a59822bd412601b789",
+      "preview_id": "3f11905fdf2346a59822bd412601b789"
+    },
+    {
+      "binding": "STORAGE",
+      "id": "e53ab39b253041de87dbebf2fedbb6b3",
+      "preview_id": "e53ab39b253041de87dbebf2fedbb6b3"
+    }
   ],
   "ai": { "binding": "AI" },
   "durable_objects": {
@@ -31,7 +39,7 @@
   ],
   "vars": {
     "ENVIRONMENT": "development",
-    "X402_FACILITATOR_URL": "https://facilitator.x402stacks.xyz",
+    "X402_FACILITATOR_URL": "https://facilitator.stacksx402.com",
     "X402_NETWORK": "testnet",
     "X402_SERVER_ADDRESS": "ST37NMC4HGFQ1H2JSFP4H3TMNQBF4PY0MVSD1GV7Z"
   },
@@ -53,7 +61,7 @@
       "observability": { "enabled": true },
       "vars": {
         "ENVIRONMENT": "staging",
-        "X402_FACILITATOR_URL": "https://facilitator.x402stacks.xyz",
+        "X402_FACILITATOR_URL": "https://facilitator.stacksx402.com",
         "X402_NETWORK": "testnet",
         "X402_SERVER_ADDRESS": "ST37NMC4HGFQ1H2JSFP4H3TMNQBF4PY0MVSD1GV7Z"
       },
@@ -78,7 +86,7 @@
       "observability": { "enabled": true },
       "vars": {
         "ENVIRONMENT": "production",
-        "X402_FACILITATOR_URL": "https://facilitator.x402stacks.xyz",
+        "X402_FACILITATOR_URL": "https://facilitator.stacksx402.com",
         "X402_NETWORK": "mainnet",
         "X402_SERVER_ADDRESS": "SP37NMC4HGFQ1H2JSFP4H3TMNQBF4PY0MVRHQXGQE"
       },
