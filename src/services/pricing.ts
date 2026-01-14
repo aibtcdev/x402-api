@@ -178,22 +178,43 @@ export function estimateInputTokens(messages: ChatCompletionRequest["messages"])
 }
 
 /**
+ * Minimum amounts in base units (to avoid sub-unit truncation to 0)
+ * These represent ~$0.001 USD floor to ensure payment is non-zero
+ */
+const MIN_TOKEN_AMOUNTS: Record<TokenType, bigint> = {
+  STX: BigInt(1000),    // 0.001 STX (1000 microSTX)
+  sBTC: BigInt(1),      // 1 satoshi (~$0.001 at $100k BTC)
+  USDCx: BigInt(1000),  // 0.001 USDCx (1000 microUSDCx)
+};
+
+/**
  * Convert USD to token amount
  */
 export function usdToTokenAmount(usd: number, tokenType: TokenType): bigint {
   const rate = TOKEN_RATES[tokenType];
   const tokenAmount = usd / rate;
 
+  let result: bigint;
   switch (tokenType) {
     case "STX":
-      return STXtoMicroSTX(tokenAmount.toFixed(6));
+      result = STXtoMicroSTX(tokenAmount.toFixed(6));
+      break;
     case "sBTC":
-      return BTCtoSats(tokenAmount);
+      result = BTCtoSats(tokenAmount);
+      break;
     case "USDCx":
-      return USDCxToMicroUSDCx(tokenAmount);
+      result = USDCxToMicroUSDCx(tokenAmount);
+      break;
     default:
       throw new Error(`Unknown token type: ${tokenType}`);
   }
+
+  // Ensure minimum amount (avoid truncation to 0)
+  const minAmount = MIN_TOKEN_AMOUNTS[tokenType];
+  if (result < minAmount) {
+    return minAmount;
+  }
+  return result;
 }
 
 /**
