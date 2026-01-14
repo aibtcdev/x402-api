@@ -53,11 +53,11 @@ import {
 
 // Import lifecycle test runners
 import { runKvLifecycle } from "./kv-lifecycle.test";
-// import { runPasteLifecycle } from "./paste-lifecycle.test";
-// import { runDbLifecycle } from "./db-lifecycle.test";
-// import { runSyncLifecycle } from "./sync-lifecycle.test";
-// import { runQueueLifecycle } from "./queue-lifecycle.test";
-// import { runMemoryLifecycle } from "./memory-lifecycle.test";
+import { runPasteLifecycle } from "./paste-lifecycle.test";
+import { runDbLifecycle } from "./db-lifecycle.test";
+import { runSyncLifecycle } from "./sync-lifecycle.test";
+import { runQueueLifecycle } from "./queue-lifecycle.test";
+import { runMemoryLifecycle } from "./memory-lifecycle.test";
 
 // =============================================================================
 // Lifecycle Test Mapping (add as lifecycle tests are created)
@@ -68,12 +68,11 @@ const LIFECYCLE_RUNNERS: Record<
   (verbose?: boolean) => Promise<{ passed: number; total: number; success: boolean }>
 > = {
   kv: runKvLifecycle,
-  // Uncomment as lifecycle tests are added:
-  // paste: runPasteLifecycle,
-  // db: runDbLifecycle,
-  // sync: runSyncLifecycle,
-  // queue: runQueueLifecycle,
-  // memory: runMemoryLifecycle,
+  paste: runPasteLifecycle,
+  db: runDbLifecycle,
+  sync: runSyncLifecycle,
+  queue: runQueueLifecycle,
+  memory: runMemoryLifecycle,
 };
 
 // =============================================================================

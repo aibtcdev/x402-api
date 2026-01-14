@@ -75,7 +75,7 @@ export class Dashboard extends OpenAPIRoute {
       };
     }
 
-    const html = generateDashboardHTML(dashboardData, c.env.ENVIRONMENT);
+    const html = generateDashboardHTML(dashboardData, c.env.X402_NETWORK);
     return c.html(html);
   }
 }
@@ -218,8 +218,8 @@ function generateDashboardHTML(data: DashboardData, environment: string): string
     }
     h1 .accent { color: var(--accent); }
     .env-badge {
-      background: ${environment === "production" ? "#166534" : "#1e3a5f"};
-      color: ${environment === "production" ? "#4ade80" : "#60a5fa"};
+      background: ${environment === "mainnet" ? "#166534" : "#1e3a5f"};
+      color: ${environment === "mainnet" ? "#4ade80" : "#60a5fa"};
       padding: 6px 12px;
       border-radius: 6px;
       font-size: 12px;
