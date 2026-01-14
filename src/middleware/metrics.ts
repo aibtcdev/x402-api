@@ -90,7 +90,7 @@ function getMetricsDO(env: Env) {
  *
  * @example
  * ```ts
- * app.post("/hashing/sha256", metricsMiddleware({ tier: "simple", category: "hashing" }), handler);
+ * app.post("/hashing/sha256", metricsMiddleware({ tier: "standard", category: "hashing" }), handler);
  * ```
  */
 export function metricsMiddleware(
@@ -184,29 +184,20 @@ export function metricsMiddleware(
 // Convenience Middleware Creators
 // =============================================================================
 
-/** Metrics for simple tier endpoints */
-export const metricsSimple = (category: string) =>
-  metricsMiddleware({ tier: "simple", category });
-
-/** Metrics for AI tier endpoints */
-export const metricsAI = (category: string) =>
-  metricsMiddleware({ tier: "ai", category });
-
-/** Metrics for storage read endpoints */
-export const metricsStorageRead = (category: string) =>
-  metricsMiddleware({ tier: "storage_read", category });
-
-/** Metrics for storage write endpoints */
-export const metricsStorageWrite = (category: string) =>
-  metricsMiddleware({ tier: "storage_write", category });
-
-/** Metrics for large storage write endpoints */
-export const metricsStorageWriteLarge = (category: string) =>
-  metricsMiddleware({ tier: "storage_write_large", category });
+/** Metrics for standard tier endpoints */
+export const metricsStandard = (category: string) =>
+  metricsMiddleware({ tier: "standard", category });
 
 /** Metrics for dynamic pricing (LLM) endpoints */
 export const metricsDynamic = (category: string) =>
   metricsMiddleware({ tier: "dynamic", category });
+
+// Aliases for backwards compatibility
+export const metricsSimple = metricsStandard;
+export const metricsAI = metricsStandard;
+export const metricsStorageRead = metricsStandard;
+export const metricsStorageWrite = metricsStandard;
+export const metricsStorageWriteLarge = metricsStandard;
 
 // =============================================================================
 // Dashboard Data Fetcher

@@ -24,6 +24,16 @@ npm run check
 npm run deploy:dry-run
 
 # DO NOT run npm run deploy - commit and push for automatic deployment
+
+# Testing (requires X402_CLIENT_PK env var with testnet mnemonic)
+npm test              # Quick mode - stateless endpoints, STX only
+npm run test:full     # Full mode - includes lifecycle tests
+npm run test:verbose  # With debug output
+npm run test:kv       # Just KV lifecycle test
+
+# Filter tests
+bun run tests/_run_all_tests.ts --category=hashing
+bun run tests/_run_all_tests.ts --filter=sha256 --all-tokens
 ```
 
 ## Domains
@@ -71,7 +81,8 @@ src/
 │   └── x402.ts                 # Payment middleware (fixed + dynamic)
 ├── durable-objects/
 │   ├── UsageDO.ts              # Per-payer usage tracking
-│   └── StorageDO.ts            # Per-payer stateful storage
+│   ├── StorageDO.ts            # Per-payer stateful storage
+│   └── MetricsDO.ts            # Global metrics tracking
 ├── services/
 │   ├── pricing.ts              # Tier definitions + dynamic estimators
 │   ├── openrouter.ts           # OpenRouter client
@@ -79,7 +90,18 @@ src/
 │   └── tenero.ts               # Tenero API client
 └── utils/
     ├── logger.ts               # Logging utilities
-    └── pricing.ts              # Pricing helpers
+    ├── pricing.ts              # Pricing helpers
+    └── wallet.ts               # Wallet derivation for tests
+
+tests/
+├── _shared_utils.ts            # Colors, env vars, test logger
+├── _test_generator.ts          # TestConfig interface, X402 payment flow
+├── _run_all_tests.ts           # Main CLI runner with modes, filtering
+├── endpoint-registry.ts        # All endpoint configs with validation
+└── kv-lifecycle.test.ts        # KV storage lifecycle test
+
+scripts/
+└── run-tests-cron.sh           # Cron wrapper for automated test runs
 ```
 
 ## Pricing Strategy
@@ -116,6 +138,58 @@ src/
 - `X402_SERVER_ADDRESS` - Stacks address to receive payments
 - `X402_NETWORK` - `mainnet` or `testnet`
 - `X402_FACILITATOR_URL` - x402 facilitator endpoint
+
+**Test Environment Variables:**
+- `X402_CLIENT_PK` - Testnet mnemonic for payment signing (required)
+- `X402_WORKER_URL` - Target URL (default: http://localhost:8787)
+- `VERBOSE` - Enable debug output (1 = enabled)
+- `TEST_DELAY_MS` - Delay between tests (default: 500)
+- `TEST_MAX_RETRIES` - Retries for rate limits (default: 3)
+
+## Testing
+
+E2E tests that execute the full x402 payment flow against live endpoints.
+
+**Test Categories:**
+| Category | Endpoints | Type |
+|----------|-----------|------|
+| hashing | 6 | Stateless |
+| stacks | 6 | Stateless |
+| inference | 2 (free) | Stateless |
+| kv | 4 | Stateful (lifecycle) |
+| paste | 3 | Stateful (lifecycle) |
+| db | 3 | Stateful (lifecycle) |
+| sync | 5 | Stateful (lifecycle) |
+| queue | 5 | Stateful (lifecycle) |
+| memory | 5 | Stateful (lifecycle) |
+
+**Adding Lifecycle Tests:**
+1. Copy `tests/kv-lifecycle.test.ts` as template
+2. Implement CRUD operations for the category
+3. Export `run{Category}Lifecycle` function
+4. Import and add to `LIFECYCLE_RUNNERS` in `_run_all_tests.ts`
+
+**Test Pattern:**
+```typescript
+// Stateless: single request/response validation
+const config: TestConfig = {
+  name: "sha256",
+  endpoint: "/hashing/sha256",
+  method: "POST",
+  body: { data: "test" },
+  validateResponse: (data, tokenType) =>
+    data.ok && data.hash && data.tokenType === tokenType,
+};
+
+// Lifecycle: full CRUD cycle with cleanup
+export async function runKvLifecycle(verbose = false) {
+  // 1. Create resource
+  // 2. Read back and verify
+  // 3. List and find
+  // 4. Delete
+  // 5. Verify deletion
+}
+```
 
 ## Reference Patterns
 

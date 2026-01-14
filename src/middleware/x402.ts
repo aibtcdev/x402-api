@@ -184,7 +184,7 @@ function classifyPaymentError(error: unknown, settleResult?: SettlePaymentResult
  *
  * @example Fixed tier pricing:
  * ```ts
- * app.post("/hash/sha256", x402Middleware({ tier: "simple" }), handleHash);
+ * app.post("/hash/sha256", x402Middleware({ tier: "standard" }), handleHash);
  * ```
  *
  * @example Dynamic pricing for LLM:
@@ -195,7 +195,7 @@ function classifyPaymentError(error: unknown, settleResult?: SettlePaymentResult
 export function x402Middleware(
   options: X402MiddlewareOptions = {}
 ): MiddlewareHandler<{ Bindings: Env; Variables: AppVariables }> {
-  const { tier = "simple", dynamic = false, estimator } = options;
+  const { tier = "standard", dynamic = false, estimator } = options;
 
   return async (c, next) => {
     const log = c.var.logger;
@@ -417,23 +417,15 @@ export function getX402Context(
 // Convenience Middleware Creators
 // =============================================================================
 
-/** Simple compute endpoints (0.001 STX) */
-export const x402Simple = () => x402Middleware({ tier: "simple" });
+/** Standard paid endpoints (0.001 STX) */
+export const x402Standard = () => x402Middleware({ tier: "standard" });
 
-/** AI-enhanced endpoints (0.003 STX) */
-export const x402AI = () => x402Middleware({ tier: "ai" });
-
-/** Heavy AI endpoints (0.01 STX) */
-export const x402HeavyAI = () => x402Middleware({ tier: "heavy_ai" });
-
-/** Storage read endpoints (0.001 STX) */
-export const x402StorageRead = () => x402Middleware({ tier: "storage_read" });
-
-/** Storage write endpoints (0.002 STX) */
-export const x402StorageWrite = () => x402Middleware({ tier: "storage_write" });
-
-/** Large storage write endpoints (0.005 STX) */
-export const x402StorageWriteLarge = () => x402Middleware({ tier: "storage_write_large" });
-
-/** Dynamic pricing for LLM endpoints */
+/** Dynamic pricing for LLM endpoints (pass-through + 20%) */
 export const x402Dynamic = () => x402Middleware({ dynamic: true });
+
+// Aliases for backwards compatibility
+export const x402Simple = x402Standard;
+export const x402AI = x402Standard;
+export const x402StorageRead = x402Standard;
+export const x402StorageWrite = x402Standard;
+export const x402StorageWriteLarge = x402Standard;

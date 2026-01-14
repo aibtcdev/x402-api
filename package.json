@@ -9,16 +9,26 @@
     "deploy:dry-run": "npm run wrangler -- deploy --dry-run",
     "check": "tsc --noEmit",
     "wrangler": "set -a && . ./.env && set +a && npx wrangler",
-    "cf-typegen": "npm run wrangler -- types"
+    "cf-typegen": "npm run wrangler -- types",
+    "test": "bun run tests/_run_all_tests.ts",
+    "test:setup": "bun run tests/check-setup.ts",
+    "test:quick": "bun run tests/_run_all_tests.ts --mode=quick",
+    "test:full": "bun run tests/_run_all_tests.ts --mode=full",
+    "test:category": "bun run tests/_run_all_tests.ts --category",
+    "test:kv": "bun run tests/kv-lifecycle.test.ts",
+    "test:verbose": "VERBOSE=1 bun run tests/_run_all_tests.ts"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20260109.0",
+    "@types/bun": "^1.2.0",
     "typescript": "^5.9.3",
     "wrangler": "^4.58.0"
   },
   "dependencies": {
     "@stacks/encryption": "^7.3.1",
+    "@stacks/network": "^7.3.1",
     "@stacks/transactions": "^7.3.1",
+    "@stacks/wallet-sdk": "^7.2.0",
     "chanfana": "^3.0.0",
     "hono": "^4.11.3",
     "openai": "^6.15.0",

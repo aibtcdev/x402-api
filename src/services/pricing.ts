@@ -37,7 +37,7 @@ const TOKENS_PER_CHAR = 0.25;
 
 /**
  * Fixed pricing tiers in STX
- * These are the base prices - USD equivalents are for display only
+ * Simplified: free, standard (0.001 STX), dynamic (LLM pass-through + 20%)
  */
 export const TIER_PRICING: Record<PricingTier, TierPricing> = {
   free: {
@@ -45,40 +45,15 @@ export const TIER_PRICING: Record<PricingTier, TierPricing> = {
     usd: 0,
     description: "Free endpoint",
   },
-  simple: {
+  standard: {
     stx: 0.001,
     usd: 0.0005,
-    description: "Basic compute (hashing, conversion)",
-  },
-  ai: {
-    stx: 0.003,
-    usd: 0.0015,
-    description: "AI-enhanced operations",
-  },
-  heavy_ai: {
-    stx: 0.01,
-    usd: 0.005,
-    description: "Heavy AI workloads",
-  },
-  storage_read: {
-    stx: 0.001,
-    usd: 0.0005,
-    description: "Read from storage",
-  },
-  storage_write: {
-    stx: 0.002,
-    usd: 0.001,
-    description: "Write to storage",
-  },
-  storage_write_large: {
-    stx: 0.005,
-    usd: 0.0025,
-    description: "Large writes (paste, memory)",
+    description: "Standard paid endpoint",
   },
   dynamic: {
     stx: 0,
     usd: 0,
-    description: "Dynamic pricing based on usage",
+    description: "Dynamic pricing (LLM pass-through + 20%)",
   },
 };
 

@@ -39,6 +39,50 @@ npm run check    # Type check
 
 > **Note**: Do not run `npm run deploy` directly. Commit and push for automatic deployment.
 
+## Testing
+
+E2E payment tests against live endpoints using the x402 protocol.
+
+### Setup
+
+```bash
+# Copy and configure environment
+cp .env.example .env
+
+# Set your testnet mnemonic (NEVER use mainnet funds!)
+export X402_CLIENT_PK="your twelve word testnet mnemonic"
+
+# Optional: target staging instead of localhost
+export X402_WORKER_URL=https://x402.aibtc.dev
+```
+
+### Run Tests
+
+```bash
+npm test              # Quick mode - stateless endpoints, STX only
+npm run test:full     # Full mode - includes lifecycle tests
+npm run test:verbose  # With debug output
+npm run test:kv       # Just KV lifecycle test
+
+# Filter by category or name
+bun run tests/_run_all_tests.ts --category=hashing
+bun run tests/_run_all_tests.ts --filter=sha256 --all-tokens
+```
+
+### Test Modes
+
+| Mode | Description |
+|------|-------------|
+| `quick` | Stateless endpoints only (hashing, stacks, inference) |
+| `full` | Stateless + lifecycle tests for stateful endpoints |
+
+### Automated Testing
+
+```bash
+# Cron job (runs hourly, logs only on failure)
+0 * * * * /path/to/x402-api/scripts/run-tests-cron.sh
+```
+
 ## License
 
 MIT

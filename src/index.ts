@@ -11,9 +11,8 @@ import { cors } from "hono/cors";
 import type { Env, AppContext, AppVariables, TokenType, PricingTier } from "./types";
 import type { MetricsRecord } from "./durable-objects/MetricsDO";
 import { TIER_PRICING } from "./services/pricing";
-
-// Note: x402 middleware is applied via endpoint base classes (SimpleEndpoint, AIEndpoint, etc.)
-// Direct middleware imports available if needed: x402Simple, x402AI, x402StorageRead, etc.
+import { loggerMiddleware } from "./utils/logger";
+import { x402Middleware } from "./middleware/x402";
 
 // Inference endpoints
 import { OpenRouterListModels, OpenRouterChat } from "./endpoints/inference/openrouter";
@@ -98,55 +97,52 @@ app.use(
   })
 );
 
+// Logger middleware (must be before x402)
+app.use("*", loggerMiddleware);
+
 // =============================================================================
-// Global Metrics Middleware
+// Endpoint Configuration (used by x402 and metrics middleware)
 // =============================================================================
 
-// Endpoint to tier/category mapping for metrics
 const ENDPOINT_CONFIG: Record<string, { tier: PricingTier; category: string }> = {
-  // Inference
+  // Inference - dynamic pricing for OpenRouter, standard for Cloudflare
   "/inference/openrouter/chat": { tier: "dynamic", category: "inference" },
-  "/inference/cloudflare/chat": { tier: "ai", category: "inference" },
+  "/inference/cloudflare/chat": { tier: "standard", category: "inference" },
   // Stacks
-  "/stacks/address": { tier: "simple", category: "stacks" },
-  "/stacks/decode/clarity": { tier: "simple", category: "stacks" },
-  "/stacks/decode/transaction": { tier: "simple", category: "stacks" },
-  "/stacks/profile": { tier: "simple", category: "stacks" },
-  "/stacks/verify/message": { tier: "simple", category: "stacks" },
-  "/stacks/verify/sip018": { tier: "simple", category: "stacks" },
+  "/stacks/address": { tier: "standard", category: "stacks" },
+  "/stacks/decode/clarity": { tier: "standard", category: "stacks" },
+  "/stacks/decode/transaction": { tier: "standard", category: "stacks" },
+  "/stacks/profile": { tier: "standard", category: "stacks" },
+  "/stacks/verify/message": { tier: "standard", category: "stacks" },
+  "/stacks/verify/sip018": { tier: "standard", category: "stacks" },
   // Hashing
-  "/hashing/sha256": { tier: "simple", category: "hashing" },
-  "/hashing/sha512": { tier: "simple", category: "hashing" },
-  "/hashing/sha512-256": { tier: "simple", category: "hashing" },
-  "/hashing/keccak256": { tier: "simple", category: "hashing" },
-  "/hashing/hash160": { tier: "simple", category: "hashing" },
-  "/hashing/ripemd160": { tier: "simple", category: "hashing" },
-  // Storage - KV
-  "/storage/kv": { tier: "storage_read", category: "storage" },
-  // Storage - Paste
-  "/storage/paste": { tier: "storage_write", category: "storage" },
-  // Storage - DB
-  "/storage/db/query": { tier: "storage_read", category: "storage" },
-  "/storage/db/execute": { tier: "storage_write", category: "storage" },
-  "/storage/db/schema": { tier: "storage_read", category: "storage" },
-  // Storage - Sync
-  "/storage/sync/lock": { tier: "storage_write", category: "storage" },
-  "/storage/sync/unlock": { tier: "storage_write", category: "storage" },
-  "/storage/sync/extend": { tier: "storage_write", category: "storage" },
-  "/storage/sync/status": { tier: "storage_read", category: "storage" },
-  "/storage/sync/list": { tier: "storage_read", category: "storage" },
-  // Storage - Queue
-  "/storage/queue/push": { tier: "storage_write", category: "storage" },
-  "/storage/queue/pop": { tier: "storage_write", category: "storage" },
-  "/storage/queue/peek": { tier: "storage_read", category: "storage" },
-  "/storage/queue/status": { tier: "storage_read", category: "storage" },
-  "/storage/queue/clear": { tier: "storage_write", category: "storage" },
-  // Storage - Memory
-  "/storage/memory/store": { tier: "storage_write_large", category: "storage" },
-  "/storage/memory/search": { tier: "storage_read", category: "storage" },
-  "/storage/memory/delete": { tier: "storage_write", category: "storage" },
-  "/storage/memory/list": { tier: "storage_read", category: "storage" },
-  "/storage/memory/clear": { tier: "storage_write", category: "storage" },
+  "/hashing/sha256": { tier: "standard", category: "hashing" },
+  "/hashing/sha512": { tier: "standard", category: "hashing" },
+  "/hashing/sha512-256": { tier: "standard", category: "hashing" },
+  "/hashing/keccak256": { tier: "standard", category: "hashing" },
+  "/hashing/hash160": { tier: "standard", category: "hashing" },
+  "/hashing/ripemd160": { tier: "standard", category: "hashing" },
+  // Storage - all standard
+  "/storage/kv": { tier: "standard", category: "storage" },
+  "/storage/paste": { tier: "standard", category: "storage" },
+  "/storage/db/query": { tier: "standard", category: "storage" },
+  "/storage/db/execute": { tier: "standard", category: "storage" },
+  "/storage/db/schema": { tier: "standard", category: "storage" },
+  "/storage/sync/lock": { tier: "standard", category: "storage" },
+  "/storage/sync/unlock": { tier: "standard", category: "storage" },
+  "/storage/sync/extend": { tier: "standard", category: "storage" },
+  "/storage/sync/status": { tier: "standard", category: "storage" },
+  "/storage/sync/list": { tier: "standard", category: "storage" },
+  "/storage/queue/push": { tier: "standard", category: "storage" },
+  "/storage/queue/pop": { tier: "standard", category: "storage" },
+  "/storage/queue/peek": { tier: "standard", category: "storage" },
+  "/storage/queue/status": { tier: "standard", category: "storage" },
+  "/storage/queue/clear": { tier: "standard", category: "storage" },
+  "/storage/memory/store": { tier: "standard", category: "storage" },
+  "/storage/memory/search": { tier: "standard", category: "storage" },
+  "/storage/memory/delete": { tier: "standard", category: "storage" },
+  "/storage/memory/list": { tier: "standard", category: "storage" },
+  "/storage/memory/clear": { tier: "standard", category: "storage" },
 };
 
 function normalizeEndpoint(path: string): string {
@@ -170,7 +166,7 @@ function getEndpointConfig(path: string): { tier: PricingTier; category: string 
   }
 
   // Default
-  return { tier: "simple", category: "other" };
+  return { tier: "standard", category: "other" };
 }
 
 function getAmountCharged(tier: PricingTier, tokenType: TokenType): number {
@@ -198,6 +194,56 @@ function classifyError(statusCode: number): string {
   if (statusCode >= 400) return "client_error";
   return "unknown";
 }
+
+// =============================================================================
+// x402 Payment Middleware
+// =============================================================================
+
+// Routes that don't require payment
+const FREE_ROUTES = new Set(["/", "/health", "/docs", "/openapi.json", "/dashboard"]);
+
+// Free endpoints (model listings)
+const FREE_ENDPOINTS = new Set([
+  "/inference/openrouter/models",
+  "/inference/cloudflare/models",
+]);
+
+// Unified x402 payment middleware
+app.use("*", async (c, next) => {
+  const path = c.req.path;
+
+  // Skip free routes
+  if (FREE_ROUTES.has(path) || FREE_ENDPOINTS.has(path)) {
+    return next();
+  }
+
+  // Skip if no x402 config (local dev without payment setup)
+  if (!c.env.X402_SERVER_ADDRESS) {
+    c.var.logger.warn("X402_SERVER_ADDRESS not configured, skipping payment verification");
+    return next();
+  }
+
+  // Get tier from endpoint config
+  const { tier } = getEndpointConfig(path);
+
+  // Skip free tier
+  if (tier === "free") {
+    return next();
+  }
+
+  // Apply x402 middleware based on tier
+  const isDynamic = tier === "dynamic";
+  const middleware = x402Middleware({
+    tier: isDynamic ? "standard" : tier,
+    dynamic: isDynamic,
+  });
+
+  return middleware(c, next);
+});
+
+// =============================================================================
+// Global Metrics Middleware
+// =============================================================================
 
 // Global metrics tracking middleware
 app.use("*", async (c, next) => {
@@ -291,16 +337,12 @@ Pay-per-use API powered by x402 protocol on Stacks blockchain.
 All paid endpoints require an \`X-PAYMENT\` header with a signed Stacks transaction.
 Optionally specify token via \`X-PAYMENT-TOKEN-TYPE\` (STX, sBTC, USDCx).
 
-## Pricing Tiers
+## Pricing
 | Tier | STX | Description |
 |------|-----|-------------|
-| free | 0 | No payment required |
-| simple | 0.001 | Basic compute (hashing, conversion) |
-| ai | 0.003 | AI-enhanced operations |
-| storage_read | 0.001 | Read from storage |
-| storage_write | 0.002 | Write to storage |
-| storage_write_large | 0.005 | Large writes (embeddings) |
-| dynamic | varies | LLM costs + 20% margin |
+| free | 0 | Model listings, health, docs |
+| standard | 0.001 | All paid endpoints |
+| dynamic | varies | OpenRouter LLM (pass-through + 20%) |
       `.trim(),
     },
     tags: [

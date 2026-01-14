@@ -30,7 +30,7 @@ export class BaseEndpoint extends OpenAPIRoute {
    * Pricing tier for this endpoint
    * Override in subclasses to set the tier
    */
-  protected readonly pricingTier: PricingTier = "simple";
+  protected readonly pricingTier: PricingTier = "standard";
 
   /**
    * Get the token type from request (query param or header)
@@ -197,36 +197,15 @@ export class FreeEndpoint extends BaseEndpoint {
 }
 
 /**
- * Base class for simple compute endpoints
+ * Base class for standard paid endpoints (0.001 STX)
  */
-export class SimpleEndpoint extends BaseEndpoint {
-  protected readonly pricingTier: PricingTier = "simple";
+export class StandardEndpoint extends BaseEndpoint {
+  protected readonly pricingTier: PricingTier = "standard";
 }
 
-/**
- * Base class for AI-enhanced endpoints
- */
-export class AIEndpoint extends BaseEndpoint {
-  protected readonly pricingTier: PricingTier = "ai";
-}
-
-/**
- * Base class for storage read endpoints
- */
-export class StorageReadEndpoint extends BaseEndpoint {
-  protected readonly pricingTier: PricingTier = "storage_read";
-}
-
-/**
- * Base class for storage write endpoints
- */
-export class StorageWriteEndpoint extends BaseEndpoint {
-  protected readonly pricingTier: PricingTier = "storage_write";
-}
-
-/**
- * Base class for large storage write endpoints
- */
-export class StorageWriteLargeEndpoint extends BaseEndpoint {
-  protected readonly pricingTier: PricingTier = "storage_write_large";
-}
+// Aliases for backwards compatibility and semantic clarity
+export const SimpleEndpoint = StandardEndpoint;
+export const AIEndpoint = StandardEndpoint;
+export const StorageReadEndpoint = StandardEndpoint;
+export const StorageWriteEndpoint = StandardEndpoint;
+export const StorageWriteLargeEndpoint = StandardEndpoint;
