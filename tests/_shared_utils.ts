@@ -47,6 +47,69 @@ export const DEFAULT_TEST_DELAY_MS = 500;
 /** Small delay after lifecycle tests before continuing */
 export const POST_LIFECYCLE_DELAY_MS = 100;
 
+/** Default max retries for network errors */
+export const DEFAULT_MAX_RETRIES = 3;
+
+/** Sleep helper */
+export const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/**
+ * Error codes that should trigger a retry
+ */
+export const RETRYABLE_ERROR_CODES = [
+  "NETWORK_ERROR",
+  "FACILITATOR_UNAVAILABLE",
+  "FACILITATOR_ERROR",
+  "UNKNOWN_ERROR",
+];
+
+/**
+ * HTTP status codes that should trigger a retry
+ */
+export const RETRYABLE_STATUS_CODES = [429, 500, 502, 503, 504];
+
+/**
+ * Check if an error should be retried based on status, error code, or error message
+ */
+export function isRetryableError(
+  status: number,
+  errorCode?: string,
+  errorMessage?: string
+): boolean {
+  if (RETRYABLE_STATUS_CODES.includes(status)) return true;
+
+  if (errorCode && RETRYABLE_ERROR_CODES.includes(errorCode)) return true;
+
+  if (errorMessage) {
+    const lowerMsg = errorMessage.toLowerCase();
+    const retryablePatterns = [
+      "429",
+      "rate limit",
+      "too many requests",
+      "settle",
+      "failed",
+      "timeout",
+      "temporarily",
+      "try again",
+      "network error",
+    ];
+    if (retryablePatterns.some((pattern) => lowerMsg.includes(pattern))) return true;
+  }
+
+  return false;
+}
+
+/**
+ * Calculate backoff delay with exponential growth capped at 10 seconds
+ */
+export function calculateBackoff(attempt: number, retryAfterSecs?: number): number {
+  const backoffMs = Math.min(1000 * Math.pow(2, attempt), 10000);
+  if (retryAfterSecs && retryAfterSecs > 0) {
+    return Math.max(retryAfterSecs * 1000, backoffMs);
+  }
+  return backoffMs;
+}
+
 /** Helper to generate unique test IDs (timestamp + random) */
 export function generateTestId(prefix = "test"): string {
   return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
