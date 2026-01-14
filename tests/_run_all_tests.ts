@@ -46,6 +46,9 @@ import {
   createTestLogger,
   DEFAULT_TEST_DELAY_MS,
   POST_LIFECYCLE_DELAY_MS,
+  isRetryableError,
+  calculateBackoff,
+  sleep,
 } from "./_shared_utils";
 
 // Import lifecycle test runners
@@ -217,41 +220,6 @@ function parseArgs(): RunConfig {
 }
 
 // =============================================================================
-// Helpers
-// =============================================================================
-
-const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
-
-function isRetryableError(status: number, errorCode?: string, errorMessage?: string): boolean {
-  if ([429, 500, 502, 503, 504].includes(status)) return true;
-
-  const retryableCodes = [
-    "NETWORK_ERROR",
-    "FACILITATOR_UNAVAILABLE",
-    "FACILITATOR_ERROR",
-    "UNKNOWN_ERROR",
-  ];
-  if (errorCode && retryableCodes.includes(errorCode)) return true;
-
-  if (errorMessage) {
-    const lowerMsg = errorMessage.toLowerCase();
-    const retryablePatterns = [
-      "429",
-      "rate limit",
-      "too many requests",
-      "settle",
-      "failed",
-      "timeout",
-      "temporarily",
-      "try again",
-    ];
-    if (retryablePatterns.some((pattern) => lowerMsg.includes(pattern))) return true;
-  }
-
-  return false;
-}
-
-// =============================================================================
 // X402 Payment Flow
 // =============================================================================
 
@@ -383,9 +351,7 @@ async function testEndpointWithToken(
 
       if (isRetryableError(retryRes.status, errorCode, errorMessage || errText) && attempt < maxRetries) {
         const retryAfterSecs = retryAfterHeader ? parseInt(retryAfterHeader, 10) : bodyRetryAfter || 0;
-        const backoffMs = Math.min(1000 * Math.pow(2, attempt), 10000);
-        // Respect server's retryAfter if larger than our backoff (don't retry too early)
-        const delayMs = retryAfterSecs > 0 ? Math.max(retryAfterSecs * 1000, backoffMs) : backoffMs;
+        const delayMs = calculateBackoff(attempt, retryAfterSecs);
 
         const errorSummary = errorMessage || errorCode || errText.slice(0, 100);
         const errorType = retryRes.status === 429 ? "Rate limited" : `Server error`;

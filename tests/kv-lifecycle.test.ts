@@ -20,6 +20,13 @@ import {
   createTestLogger,
   STEP_DELAY_MS,
   generateTestId,
+  DEFAULT_MAX_RETRIES,
+  isRetryableError,
+  calculateBackoff,
+  sleep,
+  isTerminalStatus,
+  parseErrorResponse,
+  parseResponseData,
 } from "./_shared_utils";
 
 interface X402PaymentRequired {
@@ -47,24 +54,67 @@ async function makeX402Request(
   method: "GET" | "POST" | "DELETE",
   body: JsonBody | undefined,
   tokenType: TokenType,
-  logger: ReturnType<typeof createTestLogger>
+  logger: ReturnType<typeof createTestLogger>,
+  maxRetries: number = DEFAULT_MAX_RETRIES
 ): Promise<{ status: number; data: unknown }> {
   const url = `${X402_WORKER_URL}${endpoint}?tokenType=${tokenType}`;
 
-  // First request - expect 402
-  const initialRes = await fetch(url, {
-    method,
-    headers: { "Content-Type": "application/json" },
-    body: body ? JSON.stringify(body) : undefined,
-  });
+  // Track last error for retry exhaustion reporting
+  let lastErrorStatus = 0;
+  let lastErrorData: unknown = "Failed to get payment requirement";
 
-  if (initialRes.status !== 402) {
-    const text = await initialRes.text();
+  // Retry loop for initial request (get 402 payment requirement)
+  let initialRes: Response | null = null;
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
     try {
-      return { status: initialRes.status, data: JSON.parse(text) };
-    } catch {
-      return { status: initialRes.status, data: text };
+      initialRes = await fetch(url, {
+        method,
+        headers: { "Content-Type": "application/json" },
+        body: body ? JSON.stringify(body) : undefined,
+      });
+
+      // 402 is expected - break to continue payment flow
+      if (initialRes.status === 402) break;
+
+      // Terminal status codes (200, 404) - return immediately
+      // 404 is expected in some lifecycle steps (e.g., verifying key deletion)
+      if (isTerminalStatus(initialRes.status)) {
+        const text = await initialRes.text();
+        return { status: initialRes.status, data: parseResponseData(text) };
+      }
+
+      // Parse error and check if retryable
+      const text = await initialRes.text();
+      const errorInfo = parseErrorResponse(text);
+      lastErrorStatus = initialRes.status;
+      lastErrorData = parseResponseData(text);
+
+      if (isRetryableError(initialRes.status, errorInfo.errorCode, errorInfo.errorMessage || text) && attempt < maxRetries) {
+        const delayMs = calculateBackoff(attempt, errorInfo.retryAfterSecs);
+        logger.debug(`Initial request failed (${initialRes.status}), retry ${attempt + 1}/${maxRetries} in ${delayMs}ms`);
+        await sleep(delayMs);
+        continue;
+      }
+
+      // Non-retryable error - return last captured error
+      return { status: lastErrorStatus, data: lastErrorData };
+    } catch (fetchError) {
+      lastErrorStatus = 0;
+      lastErrorData = { error: String(fetchError), code: "NETWORK_ERROR" };
+
+      if (attempt < maxRetries) {
+        const delayMs = calculateBackoff(attempt);
+        logger.debug(`Fetch error, retry ${attempt + 1}/${maxRetries} in ${delayMs}ms: ${fetchError}`);
+        await sleep(delayMs);
+        continue;
+      }
+      return { status: lastErrorStatus, data: lastErrorData };
     }
+  }
+
+  // Check if we got a 402 payment requirement
+  if (!initialRes || initialRes.status !== 402) {
+    return { status: lastErrorStatus, data: lastErrorData };
   }
 
   const paymentReq: X402PaymentRequired = await initialRes.json();
@@ -73,23 +123,61 @@ async function makeX402Request(
   const signResult = await x402Client.signPayment(paymentReq);
   logger.debug("Signed payment", signResult);
 
-  // Retry with payment
-  const retryRes = await fetch(url, {
-    method,
-    headers: {
-      "Content-Type": "application/json",
-      "X-PAYMENT": signResult.signedTransaction,
-      "X-PAYMENT-TOKEN-TYPE": tokenType,
-    },
-    body: body ? JSON.stringify(body) : undefined,
-  });
+  // Reset error tracking for paid request phase
+  lastErrorStatus = 0;
+  lastErrorData = "Exhausted retries on paid request";
 
-  const text = await retryRes.text();
-  try {
-    return { status: retryRes.status, data: JSON.parse(text) };
-  } catch {
-    return { status: retryRes.status, data: text };
+  // Retry loop for paid request
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      const retryRes = await fetch(url, {
+        method,
+        headers: {
+          "Content-Type": "application/json",
+          "X-PAYMENT": signResult.signedTransaction,
+          "X-PAYMENT-TOKEN-TYPE": tokenType,
+        },
+        body: body ? JSON.stringify(body) : undefined,
+      });
+
+      // Terminal status codes (200, 404) - return immediately
+      // 404 is expected in some lifecycle steps (e.g., verifying key deletion)
+      if (isTerminalStatus(retryRes.status)) {
+        const text = await retryRes.text();
+        return { status: retryRes.status, data: parseResponseData(text) };
+      }
+
+      // Parse error and check if retryable
+      const text = await retryRes.text();
+      const errorInfo = parseErrorResponse(text);
+      lastErrorStatus = retryRes.status;
+      lastErrorData = parseResponseData(text);
+
+      if (isRetryableError(retryRes.status, errorInfo.errorCode, errorInfo.errorMessage || text) && attempt < maxRetries) {
+        const delayMs = calculateBackoff(attempt, errorInfo.retryAfterSecs);
+        logger.debug(`Paid request failed (${retryRes.status}), retry ${attempt + 1}/${maxRetries} in ${delayMs}ms`);
+        await sleep(delayMs);
+        continue;
+      }
+
+      // Non-retryable error - return last captured error
+      return { status: lastErrorStatus, data: lastErrorData };
+    } catch (fetchError) {
+      lastErrorStatus = 0;
+      lastErrorData = { error: String(fetchError), code: "NETWORK_ERROR" };
+
+      if (attempt < maxRetries) {
+        const delayMs = calculateBackoff(attempt);
+        logger.debug(`Fetch error on paid request, retry ${attempt + 1}/${maxRetries} in ${delayMs}ms: ${fetchError}`);
+        await sleep(delayMs);
+        continue;
+      }
+      return { status: lastErrorStatus, data: lastErrorData };
+    }
   }
+
+  // Exhausted retries - return last captured error
+  return { status: lastErrorStatus, data: lastErrorData };
 }
 
 export interface LifecycleTestResult {
