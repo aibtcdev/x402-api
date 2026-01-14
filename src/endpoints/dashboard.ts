@@ -35,22 +35,17 @@ export class Dashboard extends OpenAPIRoute {
       const id = c.env.METRICS_DO.idFromName("global-metrics");
       const metricsDO = c.env.METRICS_DO.get(id);
 
-      const [summary, endpoints, daily, colos, errors, modelStats] =
-        await Promise.all([
-          metricsDO.getSummary(),
-          metricsDO.getEndpointStats(),
-          metricsDO.getDailyStats(7),
-          metricsDO.getColoStats(),
-          metricsDO.getErrorStats(),
-          metricsDO.getModelStats(),
-        ]);
+      const [summary, endpoints, daily, modelStats] = await Promise.all([
+        metricsDO.getSummary(),
+        metricsDO.getEndpointStats(),
+        metricsDO.getDailyStats(7),
+        metricsDO.getModelStats(),
+      ]);
 
       dashboardData = {
         summary,
         endpoints,
         daily,
-        colos,
-        errors,
         modelStats,
       };
     } catch (error) {
@@ -60,17 +55,13 @@ export class Dashboard extends OpenAPIRoute {
           totalEndpoints: 0,
           totalCalls: 0,
           totalSuccessful: 0,
-          totalErrors: 0,
           avgSuccessRate: 0,
           earningsSTX: 0,
           earningsSBTC: 0,
           earningsUSDCx: 0,
-          uniqueColos: 0,
         },
         endpoints: [],
         daily: [],
-        colos: [],
-        errors: [],
         modelStats: [],
       };
     }
@@ -89,12 +80,10 @@ interface DashboardData {
     totalEndpoints: number;
     totalCalls: number;
     totalSuccessful: number;
-    totalErrors: number;
     avgSuccessRate: number;
     earningsSTX: number;
     earningsSBTC: number;
     earningsUSDCx: number;
-    uniqueColos: number;
   };
   endpoints: Array<{
     endpoint: string;
@@ -116,16 +105,6 @@ interface DashboardData {
     successfulCalls: number;
     errorCalls: number;
     earningsSTX: number;
-  }>;
-  colos: Array<{
-    colo: string;
-    totalCalls: number;
-    avgLatencyMs: number;
-  }>;
-  errors: Array<{
-    errorType: string;
-    count: number;
-    lastOccurred: string;
   }>;
   modelStats: Array<{
     model: string;
@@ -164,7 +143,7 @@ function getCategoryClass(category: string): string {
 }
 
 function generateDashboardHTML(data: DashboardData, environment: string): string {
-  const { summary, endpoints, daily, colos, errors, modelStats } = data;
+  const { summary, endpoints, daily, modelStats } = data;
 
   // Sort endpoints by total calls descending
   const sortedEndpoints = [...endpoints].sort((a, b) => b.totalCalls - a.totalCalls);
@@ -284,7 +263,6 @@ function generateDashboardHTML(data: DashboardData, environment: string): string
     .card .value.sbtc { color: var(--accent); }
     .card .value.usdcx { color: #3b82f6; }
     .card .value.success { color: var(--success); }
-    .card .value.error { color: var(--error); }
     .section-title {
       font-size: 18px;
       font-weight: 600;
@@ -292,11 +270,6 @@ function generateDashboardHTML(data: DashboardData, environment: string): string
       margin-top: 32px;
       color: #fff;
       scroll-margin-top: 24px;
-    }
-    .grid-2 {
-      display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(400px, 1fr));
-      gap: 24px;
     }
     .chart-container {
       background: var(--bg-card);
@@ -338,54 +311,6 @@ function generateDashboardHTML(data: DashboardData, environment: string): string
     }
     .bar-label { font-size: 11px; color: #71717a; }
     .bar-value { font-size: 11px; color: #a1a1aa; font-weight: 500; }
-    .colo-grid {
-      display: grid;
-      grid-template-columns: repeat(auto-fill, minmax(80px, 1fr));
-      gap: 8px;
-    }
-    .colo-item {
-      background: #27272a;
-      border-radius: 8px;
-      padding: 10px;
-      text-align: center;
-    }
-    .colo-item .colo-code {
-      font-size: 14px;
-      font-weight: 700;
-      color: #fff;
-      font-family: 'SF Mono', Monaco, monospace;
-    }
-    .colo-item .colo-count {
-      font-size: 11px;
-      color: #a1a1aa;
-      margin-top: 2px;
-    }
-    .colo-item .colo-latency {
-      font-size: 10px;
-      color: #71717a;
-    }
-    .error-list {
-      display: flex;
-      flex-direction: column;
-      gap: 8px;
-    }
-    .error-item {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      background: #27272a;
-      border-radius: 8px;
-      padding: 10px 14px;
-    }
-    .error-item .error-type {
-      font-size: 13px;
-      font-weight: 500;
-      color: var(--error);
-    }
-    .error-item .error-count {
-      font-size: 12px;
-      color: #a1a1aa;
-    }
     table {
       width: 100%;
       border-collapse: collapse;
@@ -521,8 +446,6 @@ function generateDashboardHTML(data: DashboardData, environment: string): string
       <a href="#summary">Summary</a>
       <a href="#daily">Daily Activity</a>
       <a href="#endpoints">Endpoint Metrics</a>
-      <a href="#geography">Geography</a>
-      <a href="#errors">Errors</a>
       <a href="#models">LLM Models</a>
       <a href="/docs">API Docs</a>
     </nav>
@@ -542,10 +465,6 @@ function generateDashboardHTML(data: DashboardData, environment: string): string
         <div class="value success">${summary.avgSuccessRate.toFixed(1)}%</div>
       </div>
       <div class="card">
-        <h3>Errors</h3>
-        <div class="value error">${summary.totalErrors.toLocaleString()}</div>
-      </div>
-      <div class="card">
         <h3>STX Earned</h3>
         <div class="value stx">${formatSTX(summary.earningsSTX)}</div>
       </div>
@@ -556,10 +475,6 @@ function generateDashboardHTML(data: DashboardData, environment: string): string
       <div class="card">
         <h3>USDCx Earned</h3>
         <div class="value usdcx">$${formatUSDCx(summary.earningsUSDCx)}</div>
-      </div>
-      <div class="card">
-        <h3>Datacenters</h3>
-        <div class="value">${summary.uniqueColos}</div>
       </div>
     </div>
 
@@ -628,39 +543,6 @@ function generateDashboardHTML(data: DashboardData, environment: string): string
             }).join("")}
           </tbody>
         </table>
-      </div>
-    </div>
-
-    <div class="grid-2">
-      <div>
-        <h2 id="geography" class="section-title">Geographic Distribution</h2>
-        <div class="chart-container">
-          <div class="chart-title">Requests by Cloudflare Datacenter</div>
-          <div class="colo-grid">
-            ${colos.length > 0 ? colos.map((colo) => `
-              <div class="colo-item">
-                <div class="colo-code">${colo.colo}</div>
-                <div class="colo-count">${colo.totalCalls.toLocaleString()}</div>
-                <div class="colo-latency">${colo.avgLatencyMs}ms</div>
-              </div>
-            `).join("") : `<div style="color: #71717a; padding: 20px;">No data yet</div>`}
-          </div>
-        </div>
-      </div>
-
-      <div>
-        <h2 id="errors" class="section-title">Error Breakdown</h2>
-        <div class="chart-container">
-          <div class="chart-title">Errors by Type</div>
-          <div class="error-list">
-            ${errors.length > 0 ? errors.map((err) => `
-              <div class="error-item">
-                <span class="error-type">${err.errorType}</span>
-                <span class="error-count">${err.count.toLocaleString()} occurrences</span>
-              </div>
-            `).join("") : `<div style="color: #71717a; padding: 20px;">No errors recorded</div>`}
-          </div>
-        </div>
       </div>
     </div>
 
