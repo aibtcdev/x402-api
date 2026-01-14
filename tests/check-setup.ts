@@ -13,7 +13,12 @@
  */
 
 import { deriveChildAccount } from "../src/utils/wallet";
-import { COLORS, X402_CLIENT_PK, X402_NETWORK, X402_WORKER_URL } from "./_shared_utils";
+import {
+  COLORS,
+  X402_CLIENT_PK,
+  X402_NETWORK,
+  X402_WORKER_URL,
+} from "./_shared_utils";
 
 // Minimum balances recommended for testing (in base units)
 const MIN_BALANCES = {
@@ -31,7 +36,7 @@ const TESTNET_TOKENS = {
 // Token contract identifiers (mainnet)
 const MAINNET_TOKENS = {
   sBTC: "SM3VDXK3WZZSA84XXFKAFAF15NNZX32CTSG82JFQ4.sbtc-token::sbtc-token",
-  USDCx: "SP3Y2ZSH8P7D50B0VBTSX11S7XSG24M1VB9YFQA4K.token-susdc::bridged-usdc",
+  USDCx: "SP120SBRBQJ00MCWS7TM5R8WJNTTKD5K0HFRC2CNE.usdcx::USDCx",
 };
 
 interface BalanceResponse {
@@ -47,15 +52,18 @@ async function getBalances(address: string): Promise<{
   sbtc: number;
   usdcx: number;
 }> {
-  const apiBase = X402_NETWORK === "mainnet"
-    ? "https://api.hiro.so"
-    : "https://api.testnet.hiro.so";
+  const apiBase =
+    X402_NETWORK === "mainnet"
+      ? "https://api.hiro.so"
+      : "https://api.testnet.hiro.so";
 
   const url = `${apiBase}/extended/v1/address/${address}/balances`;
 
   const res = await fetch(url);
   if (!res.ok) {
-    throw new Error(`Failed to fetch balances: ${res.status} ${res.statusText}`);
+    throw new Error(
+      `Failed to fetch balances: ${res.status} ${res.statusText}`
+    );
   }
 
   const data = (await res.json()) as BalanceResponse;
@@ -69,18 +77,29 @@ async function getBalances(address: string): Promise<{
   };
 }
 
-function formatBalance(amount: number, decimals: number, symbol: string): string {
+function formatBalance(
+  amount: number,
+  decimals: number,
+  symbol: string
+): string {
   const value = amount / Math.pow(10, decimals);
-  return `${value.toLocaleString(undefined, { minimumFractionDigits: decimals > 4 ? 4 : decimals, maximumFractionDigits: decimals > 4 ? 4 : decimals })} ${symbol}`;
+  return `${value.toLocaleString(undefined, {
+    minimumFractionDigits: decimals > 4 ? 4 : decimals,
+    maximumFractionDigits: decimals > 4 ? 4 : decimals,
+  })} ${symbol}`;
 }
 
 function checkIcon(ok: boolean): string {
-  return ok ? `${COLORS.green}✓${COLORS.reset}` : `${COLORS.red}✗${COLORS.reset}`;
+  return ok
+    ? `${COLORS.green}✓${COLORS.reset}`
+    : `${COLORS.red}✗${COLORS.reset}`;
 }
 
 async function main() {
   console.log(`\n${COLORS.bright}${"=".repeat(60)}${COLORS.reset}`);
-  console.log(`${COLORS.bright}  X402 API Test Setup Verification${COLORS.reset}`);
+  console.log(
+    `${COLORS.bright}  X402 API Test Setup Verification${COLORS.reset}`
+  );
   console.log(`${COLORS.bright}${"=".repeat(60)}${COLORS.reset}\n`);
 
   let hasErrors = false;
@@ -90,8 +109,12 @@ async function main() {
 
   if (!X402_CLIENT_PK) {
     console.log(`   ${checkIcon(false)} X402_CLIENT_PK is not set`);
-    console.log(`\n   ${COLORS.yellow}Set your testnet mnemonic:${COLORS.reset}`);
-    console.log(`   export X402_CLIENT_PK="your twelve word mnemonic phrase here"\n`);
+    console.log(
+      `\n   ${COLORS.yellow}Set your testnet mnemonic:${COLORS.reset}`
+    );
+    console.log(
+      `   export X402_CLIENT_PK="your twelve word mnemonic phrase here"\n`
+    );
     process.exit(1);
   }
   console.log(`   ${checkIcon(true)} X402_CLIENT_PK is set`);
@@ -99,10 +122,16 @@ async function main() {
   // Check mnemonic format (basic validation)
   const wordCount = X402_CLIENT_PK.trim().split(/\s+/).length;
   if (wordCount !== 12 && wordCount !== 24) {
-    console.log(`   ${checkIcon(false)} Mnemonic should be 12 or 24 words (got ${wordCount})`);
+    console.log(
+      `   ${checkIcon(
+        false
+      )} Mnemonic should be 12 or 24 words (got ${wordCount})`
+    );
     hasErrors = true;
   } else {
-    console.log(`   ${checkIcon(true)} Mnemonic format looks valid (${wordCount} words)`);
+    console.log(
+      `   ${checkIcon(true)} Mnemonic format looks valid (${wordCount} words)`
+    );
   }
 
   console.log(`   ${checkIcon(true)} Network: ${X402_NETWORK}`);
@@ -129,19 +158,40 @@ async function main() {
 
     // STX (6 decimals)
     const stxOk = balances.stx >= MIN_BALANCES.STX;
-    console.log(`   ${checkIcon(stxOk)} STX:   ${formatBalance(balances.stx, 6, "STX")}${!stxOk ? ` (need ${formatBalance(MIN_BALANCES.STX, 6, "STX")})` : ""}`);
+    console.log(
+      `   ${checkIcon(stxOk)} STX:   ${formatBalance(balances.stx, 6, "STX")}${
+        !stxOk ? ` (need ${formatBalance(MIN_BALANCES.STX, 6, "STX")})` : ""
+      }`
+    );
     if (!stxOk) hasErrors = true;
 
     // sBTC (8 decimals)
     const sbtcOk = balances.sbtc >= MIN_BALANCES.sBTC;
-    console.log(`   ${checkIcon(sbtcOk)} sBTC:  ${formatBalance(balances.sbtc, 8, "sBTC")}${!sbtcOk ? ` (need ${formatBalance(MIN_BALANCES.sBTC, 8, "sBTC")})` : ""}`);
+    console.log(
+      `   ${checkIcon(sbtcOk)} sBTC:  ${formatBalance(
+        balances.sbtc,
+        8,
+        "sBTC"
+      )}${
+        !sbtcOk ? ` (need ${formatBalance(MIN_BALANCES.sBTC, 8, "sBTC")})` : ""
+      }`
+    );
     if (!sbtcOk) hasErrors = true;
 
     // USDCx (6 decimals)
     const usdcxOk = balances.usdcx >= MIN_BALANCES.USDCx;
-    console.log(`   ${checkIcon(usdcxOk)} USDCx: ${formatBalance(balances.usdcx, 6, "USDCx")}${!usdcxOk ? ` (need ${formatBalance(MIN_BALANCES.USDCx, 6, "USDCx")})` : ""}`);
+    console.log(
+      `   ${checkIcon(usdcxOk)} USDCx: ${formatBalance(
+        balances.usdcx,
+        6,
+        "USDCx"
+      )}${
+        !usdcxOk
+          ? ` (need ${formatBalance(MIN_BALANCES.USDCx, 6, "USDCx")})`
+          : ""
+      }`
+    );
     if (!usdcxOk) hasErrors = true;
-
   } catch (error) {
     console.log(`   ${checkIcon(false)} Failed to fetch balances: ${error}`);
     hasErrors = true;
@@ -167,19 +217,25 @@ async function main() {
   console.log(`\n${COLORS.bright}${"=".repeat(60)}${COLORS.reset}`);
 
   if (hasErrors) {
-    console.log(`${COLORS.yellow}${COLORS.bright}  Setup has warnings - some tests may fail${COLORS.reset}`);
+    console.log(
+      `${COLORS.yellow}${COLORS.bright}  Setup has warnings - some tests may fail${COLORS.reset}`
+    );
     console.log(`${COLORS.bright}${"=".repeat(60)}${COLORS.reset}\n`);
 
     if (X402_NETWORK === "testnet") {
       console.log(`${COLORS.cyan}To get testnet tokens:${COLORS.reset}`);
-      console.log(`  STX:   https://explorer.hiro.so/sandbox/faucet?chain=testnet`);
+      console.log(
+        `  STX:   https://explorer.hiro.so/sandbox/faucet?chain=testnet`
+      );
       console.log(`  sBTC:  https://platform.hiro.so/faucet`);
       console.log(`  USDCx: (no testnet faucet available yet)\n`);
     }
 
     process.exit(1);
   } else {
-    console.log(`${COLORS.green}${COLORS.bright}  Setup verified - ready to run tests!${COLORS.reset}`);
+    console.log(
+      `${COLORS.green}${COLORS.bright}  Setup verified - ready to run tests!${COLORS.reset}`
+    );
     console.log(`${COLORS.bright}${"=".repeat(60)}${COLORS.reset}\n`);
     console.log(`Run tests with: ${COLORS.cyan}npm test${COLORS.reset}\n`);
     process.exit(0);
