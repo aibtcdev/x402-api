@@ -59,15 +59,7 @@ export interface Env {
 
 export type TokenType = "STX" | "sBTC" | "USDCx";
 
-export type PricingTier =
-  | "free"
-  | "simple"
-  | "ai"
-  | "heavy_ai"
-  | "storage_read"
-  | "storage_write"
-  | "storage_write_large"
-  | "dynamic";
+export type PricingTier = "free" | "standard" | "dynamic";
 
 export interface PricingConfig {
   tier: PricingTier;
