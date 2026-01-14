@@ -156,7 +156,6 @@ function normalizeEndpoint(path: string): string {
   // Only strip segments that look like parameters, not endpoint names
   // Stacks addresses: S[PT][A-Z0-9]{38,40}
   // UUIDs: 8-4-4-4-12 hex
-  // Generic IDs: 8+ alphanumeric chars that aren't common endpoint names
   return path
     .replace(/\/S[PT][A-Z0-9]{38,40}$/i, "") // Stacks addresses
     .replace(/\/[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i, "") // UUIDs
