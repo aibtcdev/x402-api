@@ -207,3 +207,6 @@ export function createTestLogger(testName: string, verbose = false): TestLogger 
     },
   };
 }
+
+/** JSON-serializable body type for API requests */
+export type JsonBody = Record<string, unknown> | unknown[] | string | number | boolean | null;

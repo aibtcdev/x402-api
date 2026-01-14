@@ -58,6 +58,7 @@ import { runDbLifecycle } from "./db-lifecycle.test";
 import { runSyncLifecycle } from "./sync-lifecycle.test";
 import { runQueueLifecycle } from "./queue-lifecycle.test";
 import { runMemoryLifecycle } from "./memory-lifecycle.test";
+import { runInferenceLifecycle } from "./inference-lifecycle.test";
 
 // =============================================================================
 // Lifecycle Test Mapping (add as lifecycle tests are created)
@@ -73,6 +74,7 @@ const LIFECYCLE_RUNNERS: Record<
   sync: runSyncLifecycle,
   queue: runQueueLifecycle,
   memory: runMemoryLifecycle,
+  inference: runInferenceLifecycle,
 };
 
 // =============================================================================

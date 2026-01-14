@@ -49,7 +49,7 @@ export class Dashboard extends OpenAPIRoute {
         modelStats,
       };
     } catch (error) {
-      console.error("Failed to load dashboard data:", error);
+      c.var.logger.error("Failed to load dashboard data", { error: String(error) });
       dashboardData = {
         summary: {
           totalEndpoints: 0,

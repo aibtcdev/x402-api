@@ -319,7 +319,7 @@ app.use("*", async (c, next) => {
           const metricsDO = c.env.METRICS_DO.get(id);
           await metricsDO.recordMetrics(record);
         } catch (error) {
-          console.error("Failed to record metrics:", error);
+          c.var.logger.error("Failed to record metrics", { error: String(error) });
         }
       })()
     );
@@ -486,7 +486,7 @@ openapi.post("/storage/memory/clear", MemoryClear);
 // =============================================================================
 
 app.onError((err, c) => {
-  console.error("Unhandled error:", err);
+  c.var.logger.error("Unhandled error", { error: err.message, stack: err.stack });
   return c.json(
     {
       ok: false,

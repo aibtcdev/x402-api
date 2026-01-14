@@ -462,7 +462,7 @@ export const STATELESS_ENDPOINTS: TestConfig[] = [
 ];
 
 // Stateful categories - should use lifecycle tests for full CRUD
-export const STATEFUL_CATEGORIES = ["kv", "paste", "db", "sync", "queue", "memory"] as const;
+export const STATEFUL_CATEGORIES = ["kv", "paste", "db", "sync", "queue", "memory", "inference"] as const;
 
 export type StatefulCategory = (typeof STATEFUL_CATEGORIES)[number];
 

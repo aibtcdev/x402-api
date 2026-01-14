@@ -436,9 +436,3 @@ export const x402Standard = () => x402Middleware({ tier: "standard" });
 /** Dynamic pricing for LLM endpoints (pass-through + 20%) */
 export const x402Dynamic = () => x402Middleware({ dynamic: true });
 
-// Aliases for backwards compatibility
-export const x402Simple = x402Standard;
-export const x402AI = x402Standard;
-export const x402StorageRead = x402Standard;
-export const x402StorageWrite = x402Standard;
-export const x402StorageWriteLarge = x402Standard;
