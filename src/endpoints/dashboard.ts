@@ -420,6 +420,7 @@ function generateDashboardHTML(data: DashboardData, environment: string): string
     @media (max-width: 768px) {
       th:nth-child(5), td:nth-child(5),
       th:nth-child(6), td:nth-child(6),
+      th:nth-child(7), td:nth-child(7),
       th:nth-child(8), td:nth-child(8) { display: none; }
     }
   </style>
@@ -495,32 +496,31 @@ function generateDashboardHTML(data: DashboardData, environment: string): string
               <th data-sort="endpoint">Endpoint <span class="sort-icon">↕</span></th>
               <th data-sort="category">Category <span class="sort-icon">↕</span></th>
               <th data-sort="calls" class="sorted">Calls <span class="sort-icon">↓</span></th>
-              <th data-sort="errors">Errors <span class="sort-icon">↕</span></th>
               <th data-sort="latency">Latency <span class="sort-icon">↕</span></th>
-              <th data-sort="bytes">Data <span class="sort-icon">↕</span></th>
               <th data-sort="stx">STX <span class="sort-icon">↕</span></th>
+              <th data-sort="sbtc">sBTC <span class="sort-icon">↕</span></th>
+              <th data-sort="usdcx">USDCx <span class="sort-icon">↕</span></th>
+              <th data-sort="created">Created <span class="sort-icon">↕</span></th>
               <th data-sort="lastcall">Last Call <span class="sort-icon">↕</span></th>
             </tr>
           </thead>
           <tbody>
             ${sortedEndpoints.map((ep) => {
+              const createdTs = ep.created ? new Date(ep.created).getTime() : 0;
+              const createdDisplay = ep.created ? new Date(ep.created).toLocaleString() : "-";
               const lastCallTs = ep.lastCall ? new Date(ep.lastCall).getTime() : 0;
               const lastCallDisplay = ep.lastCall ? new Date(ep.lastCall).toLocaleString() : "-";
-              const bytesDisplay = ep.totalBytes > 1048576
-                ? `${(ep.totalBytes / 1048576).toFixed(1)} MB`
-                : ep.totalBytes > 1024
-                  ? `${(ep.totalBytes / 1024).toFixed(1)} KB`
-                  : `${ep.totalBytes} B`;
 
               return `
-                <tr data-endpoint="${ep.endpoint}" data-category="${ep.category}" data-calls="${ep.totalCalls}" data-errors="${ep.errorCalls}" data-latency="${ep.avgLatencyMs}" data-bytes="${ep.totalBytes}" data-stx="${ep.earningsSTX}" data-lastcall="${lastCallTs}">
+                <tr data-endpoint="${ep.endpoint}" data-category="${ep.category}" data-calls="${ep.totalCalls}" data-latency="${ep.avgLatencyMs}" data-stx="${ep.earningsSTX}" data-sbtc="${ep.earningsSBTC}" data-usdcx="${ep.earningsUSDCx}" data-created="${createdTs}" data-lastcall="${lastCallTs}">
                   <td><code>${ep.endpoint}</code></td>
                   <td class="${getCategoryClass(ep.category)}">${ep.category}</td>
                   <td>${ep.totalCalls.toLocaleString()}</td>
-                  <td>${ep.errorCalls.toLocaleString()}</td>
                   <td>${ep.avgLatencyMs}ms</td>
-                  <td>${bytesDisplay}</td>
                   <td>${formatSTX(ep.earningsSTX)}</td>
+                  <td>${formatSBTC(ep.earningsSBTC)}</td>
+                  <td>$${formatUSDCx(ep.earningsUSDCx)}</td>
+                  <td>${createdDisplay}</td>
                   <td>${lastCallDisplay}</td>
                 </tr>
               `;
@@ -576,7 +576,7 @@ function generateDashboardHTML(data: DashboardData, environment: string): string
 
       const tbody = table.querySelector('tbody');
       const headers = table.querySelectorAll('th[data-sort]');
-      const numericKeys = ['calls', 'errors', 'latency', 'bytes', 'stx', 'lastcall'];
+      const numericKeys = ['calls', 'latency', 'stx', 'sbtc', 'usdcx', 'created', 'lastcall'];
       let currentSort = { key: 'calls', dir: 'desc' };
 
       function sortTable(key) {

@@ -217,6 +217,7 @@ export class MetricsDO extends DurableObject<Env> {
         created, last_call
       ) VALUES (?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(endpoint) DO UPDATE SET
+        category = excluded.category,
         total_calls = total_calls + 1,
         successful_calls = successful_calls + excluded.successful_calls,
         error_calls = error_calls + excluded.error_calls,
