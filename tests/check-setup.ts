@@ -36,13 +36,16 @@ const TESTNET_TOKENS = {
 // Token contract identifiers (mainnet)
 const MAINNET_TOKENS = {
   sBTC: "SM3VDXK3WZZSA84XXFKAFAF15NNZX32CTSG82JFQ4.sbtc-token::sbtc-token",
-  USDCx: "SP120SBRBQJ00MCWS7TM5R8WJNTTKD5K0HFRC2CNE.usdcx::USDCx",
+  USDCx: "SP120SBRBQJ00MCWS7TM5R8WJNTTKD5K0HFRC2CNE.usdcx::usdcx-token",
 };
 
 interface BalanceResponse {
   stx: {
     balance: string;
     locked: string;
+    total_sent: string;
+    total_received: string;
+    total_fees_sent: string;
   };
   fungible_tokens: Record<string, { balance: string }>;
 }
@@ -51,6 +54,9 @@ async function getBalances(address: string): Promise<{
   stx: number;
   sbtc: number;
   usdcx: number;
+  totalFeesSent: number;
+  totalSent: number;
+  totalReceived: number;
 }> {
   const apiBase =
     X402_NETWORK === "mainnet"
@@ -74,6 +80,9 @@ async function getBalances(address: string): Promise<{
     stx: parseInt(data.stx.balance, 10) || 0,
     sbtc: parseInt(data.fungible_tokens[tokens.sBTC]?.balance || "0", 10),
     usdcx: parseInt(data.fungible_tokens[tokens.USDCx]?.balance || "0", 10),
+    totalFeesSent: parseInt(data.stx.total_fees_sent || "0", 10),
+    totalSent: parseInt(data.stx.total_sent || "0", 10),
+    totalReceived: parseInt(data.stx.total_received || "0", 10),
   };
 }
 
@@ -153,8 +162,9 @@ async function main() {
   // Check 3: Fetch balances
   console.log(`\n${COLORS.cyan}3. Checking balances...${COLORS.reset}`);
 
+  let balances: Awaited<ReturnType<typeof getBalances>> | null = null;
   try {
-    const balances = await getBalances(address);
+    balances = await getBalances(address);
 
     // STX (6 decimals)
     const stxOk = balances.stx >= MIN_BALANCES.STX;
@@ -195,6 +205,32 @@ async function main() {
   } catch (error) {
     console.log(`   ${checkIcon(false)} Failed to fetch balances: ${error}`);
     hasErrors = true;
+  }
+
+  // Check 3b: STX activity summary
+  if (balances) {
+    console.log(`\n${COLORS.cyan}   STX Activity Summary:${COLORS.reset}`);
+    console.log(
+      `   ${COLORS.gray}├─${COLORS.reset} Received: ${formatBalance(
+        balances.totalReceived,
+        6,
+        "STX"
+      )}`
+    );
+    console.log(
+      `   ${COLORS.gray}├─${COLORS.reset} Sent:     ${formatBalance(
+        balances.totalSent,
+        6,
+        "STX"
+      )}`
+    );
+    console.log(
+      `   ${COLORS.gray}└─${COLORS.reset} Fees:     ${formatBalance(
+        balances.totalFeesSent,
+        6,
+        "STX"
+      )}`
+    );
   }
 
   // Check 4: Test server reachability
