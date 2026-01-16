@@ -153,6 +153,8 @@ function generateDashboardHTML(data: DashboardData, environment: string): string
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>x402 API Dashboard</title>
   <link rel="icon" type="image/png" sizes="32x32" href="https://aibtc.com/favicon-32x32.png">
+  <link rel="dns-prefetch" href="https://aibtc.com">
+  <link rel="preload" href="https://aibtc.com/Artwork/AIBTC_Pattern1_optimized.jpg" as="image">
   <style>
     @font-face {
       font-family: 'Roc Grotesk';
@@ -177,6 +179,7 @@ function generateDashboardHTML(data: DashboardData, environment: string): string
       --text-muted: #71717a;
       --accent: #f7931a;
       --accent-dim: rgba(247, 147, 26, 0.12);
+      /* AIBTC brand colors - reserved for future dashboard elements */
       --color-blue: #7DA2FF;
       --color-purple: #A855F7;
       --success: #22c55e;
@@ -214,6 +217,8 @@ function generateDashboardHTML(data: DashboardData, environment: string): string
       color: var(--text-primary);
     }
     h1 .accent { color: var(--accent); }
+    .header-flex { display: flex; align-items: center; }
+    .header-logo { height: 32px; margin-right: 12px; }
     .env-badge {
       background: ${environment === "mainnet" ? "#166534" : "#1e3a5f"};
       color: ${environment === "mainnet" ? "#4ade80" : "#60a5fa"};
@@ -450,8 +455,8 @@ function generateDashboardHTML(data: DashboardData, environment: string): string
 <body>
   <div class="container">
     <div class="header">
-      <div style="display: flex; align-items: center;">
-        <img src="https://aibtc.com/Primary_Logo/SVG/AIBTC_PrimaryLogo_KO.svg" alt="AIBTC" style="height: 32px; margin-right: 12px;">
+      <div class="header-flex">
+        <img src="https://aibtc.com/Primary_Logo/SVG/AIBTC_PrimaryLogo_KO.svg" alt="AIBTC" class="header-logo">
         <div>
           <h1><span class="accent">x402</span> Dashboard</h1>
           <p class="subtitle">Real-time metrics for pay-per-use API on Stacks</p>
