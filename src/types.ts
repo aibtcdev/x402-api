@@ -61,12 +61,6 @@ export type TokenType = "STX" | "sBTC" | "USDCx";
 
 export type PricingTier = "free" | "standard" | "dynamic";
 
-export interface PricingConfig {
-  tier: PricingTier;
-  /** Only for dynamic pricing - function to estimate cost */
-  estimator?: (body: unknown) => PriceEstimate;
-}
-
 export interface PriceEstimate {
   estimatedInputTokens?: number;
   estimatedOutputTokens?: number;
@@ -192,23 +186,6 @@ export interface DailyStats {
 export interface AgentIdentity {
   agentId: string;
   createdAt: string;
-}
-
-// =============================================================================
-// API Response Types
-// =============================================================================
-
-export interface HealthResponse {
-  status: "ok" | "error";
-  environment: string;
-  services: string[];
-}
-
-export interface ErrorResponse {
-  ok: false;
-  error: string;
-  requestId?: string;
-  code?: string;
 }
 
 // =============================================================================
