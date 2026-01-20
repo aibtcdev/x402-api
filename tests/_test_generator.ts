@@ -15,8 +15,12 @@ import {
   X402_NETWORK,
   X402_WORKER_URL,
   createTestLogger,
+  validators,
   type TestLogger,
 } from "./_shared_utils";
+
+// Re-export validators for convenience
+export { validators };
 
 export type { X402PaymentRequired };
 
@@ -230,55 +234,6 @@ async function testSingleToken(
   logger.success(`Passed for ${tokenType} (${contentType})`);
   return true;
 }
-
-/**
- * Validation helpers for common response patterns
- */
-export const validators = {
-  /** Validate that a field exists and matches tokenType */
-  hasTokenType: (data: unknown, tokenType: TokenType): boolean => {
-    const d = data as { tokenType: TokenType };
-    return d.tokenType === tokenType;
-  },
-
-  /** Validate that a field exists */
-  hasField: (data: unknown, field: string): boolean => {
-    return typeof data === "object" && data !== null && field in data;
-  },
-
-  /** Validate that multiple fields exist */
-  hasFields: (data: unknown, fields: string[]): boolean => {
-    return fields.every(
-      (f) => typeof data === "object" && data !== null && f in data
-    );
-  },
-
-  /** Validate result equals expected value */
-  resultEquals:
-    <T>(expected: T) =>
-    (data: unknown, tokenType: TokenType) => {
-      const d = data as { result: T; tokenType: TokenType };
-      return d.result === expected && d.tokenType === tokenType;
-    },
-
-  /** Validate result is a non-empty string */
-  resultIsString: (data: unknown, tokenType: TokenType) => {
-    const d = data as { result: string; tokenType: TokenType };
-    return typeof d.result === "string" && d.result.length > 0 && d.tokenType === tokenType;
-  },
-
-  /** Validate result is a number */
-  resultIsNumber: (data: unknown, tokenType: TokenType) => {
-    const d = data as { result: number; tokenType: TokenType };
-    return typeof d.result === "number" && d.tokenType === tokenType;
-  },
-
-  /** Validate result is an array */
-  resultIsArray: (data: unknown, tokenType: TokenType) => {
-    const d = data as { result: unknown[]; tokenType: TokenType };
-    return Array.isArray(d.result) && d.tokenType === tokenType;
-  },
-};
 
 /**
  * Create multiple tests from a configuration array
