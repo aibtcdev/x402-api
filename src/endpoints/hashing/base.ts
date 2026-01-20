@@ -6,6 +6,7 @@
  */
 
 import { SimpleEndpoint } from "../base";
+import { tokenTypeParam, response400, response402 } from "../schema";
 import { parseInputData, encodeOutput } from "../../utils/encoding";
 import type { AppContext } from "../../types";
 
@@ -54,18 +55,7 @@ export function createHashingEndpoint(config: HashingEndpointConfig) {
           },
         },
       },
-      parameters: [
-        {
-          name: "tokenType",
-          in: "query" as const,
-          required: false,
-          schema: {
-            type: "string" as const,
-            enum: ["STX", "sBTC", "USDCx"],
-            default: "STX",
-          },
-        },
-      ],
+      parameters: [tokenTypeParam],
       responses: {
         "200": {
           description: `${config.algorithm} hash`,
@@ -85,8 +75,8 @@ export function createHashingEndpoint(config: HashingEndpointConfig) {
             },
           },
         },
-        "400": { description: "Invalid input" },
-        "402": { description: "Payment required" },
+        "400": response400,
+        "402": response402,
       },
     };
 
