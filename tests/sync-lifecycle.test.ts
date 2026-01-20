@@ -14,6 +14,7 @@
 import type { TokenType } from "x402-stacks";
 import { X402PaymentClient } from "x402-stacks";
 import { deriveChildAccount } from "../src/utils/wallet";
+import type { X402PaymentRequired } from "./_test_generator";
 import {
   X402_CLIENT_PK,
   X402_NETWORK,
@@ -29,16 +30,6 @@ import {
   parseErrorResponse,
   parseResponseData,
 } from "./_shared_utils";
-
-interface X402PaymentRequired {
-  maxAmountRequired: string;
-  resource: string;
-  payTo: string;
-  network: "mainnet" | "testnet";
-  nonce: string;
-  expiresAt: string;
-  tokenType: TokenType;
-}
 
 /** JSON-serializable body type */
 type JsonBody =

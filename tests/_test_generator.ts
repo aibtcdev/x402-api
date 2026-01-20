@@ -8,6 +8,7 @@
 import { X402PaymentClient } from "x402-stacks";
 import type { TokenType, NetworkType } from "x402-stacks";
 import { deriveChildAccount } from "../src/utils/wallet";
+import type { X402PaymentRequired } from "../src/types";
 import {
   TEST_TOKENS,
   X402_CLIENT_PK,
@@ -17,16 +18,7 @@ import {
   type TestLogger,
 } from "./_shared_utils";
 
-export interface X402PaymentRequired {
-  maxAmountRequired: string;
-  resource: string;
-  payTo: string;
-  network: "mainnet" | "testnet";
-  nonce: string;
-  expiresAt: string;
-  tokenType: TokenType;
-  pricingTier?: string;
-}
+export type { X402PaymentRequired };
 
 export interface TestConfig {
   /** Short name for the test (used in logs) */

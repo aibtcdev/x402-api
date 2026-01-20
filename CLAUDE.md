@@ -49,11 +49,11 @@ bun run tests/_run_all_tests.ts --filter=sha256 --all-tokens
 
 | Category | Endpoints | Pricing |
 |----------|-----------|---------|
-| `/inference/openrouter/*` | models, chat | Dynamic |
-| `/inference/cloudflare/*` | models, chat | Fixed (ai tier) |
-| `/stacks/*` | address, decode, profile, verify | Fixed (simple) |
-| `/hashing/*` | sha256, sha512, sha512-256, keccak256, hash160, ripemd160 | Fixed (simple) |
-| `/storage/*` | kv, paste, db, sync, queue, memory | Fixed (storage tiers) |
+| `/inference/openrouter/*` | models (free), chat (dynamic) | Dynamic |
+| `/inference/cloudflare/*` | models (free), chat (standard) | Standard |
+| `/stacks/*` | address, decode, profile, verify | Standard |
+| `/hashing/*` | sha256, sha512, sha512-256, keccak256, hash160, ripemd160 | Standard |
+| `/storage/*` | kv, paste, db, sync, queue, memory | Standard |
 
 See `/docs` endpoint for full OpenAPI specification.
 
@@ -106,18 +106,20 @@ scripts/
 
 ## Pricing Strategy
 
-**Fixed Tiers:**
-| Tier | STX Amount | Use Case |
-|------|------------|----------|
-| `simple` | 0.001 | Basic compute (hashing, conversion) |
-| `ai` | 0.003 | AI-enhanced operations |
-| `storage_read` | 0.001 | Read from storage |
-| `storage_write` | 0.002 | Write to storage |
-| `storage_write_large` | 0.005 | Large writes (embeddings) |
+The API uses a simplified three-tier pricing model:
+
+| Tier | STX Amount | Description |
+|------|------------|-------------|
+| `free` | 0 | Model listing endpoints (no payment required) |
+| `standard` | 0.001 | All paid endpoints (hashing, stacks, storage, Cloudflare AI) |
+| `dynamic` | varies | OpenRouter LLM endpoints (pass-through cost + 20% margin) |
+
+**Note:** Endpoint classes use semantic aliases (`SimpleEndpoint`, `StorageReadEndpoint`, etc.) for code clarity, but all map to the same `standard` tier pricing.
 
 **Dynamic Pricing (LLM):**
 - Pass-through OpenRouter costs + 20% margin
 - Estimate based on model + input tokens
+- Minimum payment: $0.001 USD equivalent
 
 ## x402 Payment Flow
 

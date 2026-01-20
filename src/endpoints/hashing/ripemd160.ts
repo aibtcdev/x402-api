@@ -3,6 +3,7 @@
  */
 
 import { SimpleEndpoint } from "../base";
+import { parseInputData, encodeOutput } from "../../utils/encoding";
 import type { AppContext } from "../../types";
 import { ripemd160 } from "./ripemd160-impl";
 
@@ -89,30 +90,12 @@ export class HashRipemd160 extends SimpleEndpoint {
       return this.errorResponse(c, "encoding must be 'hex' or 'base64'", 400);
     }
 
-    // Determine if input is hex or text
-    let inputBytes: Uint8Array;
-    if (data.startsWith("0x")) {
-      const hex = data.slice(2);
-      inputBytes = new Uint8Array(hex.match(/.{1,2}/g)!.map((byte) => parseInt(byte, 16)));
-    } else {
-      inputBytes = new TextEncoder().encode(data);
-    }
-
-    // Compute RIPEMD-160
-    const hashArray = ripemd160(inputBytes);
-
-    let hash: string;
-    if (encoding === "hex") {
-      hash = Array.from(hashArray)
-        .map((b) => b.toString(16).padStart(2, "0"))
-        .join("");
-    } else {
-      hash = btoa(String.fromCharCode(...hashArray));
-    }
+    const inputBytes = parseInputData(data);
+    const hash = encodeOutput(ripemd160(inputBytes), encoding);
 
     return c.json({
       ok: true,
-      hash: encoding === "hex" ? `0x${hash}` : hash,
+      hash,
       algorithm: "RIPEMD-160",
       encoding,
       inputLength: inputBytes.length,

@@ -88,6 +88,39 @@ export interface TierPricing {
 // x402 Context Types
 // =============================================================================
 
+/**
+ * Token contract identifier for x402-stacks
+ */
+export interface TokenContract {
+  address: string;
+  name: string;
+}
+
+/**
+ * 402 Payment Required response structure
+ * Returned when a request needs payment
+ */
+export interface X402PaymentRequired {
+  maxAmountRequired: string;
+  resource: string;
+  payTo: string;
+  network: "mainnet" | "testnet";
+  nonce: string;
+  expiresAt: string;
+  tokenType: TokenType;
+  tokenContract?: TokenContract;
+  pricing: {
+    type: "fixed" | "dynamic";
+    tier?: PricingTier;
+    estimate?: {
+      model?: string;
+      estimatedInputTokens?: number;
+      estimatedOutputTokens?: number;
+      estimatedCostUsd?: string;
+    };
+  };
+}
+
 export interface SettlePaymentResult {
   isValid: boolean;
   txId?: string;

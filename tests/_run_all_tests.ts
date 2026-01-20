@@ -37,7 +37,7 @@ import {
   isStatefulCategory,
   ENDPOINT_COUNTS,
 } from "./endpoint-registry";
-import type { TestConfig } from "./_test_generator";
+import type { TestConfig, X402PaymentRequired } from "./_test_generator";
 import {
   COLORS,
   X402_CLIENT_PK,
@@ -223,16 +223,6 @@ function parseArgs(): RunConfig {
 // =============================================================================
 // X402 Payment Flow
 // =============================================================================
-
-interface X402PaymentRequired {
-  maxAmountRequired: string;
-  resource: string;
-  payTo: string;
-  network: "mainnet" | "testnet";
-  nonce: string;
-  expiresAt: string;
-  tokenType: TokenType;
-}
 
 async function testEndpointWithToken(
   config: TestConfig,
