@@ -61,12 +61,6 @@ export type TokenType = "STX" | "sBTC" | "USDCx";
 
 export type PricingTier = "free" | "standard" | "dynamic";
 
-export interface PricingConfig {
-  tier: PricingTier;
-  /** Only for dynamic pricing - function to estimate cost */
-  estimator?: (body: unknown) => PriceEstimate;
-}
-
 export interface PriceEstimate {
   estimatedInputTokens?: number;
   estimatedOutputTokens?: number;
@@ -87,6 +81,39 @@ export interface TierPricing {
 // =============================================================================
 // x402 Context Types
 // =============================================================================
+
+/**
+ * Token contract identifier for x402-stacks
+ */
+export interface TokenContract {
+  address: string;
+  name: string;
+}
+
+/**
+ * 402 Payment Required response structure
+ * Returned when a request needs payment
+ */
+export interface X402PaymentRequired {
+  maxAmountRequired: string;
+  resource: string;
+  payTo: string;
+  network: "mainnet" | "testnet";
+  nonce: string;
+  expiresAt: string;
+  tokenType: TokenType;
+  tokenContract?: TokenContract;
+  pricing: {
+    type: "fixed" | "dynamic";
+    tier?: PricingTier;
+    estimate?: {
+      model?: string;
+      estimatedInputTokens?: number;
+      estimatedOutputTokens?: number;
+      estimatedCostUsd?: string;
+    };
+  };
+}
 
 export interface SettlePaymentResult {
   isValid: boolean;
@@ -159,23 +186,6 @@ export interface DailyStats {
 export interface AgentIdentity {
   agentId: string;
   createdAt: string;
-}
-
-// =============================================================================
-// API Response Types
-// =============================================================================
-
-export interface HealthResponse {
-  status: "ok" | "error";
-  environment: string;
-  services: string[];
-}
-
-export interface ErrorResponse {
-  ok: false;
-  error: string;
-  requestId?: string;
-  code?: string;
 }
 
 // =============================================================================

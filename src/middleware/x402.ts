@@ -7,17 +7,18 @@
 
 import type { Context, MiddlewareHandler } from "hono";
 import { X402PaymentVerifier } from "x402-stacks";
-import type { TokenContract } from "x402-stacks";
 import { deserializeTransaction } from "@stacks/transactions";
 import type {
   Env,
   AppVariables,
   Logger,
   TokenType,
+  TokenContract,
   PricingTier,
   PriceEstimate,
   SettlePaymentResult,
   X402Context,
+  X402PaymentRequired,
   ChatCompletionRequest,
 } from "../types";
 import {
@@ -30,27 +31,6 @@ import {
 // =============================================================================
 // Types
 // =============================================================================
-
-export interface X402PaymentRequired {
-  maxAmountRequired: string;
-  resource: string;
-  payTo: string;
-  network: "mainnet" | "testnet";
-  nonce: string;
-  expiresAt: string;
-  tokenType: TokenType;
-  tokenContract?: TokenContract;
-  pricing: {
-    type: "fixed" | "dynamic";
-    tier?: PricingTier;
-    estimate?: {
-      model?: string;
-      estimatedInputTokens?: number;
-      estimatedOutputTokens?: number;
-      estimatedCostUsd?: string;
-    };
-  };
-}
 
 export interface X402MiddlewareOptions {
   /** Pricing tier for fixed pricing endpoints */

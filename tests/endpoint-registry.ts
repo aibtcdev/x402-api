@@ -7,7 +7,7 @@
 
 import type { TestConfig } from "./_test_generator";
 import type { TokenType } from "x402-stacks";
-import { generateTestId } from "./_shared_utils";
+import { generateTestId, hasTokenType, hasField, hasFields, isOk } from "./_shared_utils";
 
 // =============================================================================
 // Test Fixtures
@@ -31,29 +31,6 @@ const FIXTURES = {
   // Sample transaction hex
   sampleTxHex:
     "0x80800000000400164247d6f2b425ac5771423ae6c80c754f7172b0000000000000003200000000000000b400008537046ff1008368baaa3ff2235122c556b89dad4f9df0639b924cf32a44b866497e49846b24191e711b21faaae96ca0542e4a140168484740b94211cececb3303020000000000051ab52c45b1a7977204f17ac0b6f48306aea2dbb8e9000000000007a12046617563657400000000000000000000000000000000000000000000000000000000",
-};
-
-// =============================================================================
-// Validation Helpers
-// =============================================================================
-
-type DataWithToken = { tokenType: TokenType };
-
-const hasTokenType = (data: unknown, tokenType: TokenType): boolean => {
-  const d = data as DataWithToken;
-  return d.tokenType === tokenType;
-};
-
-const hasField = (data: unknown, field: string): boolean => {
-  return typeof data === "object" && data !== null && field in data;
-};
-
-const hasFields = (data: unknown, fields: string[]): boolean => {
-  return fields.every((f) => hasField(data, f));
-};
-
-const isOk = (data: unknown): boolean => {
-  return hasField(data, "ok") && (data as { ok: boolean }).ok === true;
 };
 
 // =============================================================================

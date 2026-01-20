@@ -210,3 +210,68 @@ export function createTestLogger(testName: string, verbose = false): TestLogger 
 
 /** JSON-serializable body type for API requests */
 export type JsonBody = Record<string, unknown> | unknown[] | string | number | boolean | null;
+
+// =============================================================================
+// Response Validation Helpers
+// =============================================================================
+
+/** Type helper for data with tokenType field */
+type DataWithToken = { tokenType: TokenType };
+
+/** Check if response has matching tokenType */
+export function hasTokenType(data: unknown, tokenType: TokenType): boolean {
+  const d = data as DataWithToken;
+  return d.tokenType === tokenType;
+}
+
+/** Check if response has a specific field */
+export function hasField(data: unknown, field: string): boolean {
+  return typeof data === "object" && data !== null && field in data;
+}
+
+/** Check if response has multiple fields */
+export function hasFields(data: unknown, fields: string[]): boolean {
+  return fields.every((f) => hasField(data, f));
+}
+
+/** Check if response has ok: true */
+export function isOk(data: unknown): boolean {
+  return hasField(data, "ok") && (data as { ok: boolean }).ok === true;
+}
+
+/**
+ * Validation helpers for common response patterns
+ * Re-exported for convenience in test configs
+ */
+export const validators = {
+  hasTokenType,
+  hasField,
+  hasFields,
+  isOk,
+
+  /** Validate result equals expected value */
+  resultEquals:
+    <T>(expected: T) =>
+    (data: unknown, tokenType: TokenType) => {
+      const d = data as { result: T; tokenType: TokenType };
+      return d.result === expected && d.tokenType === tokenType;
+    },
+
+  /** Validate result is a non-empty string */
+  resultIsString: (data: unknown, tokenType: TokenType) => {
+    const d = data as { result: string; tokenType: TokenType };
+    return typeof d.result === "string" && d.result.length > 0 && d.tokenType === tokenType;
+  },
+
+  /** Validate result is a number */
+  resultIsNumber: (data: unknown, tokenType: TokenType) => {
+    const d = data as { result: number; tokenType: TokenType };
+    return typeof d.result === "number" && d.tokenType === tokenType;
+  },
+
+  /** Validate result is an array */
+  resultIsArray: (data: unknown, tokenType: TokenType) => {
+    const d = data as { result: unknown[]; tokenType: TokenType };
+    return Array.isArray(d.result) && d.tokenType === tokenType;
+  },
+};

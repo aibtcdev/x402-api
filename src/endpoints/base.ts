@@ -203,7 +203,17 @@ export class StandardEndpoint extends BaseEndpoint {
   protected readonly pricingTier: PricingTier = "standard";
 }
 
-// Aliases for backwards compatibility and semantic clarity
+/**
+ * Semantic aliases for StandardEndpoint
+ *
+ * All these aliases map to StandardEndpoint (0.001 STX pricing).
+ * They exist for code clarity - making it obvious what type of
+ * operation an endpoint performs without affecting actual pricing.
+ *
+ * Note: Despite the names suggesting different tiers, all paid
+ * endpoints use the same "standard" pricing. Dynamic pricing is
+ * only used for LLM endpoints that calculate cost based on tokens.
+ */
 export const SimpleEndpoint = StandardEndpoint;
 export const AIEndpoint = StandardEndpoint;
 export const StorageReadEndpoint = StandardEndpoint;

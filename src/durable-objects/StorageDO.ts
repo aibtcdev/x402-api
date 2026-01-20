@@ -13,6 +13,33 @@
 import { DurableObject } from "cloudflare:workers";
 import type { Env } from "../types";
 
+// Alphanumeric characters for ID generation
+const ID_CHARS = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+
+/**
+ * Generate a random alphanumeric string
+ */
+function generateRandomString(length: number, prefix = ""): string {
+  let result = prefix;
+  for (let i = 0; i < length; i++) {
+    result += ID_CHARS.charAt(Math.floor(Math.random() * ID_CHARS.length));
+  }
+  return result;
+}
+
+/**
+ * Safely parse a JSON string field into a Record
+ * Returns null if parsing fails or value is falsy
+ */
+function parseJsonField(value: unknown): Record<string, unknown> | null {
+  if (!value) return null;
+  try {
+    return JSON.parse(value as string);
+  } catch {
+    return null;
+  }
+}
+
 export class StorageDO extends DurableObject<Env> {
   private sql: SqlStorage;
   private initialized = false;
@@ -165,17 +192,10 @@ export class StorageDO extends DurableObject<Env> {
     if (result.length === 0) return null;
 
     const row = result[0];
-    let metadata: Record<string, unknown> | null = null;
-    if (row.metadata) {
-      try {
-        metadata = JSON.parse(row.metadata as string);
-      } catch { /* ignore */ }
-    }
-
     return {
       key,
       value: row.value as string,
-      metadata,
+      metadata: parseJsonField(row.metadata),
       createdAt: row.created_at as string,
       updatedAt: row.updated_at as string,
     };
@@ -218,31 +238,16 @@ export class StorageDO extends DurableObject<Env> {
 
     const results = this.sql.exec(query, ...params).toArray();
 
-    return results.map((row) => {
-      let metadata: Record<string, unknown> | null = null;
-      if (row.metadata) {
-        try { metadata = JSON.parse(row.metadata as string); } catch { /* ignore */ }
-      }
-      return {
-        key: row.key as string,
-        metadata,
-        updatedAt: row.updated_at as string,
-      };
-    });
+    return results.map((row) => ({
+      key: row.key as string,
+      metadata: parseJsonField(row.metadata),
+      updatedAt: row.updated_at as string,
+    }));
   }
 
   // ===========================================================================
   // Paste Operations
   // ===========================================================================
-
-  private generateId(length: number = 8): string {
-    const chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
-    let id = "";
-    for (let i = 0; i < length; i++) {
-      id += chars.charAt(Math.floor(Math.random() * chars.length));
-    }
-    return id;
-  }
 
   async pasteCreate(
     content: string,
@@ -250,7 +255,7 @@ export class StorageDO extends DurableObject<Env> {
   ): Promise<{ id: string; createdAt: string; expiresAt: string | null }> {
     this.initializeSchema();
     const now = new Date().toISOString();
-    const id = this.generateId();
+    const id = generateRandomString(8);
     const expiresAt = options?.ttl
       ? new Date(Date.now() + options.ttl * 1000).toISOString()
       : null;
@@ -381,15 +386,6 @@ export class StorageDO extends DurableObject<Env> {
   // Lock Operations (Sync)
   // ===========================================================================
 
-  private generateLockToken(): string {
-    const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
-    let token = "";
-    for (let i = 0; i < 32; i++) {
-      token += chars.charAt(Math.floor(Math.random() * chars.length));
-    }
-    return token;
-  }
-
   private cleanupExpiredLocks(): void {
     this.sql.exec("DELETE FROM locks WHERE expires_at < ?", new Date().toISOString());
   }
@@ -420,7 +416,7 @@ export class StorageDO extends DurableObject<Env> {
       this.sql.exec("DELETE FROM locks WHERE name = ?", name);
     }
 
-    const token = this.generateLockToken();
+    const token = generateRandomString(32);
     this.sql.exec(
       `INSERT INTO locks (name, token, expires_at, acquired_at) VALUES (?, ?, ?, ?)`,
       name, token, expiresAt, now.toISOString()
@@ -507,10 +503,6 @@ export class StorageDO extends DurableObject<Env> {
   // Queue Operations
   // ===========================================================================
 
-  private generateJobId(): string {
-    return `job_${this.generateId(16)}`;
-  }
-
   private cleanupVisibilityTimeouts(queue: string): void {
     const now = new Date().toISOString();
     this.sql.exec(
@@ -529,7 +521,7 @@ export class StorageDO extends DurableObject<Env> {
     const priority = options?.priority ?? 0;
 
     for (const item of items) {
-      const jobId = this.generateJobId();
+      const jobId = generateRandomString(16, "job_");
       this.sql.exec(
         `INSERT INTO jobs (id, queue, payload, priority, status, max_attempts, available_at, created_at, updated_at)
          VALUES (?, ?, ?, ?, 'pending', 3, ?, ?, ?)`,
@@ -717,15 +709,10 @@ export class StorageDO extends DurableObject<Env> {
       const similarity = this.cosineSimilarity(queryEmbedding, storedEmbedding);
       if (similarity < threshold) continue;
 
-      let metadata: Record<string, unknown> | null = null;
-      if (row.tags) {
-        try { metadata = JSON.parse(row.tags as string); } catch { /* ignore */ }
-      }
-
       scored.push({
         id: row.key as string,
         text: row.content as string,
-        metadata,
+        metadata: parseJsonField(row.tags),
         similarity,
       });
     }
@@ -782,18 +769,12 @@ export class StorageDO extends DurableObject<Env> {
       .exec("SELECT key, content, tags, created_at FROM memories ORDER BY created_at DESC LIMIT ? OFFSET ?", limit, offset)
       .toArray();
 
-    const items = results.map((row) => {
-      let metadata: Record<string, unknown> | null = null;
-      if (row.tags) {
-        try { metadata = JSON.parse(row.tags as string); } catch { /* ignore */ }
-      }
-      return {
-        id: row.key as string,
-        text: row.content as string,
-        metadata,
-        createdAt: row.created_at as string,
-      };
-    });
+    const items = results.map((row) => ({
+      id: row.key as string,
+      text: row.content as string,
+      metadata: parseJsonField(row.tags),
+      createdAt: row.created_at as string,
+    }));
 
     return { items, total };
   }
