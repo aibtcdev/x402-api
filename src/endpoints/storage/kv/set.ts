@@ -3,6 +3,7 @@
  */
 
 import { StorageWriteEndpoint } from "../../base";
+import { tokenTypeParam, response400, response402, stringProp, boolProp, objectProp, intProp, okProp, tokenTypeProp } from "../../schema";
 import type { AppContext } from "../../../types";
 
 export class KvSet extends StorageWriteEndpoint {
@@ -17,23 +18,16 @@ export class KvSet extends StorageWriteEndpoint {
             type: "object" as const,
             required: ["key", "value"],
             properties: {
-              key: { type: "string" as const, description: "Key to set" },
-              value: { type: "string" as const, description: "Value to store" },
-              metadata: { type: "object" as const, description: "Optional metadata" },
-              ttl: { type: "integer" as const, description: "TTL in seconds (optional)" },
+              key: { ...stringProp, description: "Key to set" },
+              value: { ...stringProp, description: "Value to store" },
+              metadata: { ...objectProp, description: "Optional metadata" },
+              ttl: { ...intProp, description: "TTL in seconds (optional)" },
             },
           },
         },
       },
     },
-    parameters: [
-      {
-        name: "tokenType",
-        in: "query" as const,
-        required: false,
-        schema: { type: "string" as const, enum: ["STX", "sBTC", "USDCx"], default: "STX" },
-      },
-    ],
+    parameters: [tokenTypeParam],
     responses: {
       "200": {
         description: "Value set",
@@ -41,18 +35,13 @@ export class KvSet extends StorageWriteEndpoint {
           "application/json": {
             schema: {
               type: "object" as const,
-              properties: {
-                ok: { type: "boolean" as const },
-                key: { type: "string" as const },
-                created: { type: "boolean" as const },
-                tokenType: { type: "string" as const },
-              },
+              properties: { ok: okProp, key: stringProp, created: boolProp, tokenType: tokenTypeProp },
             },
           },
         },
       },
-      "400": { description: "Invalid request" },
-      "402": { description: "Payment required" },
+      "400": response400,
+      "402": response402,
     },
   };
 

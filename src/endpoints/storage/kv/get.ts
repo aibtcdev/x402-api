@@ -3,27 +3,14 @@
  */
 
 import { StorageReadEndpoint } from "../../base";
+import { tokenTypeParam, pathParam, response402, stringProp, objectProp, okProp, tokenTypeProp } from "../../schema";
 import type { AppContext } from "../../../types";
 
 export class KvGet extends StorageReadEndpoint {
   schema = {
     tags: ["Storage - KV"],
     summary: "(paid, storage_read) Get value from KV store",
-    parameters: [
-      {
-        name: "key",
-        in: "path" as const,
-        required: true,
-        schema: { type: "string" as const },
-        description: "Key to retrieve",
-      },
-      {
-        name: "tokenType",
-        in: "query" as const,
-        required: false,
-        schema: { type: "string" as const, enum: ["STX", "sBTC", "USDCx"], default: "STX" },
-      },
-    ],
+    parameters: [pathParam("key", "Key to retrieve"), tokenTypeParam],
     responses: {
       "200": {
         description: "Value retrieved",
@@ -31,18 +18,12 @@ export class KvGet extends StorageReadEndpoint {
           "application/json": {
             schema: {
               type: "object" as const,
-              properties: {
-                ok: { type: "boolean" as const },
-                key: { type: "string" as const },
-                value: { type: "string" as const },
-                metadata: { type: "object" as const },
-                tokenType: { type: "string" as const },
-              },
+              properties: { ok: okProp, key: stringProp, value: stringProp, metadata: objectProp, createdAt: stringProp, updatedAt: stringProp, tokenType: tokenTypeProp },
             },
           },
         },
       },
-      "402": { description: "Payment required" },
+      "402": response402,
       "404": { description: "Key not found" },
     },
   };

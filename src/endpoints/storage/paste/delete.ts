@@ -3,27 +3,14 @@
  */
 
 import { StorageWriteEndpoint } from "../../base";
+import { tokenTypeParam, pathParam, response402, stringProp, boolProp, okProp, tokenTypeProp } from "../../schema";
 import type { AppContext } from "../../../types";
 
 export class PasteDelete extends StorageWriteEndpoint {
   schema = {
     tags: ["Storage - Paste"],
     summary: "(paid, storage_write) Delete a paste",
-    parameters: [
-      {
-        name: "id",
-        in: "path" as const,
-        required: true,
-        schema: { type: "string" as const },
-        description: "Paste ID to delete",
-      },
-      {
-        name: "tokenType",
-        in: "query" as const,
-        required: false,
-        schema: { type: "string" as const, enum: ["STX", "sBTC", "USDCx"], default: "STX" },
-      },
-    ],
+    parameters: [pathParam("id", "Paste ID to delete"), tokenTypeParam],
     responses: {
       "200": {
         description: "Delete result",
@@ -31,17 +18,12 @@ export class PasteDelete extends StorageWriteEndpoint {
           "application/json": {
             schema: {
               type: "object" as const,
-              properties: {
-                ok: { type: "boolean" as const },
-                deleted: { type: "boolean" as const },
-                id: { type: "string" as const },
-                tokenType: { type: "string" as const },
-              },
+              properties: { ok: okProp, deleted: boolProp, id: stringProp, tokenType: tokenTypeProp },
             },
           },
         },
       },
-      "402": { description: "Payment required" },
+      "402": response402,
     },
   };
 

@@ -3,6 +3,7 @@
  */
 
 import { StorageWriteLargeEndpoint } from "../../base";
+import { tokenTypeParam, response400, response402, stringProp, intProp, okProp, tokenTypeProp } from "../../schema";
 import type { AppContext } from "../../../types";
 
 export class PasteCreate extends StorageWriteLargeEndpoint {
@@ -17,23 +18,16 @@ export class PasteCreate extends StorageWriteLargeEndpoint {
             type: "object" as const,
             required: ["content"],
             properties: {
-              content: { type: "string" as const, description: "Paste content" },
-              title: { type: "string" as const, description: "Optional title" },
-              language: { type: "string" as const, description: "Programming language for syntax highlighting" },
-              ttl: { type: "integer" as const, description: "TTL in seconds (optional)" },
+              content: { ...stringProp, description: "Paste content" },
+              title: { ...stringProp, description: "Optional title" },
+              language: { ...stringProp, description: "Programming language for syntax highlighting" },
+              ttl: { ...intProp, description: "TTL in seconds (optional)" },
             },
           },
         },
       },
     },
-    parameters: [
-      {
-        name: "tokenType",
-        in: "query" as const,
-        required: false,
-        schema: { type: "string" as const, enum: ["STX", "sBTC", "USDCx"], default: "STX" },
-      },
-    ],
+    parameters: [tokenTypeParam],
     responses: {
       "200": {
         description: "Paste created",
@@ -41,19 +35,13 @@ export class PasteCreate extends StorageWriteLargeEndpoint {
           "application/json": {
             schema: {
               type: "object" as const,
-              properties: {
-                ok: { type: "boolean" as const },
-                id: { type: "string" as const },
-                createdAt: { type: "string" as const },
-                expiresAt: { type: "string" as const },
-                tokenType: { type: "string" as const },
-              },
+              properties: { ok: okProp, id: stringProp, createdAt: stringProp, expiresAt: stringProp, tokenType: tokenTypeProp },
             },
           },
         },
       },
-      "400": { description: "Invalid request" },
-      "402": { description: "Payment required" },
+      "400": response400,
+      "402": response402,
     },
   };
 

@@ -3,6 +3,7 @@
  */
 
 import { StorageReadEndpoint } from "../../base";
+import { tokenTypeParam, queryParamString, queryParamInt, response402, stringProp, objectProp, intProp, okProp, tokenTypeProp } from "../../schema";
 import type { AppContext } from "../../../types";
 
 export class KvList extends StorageReadEndpoint {
@@ -10,26 +11,9 @@ export class KvList extends StorageReadEndpoint {
     tags: ["Storage - KV"],
     summary: "(paid, storage_read) List keys in KV store",
     parameters: [
-      {
-        name: "prefix",
-        in: "query" as const,
-        required: false,
-        schema: { type: "string" as const },
-        description: "Filter by key prefix",
-      },
-      {
-        name: "limit",
-        in: "query" as const,
-        required: false,
-        schema: { type: "integer" as const, default: 100 },
-        description: "Max results to return",
-      },
-      {
-        name: "tokenType",
-        in: "query" as const,
-        required: false,
-        schema: { type: "string" as const, enum: ["STX", "sBTC", "USDCx"], default: "STX" },
-      },
+      queryParamString("prefix", "Filter by key prefix"),
+      queryParamInt("limit", "Max results to return", 100),
+      tokenTypeParam,
     ],
     responses: {
       "200": {
@@ -39,26 +23,22 @@ export class KvList extends StorageReadEndpoint {
             schema: {
               type: "object" as const,
               properties: {
-                ok: { type: "boolean" as const },
+                ok: okProp,
                 keys: {
                   type: "array" as const,
                   items: {
                     type: "object" as const,
-                    properties: {
-                      key: { type: "string" as const },
-                      metadata: { type: "object" as const },
-                      updatedAt: { type: "string" as const },
-                    },
+                    properties: { key: stringProp, metadata: objectProp, updatedAt: stringProp },
                   },
                 },
-                count: { type: "integer" as const },
-                tokenType: { type: "string" as const },
+                count: intProp,
+                tokenType: tokenTypeProp,
               },
             },
           },
         },
       },
-      "402": { description: "Payment required" },
+      "402": response402,
     },
   };
 

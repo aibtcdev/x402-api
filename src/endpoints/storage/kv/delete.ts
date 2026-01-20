@@ -3,27 +3,14 @@
  */
 
 import { StorageWriteEndpoint } from "../../base";
+import { tokenTypeParam, pathParam, response402, stringProp, boolProp, okProp, tokenTypeProp } from "../../schema";
 import type { AppContext } from "../../../types";
 
 export class KvDelete extends StorageWriteEndpoint {
   schema = {
     tags: ["Storage - KV"],
     summary: "(paid, storage_write) Delete key from KV store",
-    parameters: [
-      {
-        name: "key",
-        in: "path" as const,
-        required: true,
-        schema: { type: "string" as const },
-        description: "Key to delete",
-      },
-      {
-        name: "tokenType",
-        in: "query" as const,
-        required: false,
-        schema: { type: "string" as const, enum: ["STX", "sBTC", "USDCx"], default: "STX" },
-      },
-    ],
+    parameters: [pathParam("key", "Key to delete"), tokenTypeParam],
     responses: {
       "200": {
         description: "Delete result",
@@ -31,17 +18,12 @@ export class KvDelete extends StorageWriteEndpoint {
           "application/json": {
             schema: {
               type: "object" as const,
-              properties: {
-                ok: { type: "boolean" as const },
-                deleted: { type: "boolean" as const },
-                key: { type: "string" as const },
-                tokenType: { type: "string" as const },
-              },
+              properties: { ok: okProp, deleted: boolProp, key: stringProp, tokenType: tokenTypeProp },
             },
           },
         },
       },
-      "402": { description: "Payment required" },
+      "402": response402,
     },
   };
 

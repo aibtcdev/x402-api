@@ -3,27 +3,14 @@
  */
 
 import { StorageReadEndpoint } from "../../base";
+import { tokenTypeParam, pathParam, response402, stringProp, okProp, tokenTypeProp } from "../../schema";
 import type { AppContext } from "../../../types";
 
 export class PasteGet extends StorageReadEndpoint {
   schema = {
     tags: ["Storage - Paste"],
     summary: "(paid, storage_read) Get a paste by ID",
-    parameters: [
-      {
-        name: "id",
-        in: "path" as const,
-        required: true,
-        schema: { type: "string" as const },
-        description: "Paste ID",
-      },
-      {
-        name: "tokenType",
-        in: "query" as const,
-        required: false,
-        schema: { type: "string" as const, enum: ["STX", "sBTC", "USDCx"], default: "STX" },
-      },
-    ],
+    parameters: [pathParam("id", "Paste ID"), tokenTypeParam],
     responses: {
       "200": {
         description: "Paste retrieved",
@@ -31,21 +18,12 @@ export class PasteGet extends StorageReadEndpoint {
           "application/json": {
             schema: {
               type: "object" as const,
-              properties: {
-                ok: { type: "boolean" as const },
-                id: { type: "string" as const },
-                content: { type: "string" as const },
-                title: { type: "string" as const },
-                language: { type: "string" as const },
-                createdAt: { type: "string" as const },
-                expiresAt: { type: "string" as const },
-                tokenType: { type: "string" as const },
-              },
+              properties: { ok: okProp, id: stringProp, content: stringProp, title: stringProp, language: stringProp, createdAt: stringProp, expiresAt: stringProp, tokenType: tokenTypeProp },
             },
           },
         },
       },
-      "402": { description: "Payment required" },
+      "402": response402,
       "404": { description: "Paste not found" },
     },
   };
