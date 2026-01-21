@@ -375,8 +375,8 @@ async function testEndpointWithToken(
         continue;
       }
 
-      // Check for other retryable errors
-      if (isRetryableError(retryRes.status, errorCode, errorMessage || errText) && attempt < maxRetries) {
+      // Check for other retryable errors (mutually exclusive with nonce conflict)
+      if (!isNonceConflict(fullErrorText) && isRetryableError(retryRes.status, errorCode, errorMessage || errText) && attempt < maxRetries) {
         const retryAfterSecs = retryAfterHeader ? parseInt(retryAfterHeader, 10) : bodyRetryAfter || 0;
         const delayMs = calculateBackoff(attempt, retryAfterSecs);
 

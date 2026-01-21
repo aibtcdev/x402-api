@@ -309,6 +309,10 @@ export interface PaymentRequired {
   nonce: string;
   expiresAt: string;
   tokenType: TokenType;
+  /** Pricing details for the required payment */
+  pricing: unknown;
+  /** Optional token contract address or identifier */
+  tokenContract?: string;
 }
 
 /** Result from makeX402RequestWithRetry */
@@ -375,14 +379,35 @@ export async function makeX402RequestWithRetry(
     // Step 1: Get 402 payment requirements (fresh on each attempt for nonce conflicts)
     log(`Attempt ${attempt + 1}/${maxRetries + 1}: fetching payment requirements...`);
 
-    const initialRes = await fetch(urlWithToken, {
-      method,
-      headers: {
-        ...(body ? { "Content-Type": "application/json" } : {}),
-        ...extraHeaders,
-      },
-      body: body ? JSON.stringify(body) : undefined,
-    });
+    let initialRes: Response;
+    try {
+      initialRes = await fetch(urlWithToken, {
+        method,
+        headers: {
+          ...(body ? { "Content-Type": "application/json" } : {}),
+          ...extraHeaders,
+        },
+        body: body ? JSON.stringify(body) : undefined,
+      });
+    } catch (error) {
+      // Network-level fetch error - treat as retryable
+      log(`Network error during initial request: ${error instanceof Error ? error.message : String(error)}`);
+      if (attempt < maxRetries) {
+        retryCount++;
+        const backoffMs = Math.min(baseDelayMs * Math.pow(2, attempt), maxDelayMs);
+        log(`Waiting ${backoffMs}ms before retry...`);
+        await sleep(backoffMs);
+        continue;
+      }
+      // Max retries exceeded - return synthetic error response
+      return {
+        status: 0,
+        data: { error: "network_error", message: error instanceof Error ? error.message : String(error) },
+        headers: new Headers(),
+        retryCount,
+        wasNonceConflict,
+      };
+    }
 
     // If not 402, return as-is (success or non-payment error)
     if (initialRes.status !== 402) {
@@ -406,16 +431,37 @@ export async function makeX402RequestWithRetry(
     log("Payment signed");
 
     // Step 3: Submit with payment header
-    const paidRes = await fetch(urlWithToken, {
-      method,
-      headers: {
-        ...(body ? { "Content-Type": "application/json" } : {}),
-        ...extraHeaders,
-        "X-PAYMENT": signResult.signedTransaction,
-        "X-PAYMENT-TOKEN-TYPE": tokenType,
-      },
-      body: body ? JSON.stringify(body) : undefined,
-    });
+    let paidRes: Response;
+    try {
+      paidRes = await fetch(urlWithToken, {
+        method,
+        headers: {
+          ...(body ? { "Content-Type": "application/json" } : {}),
+          ...extraHeaders,
+          "X-PAYMENT": signResult.signedTransaction,
+          "X-PAYMENT-TOKEN-TYPE": tokenType,
+        },
+        body: body ? JSON.stringify(body) : undefined,
+      });
+    } catch (error) {
+      // Network-level fetch error on paid request - treat as retryable
+      log(`Network error during paid request: ${error instanceof Error ? error.message : String(error)}`);
+      if (attempt < maxRetries) {
+        retryCount++;
+        const backoffMs = Math.min(baseDelayMs * Math.pow(2, attempt), maxDelayMs);
+        log(`Waiting ${backoffMs}ms before retry...`);
+        await sleep(backoffMs);
+        continue;
+      }
+      // Max retries exceeded - return synthetic error response
+      return {
+        status: 0,
+        data: { error: "network_error", message: error instanceof Error ? error.message : String(error) },
+        headers: new Headers(),
+        retryCount,
+        wasNonceConflict,
+      };
+    }
 
     // Success or expected terminal status
     if (isTerminalStatus(paidRes.status)) {
@@ -448,19 +494,17 @@ export async function makeX402RequestWithRetry(
 
     const fullErrorText = `${errorCode || ""} ${errorMessage || ""} ${validationError || ""} ${errText}`;
 
-    // Check for nonce conflict specifically
-    if (isNonceConflict(fullErrorText)) {
+    // Check for nonce conflict specifically (handled differently from other retryable errors)
+    if (isNonceConflict(fullErrorText) && attempt < maxRetries) {
       wasNonceConflict = true;
-      if (attempt < maxRetries) {
-        retryCount++;
-        log(`Nonce conflict detected, waiting ${nonceConflictDelayMs}ms for mempool to clear...`);
-        await sleep(nonceConflictDelayMs);
-        continue;
-      }
+      retryCount++;
+      log(`Nonce conflict detected, waiting ${nonceConflictDelayMs}ms for mempool to clear...`);
+      await sleep(nonceConflictDelayMs);
+      continue;
     }
 
-    // Check for other retryable errors
-    if (isRetryableError(paidRes.status, errorCode, errorMessage || errText) && attempt < maxRetries) {
+    // Check for other retryable errors (mutually exclusive with nonce conflict)
+    if (!isNonceConflict(fullErrorText) && isRetryableError(paidRes.status, errorCode, errorMessage || errText) && attempt < maxRetries) {
       retryCount++;
       const retryAfterSecs = paidRes.headers.get("Retry-After")
         ? parseInt(paidRes.headers.get("Retry-After")!, 10)

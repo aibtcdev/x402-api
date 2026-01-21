@@ -43,7 +43,7 @@ async function makeX402Request(
   logger.debug(`Requesting ${method} ${endpoint}...`);
 
   const result = await makeX402RequestWithRetry(endpoint, method, x402Client, tokenType, {
-    body: body ?? undefined,
+    body,
     retry: {
       maxRetries: 3,
       nonceConflictDelayMs: NONCE_CONFLICT_DELAY_MS,
@@ -51,7 +51,7 @@ async function makeX402Request(
     },
   });
 
-  if (result.wasNonceConflict && result.retryCount && result.retryCount > 0) {
+  if (result.wasNonceConflict && result.retryCount > 0) {
     logger.debug(`Recovered from nonce conflict after ${result.retryCount} retries`);
   }
 

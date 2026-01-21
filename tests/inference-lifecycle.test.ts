@@ -155,7 +155,7 @@ async function makeX402Request(
     },
   });
 
-  if (result.wasNonceConflict && result.retryCount && result.retryCount > 0) {
+  if (result.wasNonceConflict && result.retryCount > 0) {
     logger.debug(`Recovered from nonce conflict after ${result.retryCount} retries`);
   }
 
