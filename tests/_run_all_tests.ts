@@ -299,15 +299,23 @@ async function testEndpointWithToken(
       return { passed: false, error: "No accepts array in payment requirements" };
     }
 
-    // Get the payment requirements from accepts array
-    const requirements = paymentReq.accepts[0];
-
     // Step 2-3: Sign and submit payment with retry logic
     // For nonce conflicts, we need to re-fetch 402 and re-sign (can't reuse stale payment)
     let retryRes: Response | null = null;
     let lastError = "";
 
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
+      // Get the payment requirements from accepts array (inside loop to use fresh requirements after retry)
+      const requirements = paymentReq.accepts[0];
+
+      // Validate that the accepted asset matches the requested token type
+      if (requirements.asset !== tokenType) {
+        return {
+          passed: false,
+          error: `Payment requirements asset ${requirements.asset} does not match requested token type ${tokenType}`,
+        };
+      }
+
       // Sign payment (fresh on each attempt for nonce conflict recovery)
       if (attempt === 0) {
         logger.debug("2. Signing payment...");
@@ -315,12 +323,16 @@ async function testEndpointWithToken(
         logger.debug(`2. Re-signing payment (attempt ${attempt + 1}/${maxRetries + 1})...`);
       }
 
+      // Derive network from requirements (2147483648 is testnet chain ID)
+      const derivedNetwork: "mainnet" | "testnet" =
+        requirements.network.includes("2147483648") ? "testnet" : "mainnet";
+
       // Build v1-compatible request for the client's signPayment method
       const v1CompatibleRequest = {
         maxAmountRequired: requirements.amount,
         resource: paymentReq.resource.url,
         payTo: requirements.payTo,
-        network: X402_NETWORK as "mainnet" | "testnet",
+        network: derivedNetwork,
         nonce: crypto.randomUUID(),
         expiresAt: new Date(Date.now() + 5 * 60 * 1000).toISOString(),
         tokenType: tokenType,
@@ -402,7 +414,18 @@ async function testEndpointWithToken(
         });
 
         if (freshRes.status === 402) {
-          paymentReq = await freshRes.json();
+          const freshPaymentReq = await freshRes.json();
+          // Validate re-fetched payment requirements (must be v2 with accepts array)
+          if (
+            !freshPaymentReq ||
+            freshPaymentReq.x402Version !== 2 ||
+            !Array.isArray(freshPaymentReq.accepts) ||
+            freshPaymentReq.accepts.length === 0
+          ) {
+            logger.debug("Invalid payment requirements in re-fetched 402 response");
+            return { passed: false, error: "Invalid payment requirements in re-fetched 402 response" };
+          }
+          paymentReq = freshPaymentReq as PaymentRequiredV2;
           logger.debug("Got fresh payment requirements");
         }
         continue;
