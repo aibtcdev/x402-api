@@ -102,31 +102,6 @@ export interface TokenContract {
 }
 
 /**
- * V1 Payment Required response structure (legacy)
- * @deprecated Use PaymentRequiredV2 from x402-stacks
- */
-export interface X402PaymentRequiredV1 {
-  maxAmountRequired: string;
-  resource: string;
-  payTo: string;
-  network: "mainnet" | "testnet";
-  nonce: string;
-  expiresAt: string;
-  tokenType: TokenType;
-  tokenContract?: TokenContract;
-  pricing: {
-    type: "fixed" | "dynamic";
-    tier?: PricingTier;
-    estimate?: {
-      model?: string;
-      estimatedInputTokens?: number;
-      estimatedOutputTokens?: number;
-      estimatedCostUsd?: string;
-    };
-  };
-}
-
-/**
  * x402 v2 context stored in request for downstream use
  */
 export interface X402Context {

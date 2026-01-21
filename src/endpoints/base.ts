@@ -9,7 +9,7 @@
  */
 
 import { OpenAPIRoute } from "chanfana";
-import { Address, AddressVersion } from "@stacks/transactions";
+import { Address } from "@stacks/transactions";
 import { validateTokenType, getFixedTierEstimate } from "../services/pricing";
 import type { AppContext, TokenType, PricingTier, PriceEstimate } from "../types";
 import type { ContentfulStatusCode } from "hono/utils/http-status";

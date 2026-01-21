@@ -208,11 +208,6 @@ async function testSingleToken(
   // Get the payment requirements for the requested token type
   const requirements = paymentReqBody.accepts[0];
 
-  // Verify the asset matches the token type
-  const expectedAsset = tokenType === "STX"
-    ? "STX"
-    : requirements.asset; // For sBTC/USDCx, trust the server's asset
-
   logger.debug("Using requirements", {
     scheme: requirements.scheme,
     network: requirements.network,

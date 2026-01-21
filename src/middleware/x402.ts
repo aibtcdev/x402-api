@@ -9,10 +9,8 @@ import type { Context, MiddlewareHandler } from "hono";
 import {
   X402PaymentVerifier,
   networkToCAIP2,
-  assetToV2,
   X402_HEADERS,
   X402_ERROR_CODES,
-  STACKS_NETWORKS,
 } from "x402-stacks";
 import type {
   NetworkV2,
@@ -97,13 +95,6 @@ function decodeBase64Json<T>(base64: string): T | null {
   } catch {
     return null;
   }
-}
-
-/**
- * Convert network to CAIP-2 format
- */
-function getNetworkV2(network: "mainnet" | "testnet"): NetworkV2 {
-  return networkToCAIP2(network);
 }
 
 /**
@@ -234,7 +225,7 @@ export function x402Middleware(
     if (tier === "free" && !dynamic) {
       c.set("x402", {
         payerAddress: "anonymous",
-        settleResult: { success: true, transaction: "", network: getNetworkV2(c.env.X402_NETWORK), payer: "anonymous" },
+        settleResult: { success: true, transaction: "", network: networkToCAIP2(c.env.X402_NETWORK), payer: "anonymous" },
         paymentPayload: {} as PaymentPayloadV2,
         paymentRequirements: {} as PaymentRequirementsV2,
         priceEstimate,
@@ -243,7 +234,7 @@ export function x402Middleware(
       return next();
     }
 
-    const networkV2 = getNetworkV2(c.env.X402_NETWORK);
+    const networkV2 = networkToCAIP2(c.env.X402_NETWORK);
     const asset = getAssetV2(tokenType, c.env.X402_NETWORK);
 
     // Build payment requirements for v2
