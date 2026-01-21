@@ -226,8 +226,9 @@ export function x402Middleware(
       c.set("x402", {
         payerAddress: "anonymous",
         settleResult: { success: true, transaction: "", network: networkToCAIP2(c.env.X402_NETWORK), payer: "anonymous" },
-        paymentPayload: {} as PaymentPayloadV2,
-        paymentRequirements: {} as PaymentRequirementsV2,
+        // No payment data for free tier
+        paymentPayload: undefined,
+        paymentRequirements: undefined,
         priceEstimate,
         parsedBody,
       } as X402Context);

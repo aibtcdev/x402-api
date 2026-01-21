@@ -61,18 +61,6 @@ export interface TestResult {
 }
 
 /**
- * Decode base64 JSON from header or body
- */
-function decodeBase64Json<T>(base64: string): T | null {
-  try {
-    const json = atob(base64);
-    return JSON.parse(json) as T;
-  } catch {
-    return null;
-  }
-}
-
-/**
  * Creates a test function for an X402 v2 paid endpoint.
  * The returned function follows the standard X402 v2 payment flow.
  */

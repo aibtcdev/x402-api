@@ -103,12 +103,13 @@ export interface TokenContract {
 
 /**
  * x402 v2 context stored in request for downstream use
+ * Note: paymentPayload and paymentRequirements are undefined for free tier
  */
 export interface X402Context {
   payerAddress: string;
   settleResult: import("x402-stacks").SettlementResponseV2;
-  paymentPayload: import("x402-stacks").PaymentPayloadV2;
-  paymentRequirements: import("x402-stacks").PaymentRequirementsV2;
+  paymentPayload?: import("x402-stacks").PaymentPayloadV2;
+  paymentRequirements?: import("x402-stacks").PaymentRequirementsV2;
   priceEstimate: PriceEstimate;
   parsedBody?: unknown;
 }
