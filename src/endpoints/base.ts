@@ -9,18 +9,12 @@
  */
 
 import { OpenAPIRoute } from "chanfana";
-import { Address, AddressVersion, deserializeTransaction } from "@stacks/transactions";
+import { Address, AddressVersion } from "@stacks/transactions";
 import { validateTokenType, getFixedTierEstimate } from "../services/pricing";
-import type { AppContext, TokenType, PricingTier, PriceEstimate, SettlePaymentResult } from "../types";
+import type { AppContext, TokenType, PricingTier, PriceEstimate } from "../types";
 import type { ContentfulStatusCode } from "hono/utils/http-status";
 import type { StorageDO } from "../durable-objects/StorageDO";
 import type { UsageDO } from "../durable-objects/UsageDO";
-
-// Extended settle result that may have sender in different formats
-interface ExtendedSettleResult extends SettlePaymentResult {
-  senderAddress?: string;
-  sender_address?: string;
-}
 
 /**
  * Base class for all API endpoints
@@ -69,7 +63,7 @@ export class BaseEndpoint extends OpenAPIRoute {
   }
 
   /**
-   * Get the payer's address from the payment settlement result or signed transaction
+   * Get the payer's address from the x402 v2 payment context
    * This is set by the x402 middleware after successful payment verification
    */
   protected getPayerAddress(c: AppContext): string | null {
@@ -77,50 +71,6 @@ export class BaseEndpoint extends OpenAPIRoute {
     if (x402Context?.payerAddress) {
       return x402Context.payerAddress;
     }
-
-    // Fallback to direct context values (for compatibility)
-    const settleResult = c.get("settleResult") as ExtendedSettleResult | undefined;
-    const signedTx = c.get("signedTx") as string | undefined;
-    const network = c.env?.X402_NETWORK || "mainnet";
-
-    // Try various fields from settle result first
-    if (settleResult?.sender) {
-      return settleResult.sender;
-    }
-    if (settleResult?.senderAddress) {
-      return settleResult.senderAddress;
-    }
-    if (settleResult?.sender_address) {
-      return settleResult.sender_address;
-    }
-
-    // Fallback: extract sender from signed transaction
-    if (signedTx) {
-      try {
-        const hex = signedTx.startsWith("0x") ? signedTx.slice(2) : signedTx;
-        const tx = deserializeTransaction(hex);
-
-        if (tx.auth?.spendingCondition) {
-          const spendingCondition = tx.auth.spendingCondition as {
-            signer?: string;
-            hashMode?: number;
-          };
-
-          if (spendingCondition.signer) {
-            // Convert hash160 to address using the appropriate network
-            const hash160 = spendingCondition.signer;
-            const addressVersion = network === "mainnet"
-              ? AddressVersion.MainnetSingleSig
-              : AddressVersion.TestnetSingleSig;
-            const address = Address.stringify({ hash160, version: addressVersion });
-            return address;
-          }
-        }
-      } catch (error) {
-        c.var.logger.warn("Failed to extract sender from signed tx", { error: String(error) });
-      }
-    }
-
     return null;
   }
 
