@@ -90,19 +90,32 @@ export { MetricsDO } from "./durable-objects/MetricsDO";
 
 const app = new Hono<{ Bindings: Env; Variables: AppVariables }>();
 
-// CORS middleware
+// CORS middleware (v2 headers)
 app.use(
   "*",
   cors({
     origin: "*",
     allowMethods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allowHeaders: [
+      // v2 headers
+      "payment-signature",
+      "payment-required",
+      // Legacy headers (kept for backward compatibility during transition)
       "X-PAYMENT",
       "X-PAYMENT-TOKEN-TYPE",
+      // Standard headers
       "Authorization",
       "Content-Type",
     ],
-    exposeHeaders: ["X-PAYMENT-RESPONSE", "X-PAYER-ADDRESS", "X-Request-ID"],
+    exposeHeaders: [
+      // v2 headers
+      "payment-required",
+      "payment-response",
+      // Legacy headers
+      "X-PAYMENT-RESPONSE",
+      "X-PAYER-ADDRESS",
+      "X-Request-ID",
+    ],
   })
 );
 
@@ -270,9 +283,9 @@ app.use("*", async (c, next) => {
 
   await next();
 
-  // Only track metrics for paid requests
-  const paymentHeader = c.req.header("X-PAYMENT");
-  if (!paymentHeader) return;
+  // Only track metrics for paid requests (check both v2 and legacy headers)
+  const paymentSignature = c.req.header("payment-signature") || c.req.header("X-PAYMENT");
+  if (!paymentSignature) return;
 
   // Skip metrics for free endpoints
   const path = c.req.path;
@@ -348,13 +361,16 @@ const openapi = fromHono(app, {
   schema: {
     info: {
       title: "x402 Stacks API",
-      version: "1.0.0",
+      version: "2.0.0",
       description: `
-Pay-per-use API powered by x402 protocol on Stacks blockchain.
+Pay-per-use API powered by x402 v2 protocol on Stacks blockchain.
 
-## Payment
-All paid endpoints require an \`X-PAYMENT\` header with a signed Stacks transaction.
-Optionally specify token via \`X-PAYMENT-TOKEN-TYPE\` (STX, sBTC, USDCx).
+## Payment (x402 v2)
+All paid endpoints use the Coinbase-compatible x402 v2 protocol:
+- Request without payment returns 402 with \`payment-required\` header (base64 JSON)
+- Client signs transaction and sends \`payment-signature\` header (base64 JSON)
+- Successful response includes \`payment-response\` header (base64 JSON)
+- Optionally specify token via \`X-PAYMENT-TOKEN-TYPE\` (STX, sBTC, USDCx)
 
 ## Pricing
 | Tier | STX | Description |
@@ -391,8 +407,8 @@ Optionally specify token via \`X-PAYMENT-TOKEN-TYPE\` (STX, sBTC, USDCx).
 app.get("/", (c) => {
   return c.json({
     service: "x402-stacks-api",
-    version: "1.0.0",
-    description: "Pay-per-use API powered by x402 protocol on Stacks blockchain",
+    version: "2.0.0",
+    description: "Pay-per-use API powered by x402 v2 protocol on Stacks blockchain",
     docs: "/docs",
     categories: {
       inference: "/inference/* - LLM chat completions",
@@ -401,8 +417,13 @@ app.get("/", (c) => {
       storage: "/storage/* - Stateful operations (KV, paste, DB, sync, queue, memory)",
     },
     payment: {
+      version: 2,
       tokens: ["STX", "sBTC", "USDCx"],
-      header: "X-PAYMENT",
+      headers: {
+        request: "payment-signature",
+        response: "payment-response",
+        required: "payment-required",
+      },
       tokenTypeHeader: "X-PAYMENT-TOKEN-TYPE",
     },
   });

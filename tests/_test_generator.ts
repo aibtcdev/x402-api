@@ -1,14 +1,23 @@
 /**
- * Test Generator for X402 API Endpoints
+ * Test Generator for X402 API Endpoints (V2 Protocol)
  *
  * Creates standardized test functions for paid endpoints that follow the
- * X402 payment flow: initial 402 -> sign payment -> retry with header -> validate.
+ * X402 v2 payment flow: initial 402 -> sign payment -> retry with header -> validate.
  */
 
-import { X402PaymentClient } from "x402-stacks";
-import type { TokenType, NetworkType } from "x402-stacks";
+import {
+  X402PaymentClient,
+  encodePaymentPayload,
+  X402_HEADERS,
+} from "x402-stacks";
+import type {
+  TokenType,
+  NetworkType,
+  PaymentRequiredV2,
+  PaymentRequirementsV2,
+  PaymentPayloadV2,
+} from "x402-stacks";
 import { deriveChildAccount } from "../src/utils/wallet";
-import type { X402PaymentRequired } from "../src/types";
 import {
   TEST_TOKENS,
   X402_CLIENT_PK,
@@ -22,7 +31,7 @@ import {
 // Re-export validators for convenience
 export { validators };
 
-export type { X402PaymentRequired };
+export type { PaymentRequiredV2 };
 
 export interface TestConfig {
   /** Short name for the test (used in logs) */
@@ -52,8 +61,8 @@ export interface TestResult {
 }
 
 /**
- * Creates a test function for an X402 paid endpoint.
- * The returned function follows the standard X402 payment flow.
+ * Creates a test function for an X402 v2 paid endpoint.
+ * The returned function follows the standard X402 v2 payment flow.
  */
 export function createEndpointTest(config: TestConfig) {
   return async function testX402ManualFlow(verbose = false): Promise<TestResult> {
@@ -169,28 +178,73 @@ async function testSingleToken(
     return false;
   }
 
-  const paymentReq: X402PaymentRequired = await initialRes.json();
-  logger.debug("402 Payment req", paymentReq);
+  // Parse v2 payment required from response body
+  const paymentReqBody: PaymentRequiredV2 = await initialRes.json();
+  logger.debug("402 Payment req (v2)", paymentReqBody);
 
-  if (paymentReq.tokenType !== tokenType) {
-    logger.error(`Expected tokenType ${tokenType}, got ${paymentReq.tokenType}`);
+  // Validate v2 format
+  if (paymentReqBody.x402Version !== 2) {
+    logger.error(`Expected x402Version 2, got ${paymentReqBody.x402Version}`);
     return false;
   }
 
-  // Step 2: Sign payment
-  logger.debug("2. Signing payment...");
-  const signResult = await x402Client.signPayment(paymentReq);
-  logger.debug("Signed payment", signResult);
+  if (!paymentReqBody.accepts || paymentReqBody.accepts.length === 0) {
+    logger.error("No accepts array in payment requirements");
+    return false;
+  }
 
-  // Step 3: Retry with X-PAYMENT header
-  logger.debug("3. Retry with X-PAYMENT...");
+  // Get the payment requirements for the requested token type
+  const requirements = paymentReqBody.accepts[0];
+
+  logger.debug("Using requirements", {
+    scheme: requirements.scheme,
+    network: requirements.network,
+    amount: requirements.amount,
+    asset: requirements.asset,
+    payTo: requirements.payTo,
+  });
+
+  // Step 2: Sign payment using v1 client (which returns signedTransaction)
+  // We need to build a v1-compatible payment request for the client
+  logger.debug("2. Signing payment...");
+
+  // Build v1-compatible request for the client's signPayment method
+  const v1CompatibleRequest = {
+    maxAmountRequired: requirements.amount,
+    resource: paymentReqBody.resource.url,
+    payTo: requirements.payTo,
+    network: X402_NETWORK as "mainnet" | "testnet",
+    nonce: crypto.randomUUID(),
+    expiresAt: new Date(Date.now() + 5 * 60 * 1000).toISOString(),
+    tokenType: tokenType,
+  };
+
+  const signResult = await x402Client.signPayment(v1CompatibleRequest);
+  logger.debug("Signed payment", { signedTransaction: signResult.signedTransaction.substring(0, 50) + "..." });
+
+  // Step 3: Build v2 payment payload
+  const paymentPayload: PaymentPayloadV2 = {
+    x402Version: 2,
+    resource: paymentReqBody.resource,
+    accepted: requirements,
+    payload: {
+      transaction: signResult.signedTransaction,
+    },
+  };
+
+  // Encode to base64 for header
+  const paymentSignature = encodePaymentPayload(paymentPayload);
+  logger.debug("Payment signature (base64)", paymentSignature.substring(0, 50) + "...");
+
+  // Step 4: Retry with payment-signature header
+  logger.debug("3. Retry with payment-signature header...");
 
   const retryRes = await fetch(fullUrl, {
     method: config.method,
     headers: {
       ...(config.body ? { "Content-Type": "application/json" } : {}),
       ...config.headers,
-      "X-PAYMENT": signResult.signedTransaction,
+      [X402_HEADERS.PAYMENT_SIGNATURE]: paymentSignature,
       "X-PAYMENT-TOKEN-TYPE": tokenType,
     },
     body: config.body ? JSON.stringify(config.body) : undefined,
@@ -202,11 +256,17 @@ async function testSingleToken(
   const acceptableStatuses = [200, ...(config.allowedStatuses || [])];
   if (!acceptableStatuses.includes(retryRes.status)) {
     const errText = await retryRes.text();
-    logger.error(`Retry failed (${retryRes.status}): ${errText.slice(0, 100)}`);
+    logger.error(`Retry failed (${retryRes.status}): ${errText.slice(0, 200)}`);
     return false;
   }
 
-  // Step 4: Validate response
+  // Check for payment-response header
+  const paymentResponseHeader = retryRes.headers.get(X402_HEADERS.PAYMENT_RESPONSE);
+  if (paymentResponseHeader) {
+    logger.debug("Payment response header present");
+  }
+
+  // Step 5: Validate response
   const contentType = retryRes.headers.get("content-type") || "";
   const expectedContentType = config.expectedContentType || "application/json";
 

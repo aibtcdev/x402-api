@@ -1,8 +1,15 @@
 /**
- * Shared utilities for X402 API tests
+ * Shared utilities for X402 API tests (V2 Protocol)
  */
 
-import type { NetworkType, TokenType } from "x402-stacks";
+import type {
+  NetworkType,
+  TokenType,
+  PaymentRequiredV2,
+  PaymentRequirementsV2,
+  PaymentPayloadV2,
+} from "x402-stacks";
+import { encodePaymentPayload, X402_HEADERS } from "x402-stacks";
 
 export const COLORS = {
   reset: "\x1b[0m",
@@ -300,21 +307,6 @@ export const validators = {
 /** Delay before retrying after nonce conflict (wait for stuck tx to clear from mempool) */
 export const NONCE_CONFLICT_DELAY_MS = 30000;
 
-/** Payment requirement response from x402 */
-export interface PaymentRequired {
-  maxAmountRequired: string;
-  resource: string;
-  payTo: string;
-  network: "mainnet" | "testnet";
-  nonce: string;
-  expiresAt: string;
-  tokenType: TokenType;
-  /** Pricing details for the required payment */
-  pricing: unknown;
-  /** Optional token contract address or identifier */
-  tokenContract?: string;
-}
-
 /** Result from makeX402RequestWithRetry */
 export interface X402RequestResult {
   status: number;
@@ -421,16 +413,48 @@ export async function makeX402RequestWithRetry(
       };
     }
 
-    // Step 2: Sign payment with fresh nonce
-    const paymentReq: PaymentRequired = await initialRes.json();
-    log(
-      `Payment required: ${paymentReq.maxAmountRequired} ${paymentReq.tokenType}, nonce: ${paymentReq.nonce.slice(0, 8)}...`
-    );
+    // Step 2: Parse v2 payment requirements and sign payment
+    const paymentReqBody: PaymentRequiredV2 = await initialRes.json();
 
-    const signResult = await x402Client.signPayment(paymentReq);
+    // Validate v2 format
+    if (paymentReqBody.x402Version !== 2 || !paymentReqBody.accepts?.length) {
+      return {
+        status: 400,
+        data: { error: "Invalid v2 payment requirements" },
+        headers: new Headers(),
+        retryCount,
+        wasNonceConflict,
+      };
+    }
+
+    const requirements = paymentReqBody.accepts[0];
+    log(`Payment required: ${requirements.amount} ${requirements.asset}, network: ${requirements.network}`);
+
+    // Build v1-compatible request for the client's signPayment method
+    const v1CompatibleRequest = {
+      maxAmountRequired: requirements.amount,
+      resource: paymentReqBody.resource.url,
+      payTo: requirements.payTo,
+      network: (requirements.network.includes("2147483648") ? "testnet" : "mainnet") as "mainnet" | "testnet",
+      nonce: crypto.randomUUID(),
+      expiresAt: new Date(Date.now() + 5 * 60 * 1000).toISOString(),
+      tokenType,
+    };
+
+    const signResult = await x402Client.signPayment(v1CompatibleRequest);
     log("Payment signed");
 
-    // Step 3: Submit with payment header
+    // Build v2 payment payload
+    const paymentPayload: PaymentPayloadV2 = {
+      x402Version: 2,
+      resource: paymentReqBody.resource,
+      accepted: requirements,
+      payload: {
+        transaction: signResult.signedTransaction,
+      },
+    };
+
+    // Step 3: Submit with v2 payment-signature header
     let paidRes: Response;
     try {
       paidRes = await fetch(urlWithToken, {
@@ -438,7 +462,7 @@ export async function makeX402RequestWithRetry(
         headers: {
           ...(body ? { "Content-Type": "application/json" } : {}),
           ...extraHeaders,
-          "X-PAYMENT": signResult.signedTransaction,
+          [X402_HEADERS.PAYMENT_SIGNATURE]: encodePaymentPayload(paymentPayload),
           "X-PAYMENT-TOKEN-TYPE": tokenType,
         },
         body: body ? JSON.stringify(body) : undefined,

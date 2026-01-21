@@ -7,6 +7,17 @@ import type { UsageDO } from "./durable-objects/UsageDO";
 import type { StorageDO } from "./durable-objects/StorageDO";
 import type { MetricsDO } from "./durable-objects/MetricsDO";
 
+// Re-export v2 types from x402-stacks for use across the codebase
+export type {
+  NetworkV2,
+  PaymentRequiredV2,
+  PaymentRequirementsV2,
+  PaymentPayloadV2,
+  SettlementResponseV2,
+  ResourceInfo,
+  StacksPayloadV2,
+} from "x402-stacks";
+
 // =============================================================================
 // Logger Types (matching worker-logs RPC interface)
 // =============================================================================
@@ -91,51 +102,14 @@ export interface TokenContract {
 }
 
 /**
- * 402 Payment Required response structure
- * Returned when a request needs payment
+ * x402 v2 context stored in request for downstream use
+ * Note: paymentPayload and paymentRequirements are undefined for free tier
  */
-export interface X402PaymentRequired {
-  maxAmountRequired: string;
-  resource: string;
-  payTo: string;
-  network: "mainnet" | "testnet";
-  nonce: string;
-  expiresAt: string;
-  tokenType: TokenType;
-  tokenContract?: TokenContract;
-  pricing: {
-    type: "fixed" | "dynamic";
-    tier?: PricingTier;
-    estimate?: {
-      model?: string;
-      estimatedInputTokens?: number;
-      estimatedOutputTokens?: number;
-      estimatedCostUsd?: string;
-    };
-  };
-}
-
-export interface SettlePaymentResult {
-  isValid: boolean;
-  txId?: string;
-  status?: string;
-  blockHeight?: number;
-  error?: string;
-  reason?: string;
-  validationError?: string;
-  sender?: string;
-  senderAddress?: string;
-  sender_address?: string;
-  recipient?: string;
-  recipientAddress?: string;
-  recipient_address?: string;
-  [key: string]: unknown;
-}
-
 export interface X402Context {
   payerAddress: string;
-  settleResult: SettlePaymentResult;
-  signedTx: string;
+  settleResult: import("x402-stacks").SettlementResponseV2;
+  paymentPayload?: import("x402-stacks").PaymentPayloadV2;
+  paymentRequirements?: import("x402-stacks").PaymentRequirementsV2;
   priceEstimate: PriceEstimate;
   parsedBody?: unknown;
 }
@@ -148,9 +122,6 @@ export interface AppVariables {
   requestId: string;
   logger: Logger;
   x402?: X402Context;
-  // Payment verification results (set by x402 middleware)
-  settleResult?: SettlePaymentResult;
-  signedTx?: string;
 }
 
 export type AppContext = Context<{ Bindings: Env; Variables: AppVariables }>;
