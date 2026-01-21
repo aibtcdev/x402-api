@@ -27,8 +27,8 @@
  *   TEST_MAX_RETRIES=2  - Max retries for rate-limited requests (default: 2)
  */
 
-import type { TokenType, NetworkType } from "x402-stacks";
-import { X402PaymentClient } from "x402-stacks";
+import type { TokenType, NetworkType, PaymentRequiredV2, PaymentPayloadV2 } from "x402-stacks";
+import { X402PaymentClient, encodePaymentPayload, X402_HEADERS } from "x402-stacks";
 import { deriveChildAccount } from "../src/utils/wallet";
 import {
   STATELESS_ENDPOINTS,
@@ -37,7 +37,7 @@ import {
   isStatefulCategory,
   ENDPOINT_COUNTS,
 } from "./endpoint-registry";
-import type { TestConfig, X402PaymentRequired } from "./_test_generator";
+import type { TestConfig } from "./_test_generator";
 import {
   COLORS,
   X402_CLIENT_PK,
@@ -288,11 +288,19 @@ async function testEndpointWithToken(
       return { passed: false, error: `Expected 402, got ${initialRes.status}: ${text.slice(0, 100)}` };
     }
 
-    let paymentReq: X402PaymentRequired = await initialRes.json();
+    let paymentReq: PaymentRequiredV2 = await initialRes.json();
 
-    if (paymentReq.tokenType !== tokenType) {
-      return { passed: false, error: `Token mismatch: expected ${tokenType}, got ${paymentReq.tokenType}` };
+    // Validate v2 format
+    if (paymentReq.x402Version !== 2) {
+      return { passed: false, error: `Expected x402Version 2, got ${paymentReq.x402Version}` };
     }
+
+    if (!paymentReq.accepts || paymentReq.accepts.length === 0) {
+      return { passed: false, error: "No accepts array in payment requirements" };
+    }
+
+    // Get the payment requirements from accepts array
+    const requirements = paymentReq.accepts[0];
 
     // Step 2-3: Sign and submit payment with retry logic
     // For nonce conflicts, we need to re-fetch 402 and re-sign (can't reuse stale payment)
@@ -306,9 +314,34 @@ async function testEndpointWithToken(
       } else {
         logger.debug(`2. Re-signing payment (attempt ${attempt + 1}/${maxRetries + 1})...`);
       }
-      const signResult = await x402Client.signPayment(paymentReq);
 
-      // Submit with payment header
+      // Build v1-compatible request for the client's signPayment method
+      const v1CompatibleRequest = {
+        maxAmountRequired: requirements.amount,
+        resource: paymentReq.resource.url,
+        payTo: requirements.payTo,
+        network: X402_NETWORK as "mainnet" | "testnet",
+        nonce: crypto.randomUUID(),
+        expiresAt: new Date(Date.now() + 5 * 60 * 1000).toISOString(),
+        tokenType: tokenType,
+      };
+
+      const signResult = await x402Client.signPayment(v1CompatibleRequest);
+
+      // Build v2 payment payload
+      const paymentPayload: PaymentPayloadV2 = {
+        x402Version: 2,
+        resource: paymentReq.resource,
+        accepted: requirements,
+        payload: {
+          transaction: signResult.signedTransaction,
+        },
+      };
+
+      // Encode to base64 for header
+      const paymentSignature = encodePaymentPayload(paymentPayload);
+
+      // Submit with payment-signature header (v2)
       if (attempt === 0) {
         logger.debug("3. Submitting with payment...");
       } else {
@@ -320,7 +353,7 @@ async function testEndpointWithToken(
         headers: {
           ...(config.body ? { "Content-Type": "application/json" } : {}),
           ...config.headers,
-          "X-PAYMENT": signResult.signedTransaction,
+          [X402_HEADERS.PAYMENT_SIGNATURE]: paymentSignature,
           "X-PAYMENT-TOKEN-TYPE": tokenType,
         },
         body: config.body ? JSON.stringify(config.body) : undefined,
@@ -352,13 +385,13 @@ async function testEndpointWithToken(
 
       const fullErrorText = `${errorCode || ""} ${errorMessage || ""} ${validationError || ""} ${errText}`;
 
-      // Check for nonce conflict - needs fresh 402 and re-sign
+      // Check for nonce conflict - needs re-sign with fresh nonce
       if (isNonceConflict(fullErrorText) && attempt < maxRetries) {
         logger.debug(`Nonce conflict detected, waiting ${NONCE_CONFLICT_DELAY_MS}ms for mempool to clear...`);
         await sleep(NONCE_CONFLICT_DELAY_MS);
 
-        // Re-fetch 402 to get fresh nonce
-        logger.debug("Re-fetching payment requirements with fresh nonce...");
+        // Re-fetch 402 to get fresh payment requirements (v2)
+        logger.debug("Re-fetching payment requirements...");
         const freshRes = await fetch(fullUrl, {
           method: config.method,
           headers: {
@@ -370,7 +403,7 @@ async function testEndpointWithToken(
 
         if (freshRes.status === 402) {
           paymentReq = await freshRes.json();
-          logger.debug(`Got fresh nonce: ${paymentReq.nonce.slice(0, 8)}...`);
+          logger.debug("Got fresh payment requirements");
         }
         continue;
       }
