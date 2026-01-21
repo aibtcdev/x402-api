@@ -47,8 +47,10 @@ import {
   DEFAULT_TEST_DELAY_MS,
   POST_LIFECYCLE_DELAY_MS,
   isRetryableError,
+  isNonceConflict,
   calculateBackoff,
   sleep,
+  NONCE_CONFLICT_DELAY_MS,
 } from "./_shared_utils";
 
 // Import lifecycle test runners
@@ -286,25 +288,31 @@ async function testEndpointWithToken(
       return { passed: false, error: `Expected 402, got ${initialRes.status}: ${text.slice(0, 100)}` };
     }
 
-    const paymentReq: X402PaymentRequired = await initialRes.json();
+    let paymentReq: X402PaymentRequired = await initialRes.json();
 
     if (paymentReq.tokenType !== tokenType) {
       return { passed: false, error: `Token mismatch: expected ${tokenType}, got ${paymentReq.tokenType}` };
     }
 
-    // Step 2: Sign payment
-    logger.debug("2. Signing payment...");
-    const signResult = await x402Client.signPayment(paymentReq);
-
-    // Step 3: Retry with X-PAYMENT header
+    // Step 2-3: Sign and submit payment with retry logic
+    // For nonce conflicts, we need to re-fetch 402 and re-sign (can't reuse stale payment)
     let retryRes: Response | null = null;
     let lastError = "";
 
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
-      if (attempt > 0) {
-        logger.debug(`3. Retry attempt ${attempt}/${maxRetries}...`);
+      // Sign payment (fresh on each attempt for nonce conflict recovery)
+      if (attempt === 0) {
+        logger.debug("2. Signing payment...");
       } else {
-        logger.debug("3. Retry with payment...");
+        logger.debug(`2. Re-signing payment (attempt ${attempt + 1}/${maxRetries + 1})...`);
+      }
+      const signResult = await x402Client.signPayment(paymentReq);
+
+      // Submit with payment header
+      if (attempt === 0) {
+        logger.debug("3. Submitting with payment...");
+      } else {
+        logger.debug(`3. Retry attempt ${attempt}/${maxRetries}...`);
       }
 
       retryRes = await fetch(fullUrl, {
@@ -330,22 +338,50 @@ async function testEndpointWithToken(
       let errorMessage: string | undefined;
       let bodyRetryAfter: number | undefined;
       let errorDetails: Record<string, unknown> | undefined;
+      let validationError: string | undefined;
       try {
         const parsed = JSON.parse(errText);
         errorCode = parsed.code;
         errorMessage = parsed.error || parsed.details?.exceptionMessage || parsed.details?.settleError;
         bodyRetryAfter = parsed.retryAfter;
         errorDetails = parsed.details;
+        validationError = parsed.details?.validationError;
       } catch {
         /* not JSON */
       }
 
-      if (isRetryableError(retryRes.status, errorCode, errorMessage || errText) && attempt < maxRetries) {
+      const fullErrorText = `${errorCode || ""} ${errorMessage || ""} ${validationError || ""} ${errText}`;
+
+      // Check for nonce conflict - needs fresh 402 and re-sign
+      if (isNonceConflict(fullErrorText) && attempt < maxRetries) {
+        logger.debug(`Nonce conflict detected, waiting ${NONCE_CONFLICT_DELAY_MS}ms for mempool to clear...`);
+        await sleep(NONCE_CONFLICT_DELAY_MS);
+
+        // Re-fetch 402 to get fresh nonce
+        logger.debug("Re-fetching payment requirements with fresh nonce...");
+        const freshRes = await fetch(fullUrl, {
+          method: config.method,
+          headers: {
+            ...(config.body ? { "Content-Type": "application/json" } : {}),
+            ...config.headers,
+          },
+          body: config.body ? JSON.stringify(config.body) : undefined,
+        });
+
+        if (freshRes.status === 402) {
+          paymentReq = await freshRes.json();
+          logger.debug(`Got fresh nonce: ${paymentReq.nonce.slice(0, 8)}...`);
+        }
+        continue;
+      }
+
+      // Check for other retryable errors (mutually exclusive with nonce conflict)
+      if (!isNonceConflict(fullErrorText) && isRetryableError(retryRes.status, errorCode, errorMessage || errText) && attempt < maxRetries) {
         const retryAfterSecs = retryAfterHeader ? parseInt(retryAfterHeader, 10) : bodyRetryAfter || 0;
         const delayMs = calculateBackoff(attempt, retryAfterSecs);
 
         const errorSummary = errorMessage || errorCode || errText.slice(0, 100);
-        const errorType = retryRes.status === 429 ? "Rate limited" : `Server error`;
+        const errorType = retryRes.status === 429 ? "Rate limited" : `Retryable error`;
         logger.debug(`${errorType} (${retryRes.status}): ${errorSummary}`);
         if (errorDetails) {
           logger.debug(`Details: ${JSON.stringify(errorDetails)}`);

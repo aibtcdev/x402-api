@@ -12,19 +12,14 @@
 import type { TokenType } from "x402-stacks";
 import { X402PaymentClient } from "x402-stacks";
 import { deriveChildAccount } from "../src/utils/wallet";
-import type { X402PaymentRequired } from "./_test_generator";
 import {
   X402_CLIENT_PK,
   X402_NETWORK,
-  X402_WORKER_URL,
   createTestLogger,
   STEP_DELAY_MS,
-  DEFAULT_MAX_RETRIES,
-  isRetryableError,
-  calculateBackoff,
+  makeX402RequestWithRetry,
   sleep,
-  parseErrorResponse,
-  parseResponseData,
+  NONCE_CONFLICT_DELAY_MS,
   type JsonBody,
 } from "./_shared_utils";
 
@@ -147,117 +142,24 @@ async function makeX402Request(
   method: "POST",
   body: JsonBody,
   tokenType: TokenType,
-  logger: ReturnType<typeof createTestLogger>,
-  maxRetries: number = DEFAULT_MAX_RETRIES
+  logger: ReturnType<typeof createTestLogger>
 ): Promise<{ status: number; data: unknown }> {
-  const url = `${X402_WORKER_URL}${endpoint}?tokenType=${tokenType}`;
+  logger.debug(`Requesting ${method} ${endpoint}...`);
 
-  let lastErrorStatus = 0;
-  let lastErrorData: unknown = "Failed to get payment requirement";
+  const result = await makeX402RequestWithRetry(endpoint, method, x402Client, tokenType, {
+    body,
+    retry: {
+      maxRetries: 3,
+      nonceConflictDelayMs: NONCE_CONFLICT_DELAY_MS,
+      verbose: false,
+    },
+  });
 
-  // Get 402 payment requirement
-  let initialRes: Response | null = null;
-  for (let attempt = 0; attempt <= maxRetries; attempt++) {
-    try {
-      initialRes = await fetch(url, {
-        method,
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
-      });
-
-      if (initialRes.status === 402) break;
-
-      if (initialRes.status === 200) {
-        const text = await initialRes.text();
-        return { status: 200, data: parseResponseData(text) };
-      }
-
-      const text = await initialRes.text();
-      const errorInfo = parseErrorResponse(text);
-      lastErrorStatus = initialRes.status;
-      lastErrorData = parseResponseData(text);
-
-      if (isRetryableError(initialRes.status, errorInfo.errorCode, errorInfo.errorMessage || text) && attempt < maxRetries) {
-        const delayMs = calculateBackoff(attempt, errorInfo.retryAfterSecs);
-        logger.debug(`Initial request failed (${initialRes.status}), retry ${attempt + 1}/${maxRetries} in ${delayMs}ms`);
-        await sleep(delayMs);
-        continue;
-      }
-
-      return { status: lastErrorStatus, data: lastErrorData };
-    } catch (fetchError) {
-      lastErrorStatus = 0;
-      lastErrorData = { error: String(fetchError), code: "NETWORK_ERROR" };
-
-      if (attempt < maxRetries) {
-        const delayMs = calculateBackoff(attempt);
-        logger.debug(`Fetch error, retry ${attempt + 1}/${maxRetries} in ${delayMs}ms`);
-        await sleep(delayMs);
-        continue;
-      }
-      return { status: lastErrorStatus, data: lastErrorData };
-    }
+  if (result.wasNonceConflict && result.retryCount > 0) {
+    logger.debug(`Recovered from nonce conflict after ${result.retryCount} retries`);
   }
 
-  if (!initialRes || initialRes.status !== 402) {
-    return { status: lastErrorStatus, data: lastErrorData };
-  }
-
-  const paymentReq: X402PaymentRequired = await initialRes.json();
-  logger.debug("402 Payment req", paymentReq);
-
-  const signResult = await x402Client.signPayment(paymentReq);
-  logger.debug("Signed payment");
-
-  // Make paid request with longer timeout for LLM
-  lastErrorStatus = 0;
-  lastErrorData = "Exhausted retries on paid request";
-
-  for (let attempt = 0; attempt <= maxRetries; attempt++) {
-    try {
-      const retryRes = await fetch(url, {
-        method,
-        headers: {
-          "Content-Type": "application/json",
-          "X-PAYMENT": signResult.signedTransaction,
-          "X-PAYMENT-TOKEN-TYPE": tokenType,
-        },
-        body: JSON.stringify(body),
-      });
-
-      if (retryRes.status === 200) {
-        const text = await retryRes.text();
-        return { status: 200, data: parseResponseData(text) };
-      }
-
-      const text = await retryRes.text();
-      const errorInfo = parseErrorResponse(text);
-      lastErrorStatus = retryRes.status;
-      lastErrorData = parseResponseData(text);
-
-      if (isRetryableError(retryRes.status, errorInfo.errorCode, errorInfo.errorMessage || text) && attempt < maxRetries) {
-        const delayMs = calculateBackoff(attempt, errorInfo.retryAfterSecs);
-        logger.debug(`Paid request failed (${retryRes.status}), retry ${attempt + 1}/${maxRetries} in ${delayMs}ms`);
-        await sleep(delayMs);
-        continue;
-      }
-
-      return { status: lastErrorStatus, data: lastErrorData };
-    } catch (fetchError) {
-      lastErrorStatus = 0;
-      lastErrorData = { error: String(fetchError), code: "NETWORK_ERROR" };
-
-      if (attempt < maxRetries) {
-        const delayMs = calculateBackoff(attempt);
-        logger.debug(`Fetch error on paid request, retry ${attempt + 1}/${maxRetries} in ${delayMs}ms`);
-        await sleep(delayMs);
-        continue;
-      }
-      return { status: lastErrorStatus, data: lastErrorData };
-    }
-  }
-
-  return { status: lastErrorStatus, data: lastErrorData };
+  return { status: result.status, data: result.data };
 }
 
 // =============================================================================
