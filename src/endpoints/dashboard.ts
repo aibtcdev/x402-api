@@ -169,16 +169,16 @@ function generateDashboardHTML(data: DashboardData, environment: string): string
       font-display: swap;
     }
     :root {
-      --bg-primary: #09090b;
-      --bg-card: #0f0f12;
+      --bg-primary: #000;
+      --bg-card: #0a0a0a;
       --bg-hover: #18181b;
       --border: rgba(255,255,255,0.06);
       --border-hover: rgba(255,255,255,0.1);
       --text-primary: #fafafa;
       --text-secondary: #a1a1aa;
       --text-muted: #71717a;
-      --accent: #f7931a;
-      --accent-dim: rgba(247, 147, 26, 0.12);
+      --accent: #FF4F03;
+      --accent-dim: rgba(255, 79, 3, 0.12);
       /* AIBTC brand colors - reserved for future dashboard elements */
       --color-blue: #7DA2FF;
       --color-purple: #A855F7;
