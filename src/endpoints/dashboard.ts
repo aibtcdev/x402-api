@@ -169,16 +169,16 @@ function generateDashboardHTML(data: DashboardData, environment: string): string
       font-display: swap;
     }
     :root {
-      --bg-primary: #09090b;
-      --bg-card: #0f0f12;
+      --bg-primary: #000;
+      --bg-card: #0a0a0a;
       --bg-hover: #18181b;
       --border: rgba(255,255,255,0.06);
       --border-hover: rgba(255,255,255,0.1);
       --text-primary: #fafafa;
       --text-secondary: #a1a1aa;
       --text-muted: #71717a;
-      --accent: #f7931a;
-      --accent-dim: rgba(247, 147, 26, 0.12);
+      --accent: #FF4F03;
+      --accent-dim: rgba(255, 79, 3, 0.12);
       /* AIBTC brand colors - reserved for future dashboard elements */
       --color-blue: #7DA2FF;
       --color-purple: #A855F7;
@@ -258,6 +258,8 @@ function generateDashboardHTML(data: DashboardData, environment: string): string
       margin-bottom: 32px;
     }
     .card {
+      position: relative;
+      overflow: hidden;
       background: var(--bg-card);
       border: 1px solid var(--border);
       border-radius: 16px;
@@ -268,7 +270,28 @@ function generateDashboardHTML(data: DashboardData, environment: string): string
       border-color: var(--border-hover);
       transform: translateY(-2px);
     }
+    .card-glow::after {
+      content: '';
+      position: absolute;
+      top: 0; left: 0; right: 0; bottom: 0;
+      background: radial-gradient(circle at var(--mouse-x, 50%) var(--mouse-y, 50%), var(--accent-dim) 0%, transparent 60%);
+      opacity: 0;
+      transition: opacity 0.4s ease;
+      pointer-events: none;
+    }
+    .card-glow:hover::after { opacity: 1; }
+    .card-accent::before {
+      content: '';
+      position: absolute;
+      top: 0; left: 0; right: 0;
+      height: 2px;
+      background: linear-gradient(90deg, var(--accent), transparent);
+      opacity: 0;
+      transition: opacity 0.3s ease;
+    }
+    .card-accent:hover::before { opacity: 1; }
     .card h3 {
+      position: relative;
       color: var(--text-muted);
       font-size: 11px;
       text-transform: uppercase;
@@ -277,6 +300,7 @@ function generateDashboardHTML(data: DashboardData, environment: string): string
       font-weight: 500;
     }
     .card .value {
+      position: relative;
       font-size: 28px;
       font-weight: 700;
       color: var(--text-primary);
@@ -295,6 +319,8 @@ function generateDashboardHTML(data: DashboardData, environment: string): string
       scroll-margin-top: 24px;
     }
     .chart-container {
+      position: relative;
+      overflow: hidden;
       background: var(--bg-card);
       border: 1px solid var(--border);
       border-radius: 16px;
@@ -382,6 +408,7 @@ function generateDashboardHTML(data: DashboardData, environment: string): string
     .cat-storage { color: #3b82f6; }
     .cat-other { color: #71717a; }
     .table-container {
+      position: relative;
       background: var(--bg-card);
       border: 1px solid var(--border);
       border-radius: 16px;
@@ -397,6 +424,8 @@ function generateDashboardHTML(data: DashboardData, environment: string): string
       gap: 12px;
     }
     .model-card {
+      position: relative;
+      overflow: hidden;
       background: #27272a;
       border-radius: 8px;
       padding: 14px;
@@ -430,6 +459,29 @@ function generateDashboardHTML(data: DashboardData, environment: string): string
     }
     .footer a { color: var(--accent); text-decoration: none; }
     .footer a:hover { opacity: 0.8; }
+    a:focus-visible,
+    th[data-sort]:focus-visible,
+    .section-nav a:focus-visible {
+      outline: 2px solid var(--accent);
+      outline-offset: 3px;
+      border-radius: 4px;
+    }
+
+    @keyframes fadeUp {
+      from { opacity: 0; transform: translateY(30px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+    .animate-fadeUp {
+      opacity: 0;
+      animation: fadeUp 0.8s ease-out forwards;
+    }
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after {
+        animation-duration: 0.01ms !important;
+        animation-iteration-count: 1 !important;
+        transition-duration: 0.01ms !important;
+      }
+    }
 
     @media (max-width: 600px) {
       .container { padding: 16px; }
@@ -474,31 +526,31 @@ function generateDashboardHTML(data: DashboardData, environment: string): string
     </nav>
 
     <h2 id="summary" class="section-title">Summary</h2>
-    <div class="summary">
-      <div class="card">
+    <div class="summary animate-fadeUp">
+      <div class="card card-glow card-accent">
         <h3>Endpoints</h3>
         <div class="value">${summary.totalEndpoints}</div>
       </div>
-      <div class="card">
+      <div class="card card-glow card-accent">
         <h3>Total Calls</h3>
         <div class="value">${summary.totalCalls.toLocaleString()}</div>
       </div>
-      <div class="card">
+      <div class="card card-glow card-accent">
         <h3>STX Earned</h3>
         <div class="value stx">${formatSTX(summary.earningsSTX)}</div>
       </div>
-      <div class="card">
+      <div class="card card-glow card-accent">
         <h3>Sats Earned</h3>
         <div class="value sbtc">${formatSBTC(summary.earningsSBTC)}</div>
       </div>
-      <div class="card">
+      <div class="card card-glow card-accent">
         <h3>USDCx Earned</h3>
         <div class="value usdcx">$${formatUSDCx(summary.earningsUSDCx)}</div>
       </div>
     </div>
 
     <h2 id="daily" class="section-title">Daily Activity (Last 7 Days)</h2>
-    <div class="chart-container">
+    <div class="chart-container card-glow card-accent animate-fadeUp" style="animation-delay: 0.1s">
       <div class="bar-chart">
         ${daily.map((day) => {
           const successHeight = Math.max((day.successfulCalls / maxDailyCalls) * 100, 2);
@@ -518,7 +570,7 @@ function generateDashboardHTML(data: DashboardData, environment: string): string
     </div>
 
     <h2 id="endpoints" class="section-title">Endpoint Metrics</h2>
-    <div class="table-container">
+    <div class="table-container card-glow card-accent animate-fadeUp" style="animation-delay: 0.2s">
       <div class="table-scroll">
         <table id="endpoints-table">
           <thead>
@@ -561,7 +613,7 @@ function generateDashboardHTML(data: DashboardData, environment: string): string
     </div>
 
     <h2 id="models" class="section-title">LLM Model Usage</h2>
-    <div class="chart-container">
+    <div class="chart-container card-glow card-accent animate-fadeUp" style="animation-delay: 0.3s">
       <div class="model-grid">
         ${modelStats.length > 0 ? modelStats.map((model) => `
           <div class="model-card">
@@ -601,6 +653,27 @@ function generateDashboardHTML(data: DashboardData, environment: string): string
 
   <script>
     (function() {
+      document.querySelectorAll('.card-glow').forEach(function(card) {
+        var isAnimating = false;
+        var mouseX = 0;
+        var mouseY = 0;
+
+        card.addEventListener('mousemove', function(e) {
+          mouseX = e.clientX;
+          mouseY = e.clientY;
+
+          if (isAnimating) return;
+          isAnimating = true;
+
+          requestAnimationFrame(function() {
+            var rect = card.getBoundingClientRect();
+            card.style.setProperty('--mouse-x', ((mouseX - rect.left) / rect.width * 100) + '%');
+            card.style.setProperty('--mouse-y', ((mouseY - rect.top) / rect.height * 100) + '%');
+            isAnimating = false;
+          });
+        });
+      });
+
       const table = document.querySelector('#endpoints-table');
       if (!table) return;
 

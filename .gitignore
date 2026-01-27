@@ -30,6 +30,9 @@ worker-configuration.d.ts
 .vscode/
 .idea/
 
+# Planning
+.planning/
+
 # OS files
 .DS_Store
 Thumbs.db
