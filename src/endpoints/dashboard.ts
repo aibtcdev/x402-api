@@ -291,6 +291,7 @@ function generateDashboardHTML(data: DashboardData, environment: string): string
     }
     .card-accent:hover::before { opacity: 1; }
     .card h3 {
+      position: relative;
       color: var(--text-muted);
       font-size: 11px;
       text-transform: uppercase;
@@ -299,6 +300,7 @@ function generateDashboardHTML(data: DashboardData, environment: string): string
       font-weight: 500;
     }
     .card .value {
+      position: relative;
       font-size: 28px;
       font-weight: 700;
       color: var(--text-primary);
@@ -614,7 +616,7 @@ function generateDashboardHTML(data: DashboardData, environment: string): string
     <div class="chart-container card-glow card-accent animate-fadeUp" style="animation-delay: 0.3s">
       <div class="model-grid">
         ${modelStats.length > 0 ? modelStats.map((model) => `
-          <div class="model-card card-glow card-accent">
+          <div class="model-card">
             <div class="model-name">${model.model}</div>
             <div class="model-stats">
               <div class="model-stat">
@@ -652,10 +654,23 @@ function generateDashboardHTML(data: DashboardData, environment: string): string
   <script>
     (function() {
       document.querySelectorAll('.card-glow').forEach(function(card) {
+        var isAnimating = false;
+        var mouseX = 0;
+        var mouseY = 0;
+
         card.addEventListener('mousemove', function(e) {
-          var rect = card.getBoundingClientRect();
-          card.style.setProperty('--mouse-x', ((e.clientX - rect.left) / rect.width * 100) + '%');
-          card.style.setProperty('--mouse-y', ((e.clientY - rect.top) / rect.height * 100) + '%');
+          mouseX = e.clientX;
+          mouseY = e.clientY;
+
+          if (isAnimating) return;
+          isAnimating = true;
+
+          requestAnimationFrame(function() {
+            var rect = card.getBoundingClientRect();
+            card.style.setProperty('--mouse-x', ((mouseX - rect.left) / rect.width * 100) + '%');
+            card.style.setProperty('--mouse-y', ((mouseY - rect.top) / rect.height * 100) + '%');
+            isAnimating = false;
+          });
         });
       });
 
