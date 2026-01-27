@@ -258,6 +258,8 @@ function generateDashboardHTML(data: DashboardData, environment: string): string
       margin-bottom: 32px;
     }
     .card {
+      position: relative;
+      overflow: hidden;
       background: var(--bg-card);
       border: 1px solid var(--border);
       border-radius: 16px;
@@ -268,6 +270,26 @@ function generateDashboardHTML(data: DashboardData, environment: string): string
       border-color: var(--border-hover);
       transform: translateY(-2px);
     }
+    .card-glow::after {
+      content: '';
+      position: absolute;
+      top: 0; left: 0; right: 0; bottom: 0;
+      background: radial-gradient(circle at var(--mouse-x, 50%) var(--mouse-y, 50%), var(--accent-dim) 0%, transparent 60%);
+      opacity: 0;
+      transition: opacity 0.4s ease;
+      pointer-events: none;
+    }
+    .card-glow:hover::after { opacity: 1; }
+    .card-accent::before {
+      content: '';
+      position: absolute;
+      top: 0; left: 0; right: 0;
+      height: 2px;
+      background: linear-gradient(90deg, var(--accent), transparent);
+      opacity: 0;
+      transition: opacity 0.3s ease;
+    }
+    .card-accent:hover::before { opacity: 1; }
     .card h3 {
       color: var(--text-muted);
       font-size: 11px;
@@ -295,6 +317,8 @@ function generateDashboardHTML(data: DashboardData, environment: string): string
       scroll-margin-top: 24px;
     }
     .chart-container {
+      position: relative;
+      overflow: hidden;
       background: var(--bg-card);
       border: 1px solid var(--border);
       border-radius: 16px;
@@ -382,6 +406,7 @@ function generateDashboardHTML(data: DashboardData, environment: string): string
     .cat-storage { color: #3b82f6; }
     .cat-other { color: #71717a; }
     .table-container {
+      position: relative;
       background: var(--bg-card);
       border: 1px solid var(--border);
       border-radius: 16px;
@@ -397,6 +422,8 @@ function generateDashboardHTML(data: DashboardData, environment: string): string
       gap: 12px;
     }
     .model-card {
+      position: relative;
+      overflow: hidden;
       background: #27272a;
       border-radius: 8px;
       padding: 14px;
@@ -482,30 +509,30 @@ function generateDashboardHTML(data: DashboardData, environment: string): string
 
     <h2 id="summary" class="section-title">Summary</h2>
     <div class="summary">
-      <div class="card">
+      <div class="card card-glow card-accent">
         <h3>Endpoints</h3>
         <div class="value">${summary.totalEndpoints}</div>
       </div>
-      <div class="card">
+      <div class="card card-glow card-accent">
         <h3>Total Calls</h3>
         <div class="value">${summary.totalCalls.toLocaleString()}</div>
       </div>
-      <div class="card">
+      <div class="card card-glow card-accent">
         <h3>STX Earned</h3>
         <div class="value stx">${formatSTX(summary.earningsSTX)}</div>
       </div>
-      <div class="card">
+      <div class="card card-glow card-accent">
         <h3>Sats Earned</h3>
         <div class="value sbtc">${formatSBTC(summary.earningsSBTC)}</div>
       </div>
-      <div class="card">
+      <div class="card card-glow card-accent">
         <h3>USDCx Earned</h3>
         <div class="value usdcx">$${formatUSDCx(summary.earningsUSDCx)}</div>
       </div>
     </div>
 
     <h2 id="daily" class="section-title">Daily Activity (Last 7 Days)</h2>
-    <div class="chart-container">
+    <div class="chart-container card-glow card-accent">
       <div class="bar-chart">
         ${daily.map((day) => {
           const successHeight = Math.max((day.successfulCalls / maxDailyCalls) * 100, 2);
@@ -525,7 +552,7 @@ function generateDashboardHTML(data: DashboardData, environment: string): string
     </div>
 
     <h2 id="endpoints" class="section-title">Endpoint Metrics</h2>
-    <div class="table-container">
+    <div class="table-container card-glow card-accent">
       <div class="table-scroll">
         <table id="endpoints-table">
           <thead>
@@ -568,10 +595,10 @@ function generateDashboardHTML(data: DashboardData, environment: string): string
     </div>
 
     <h2 id="models" class="section-title">LLM Model Usage</h2>
-    <div class="chart-container">
+    <div class="chart-container card-glow card-accent">
       <div class="model-grid">
         ${modelStats.length > 0 ? modelStats.map((model) => `
-          <div class="model-card">
+          <div class="model-card card-glow card-accent">
             <div class="model-name">${model.model}</div>
             <div class="model-stats">
               <div class="model-stat">
@@ -608,6 +635,14 @@ function generateDashboardHTML(data: DashboardData, environment: string): string
 
   <script>
     (function() {
+      document.querySelectorAll('.card-glow').forEach(function(card) {
+        card.addEventListener('mousemove', function(e) {
+          var rect = card.getBoundingClientRect();
+          card.style.setProperty('--mouse-x', ((e.clientX - rect.left) / rect.width * 100) + '%');
+          card.style.setProperty('--mouse-y', ((e.clientY - rect.top) / rect.height * 100) + '%');
+        });
+      });
+
       const table = document.querySelector('#endpoints-table');
       if (!table) return;
 
