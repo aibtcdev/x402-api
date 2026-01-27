@@ -1,7 +1,8 @@
 #!/bin/bash
 # Cron script to run full test suite - only logs failures
-# Usage: ./scripts/run-tests-cron.sh
-# Cron:  0 * * * * /home/whoabuddy/dev/aibtcdev/x402-api/scripts/run-tests-cron.sh
+# Usage: ./scripts/run-tests-cron.sh [--network=testnet|mainnet]
+# Cron:  0 4,12,20 * * * /path/to/run-tests-cron.sh
+#        0 10      * * * /path/to/run-tests-cron.sh --network=mainnet
 
 # Set up PATH for cron environment (bun, node, npm, etc.)
 NODE_VERSIONS_DIR="$HOME/.nvm/versions/node"
@@ -37,16 +38,28 @@ if [ -f .dev.vars ]; then
   set +a
 fi
 
-# Configuration - override these in .env if needed
-# X402_NETWORK defaults to testnet for safety
+# Parse command-line arguments (override .env values)
+CLI_NETWORK=""
+for arg in "$@"; do
+  case "$arg" in
+    --network=*) CLI_NETWORK="${arg#*=}" ;;
+  esac
+done
+
+# Network priority: CLI arg > .env > default (testnet)
+if [ -n "$CLI_NETWORK" ]; then
+  export X402_NETWORK="$CLI_NETWORK"
+else
+  export X402_NETWORK="${X402_NETWORK:-testnet}"
+fi
+
 # URL is derived from network automatically:
 #   testnet  → https://x402.aibtc.dev (staging)
 #   mainnet  → https://x402.aibtc.com (production)
 # Override with X402_WORKER_URL if needed (e.g., for localhost testing)
-export X402_NETWORK="${X402_NETWORK:-testnet}"
 
-# Log directory
-LOG_DIR="logs/test-runs"
+# Log directory (separate subdirs per network)
+LOG_DIR="logs/test-runs/${X402_NETWORK}"
 TIMESTAMP=$(date +"%Y-%m-%d_%H-%M-%S")
 LOG_FILE="${LOG_DIR}/test-${TIMESTAMP}.log"
 
