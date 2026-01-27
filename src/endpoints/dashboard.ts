@@ -430,6 +430,13 @@ function generateDashboardHTML(data: DashboardData, environment: string): string
     }
     .footer a { color: var(--accent); text-decoration: none; }
     .footer a:hover { opacity: 0.8; }
+    a:focus-visible,
+    th[data-sort]:focus-visible,
+    .section-nav a:focus-visible {
+      outline: 2px solid var(--accent);
+      outline-offset: 3px;
+      border-radius: 4px;
+    }
 
     @media (max-width: 600px) {
       .container { padding: 16px; }
