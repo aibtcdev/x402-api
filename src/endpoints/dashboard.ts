@@ -465,6 +465,22 @@ function generateDashboardHTML(data: DashboardData, environment: string): string
       border-radius: 4px;
     }
 
+    @keyframes fadeUp {
+      from { opacity: 0; transform: translateY(30px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+    .animate-fadeUp {
+      opacity: 0;
+      animation: fadeUp 0.8s ease-out forwards;
+    }
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after {
+        animation-duration: 0.01ms !important;
+        animation-iteration-count: 1 !important;
+        transition-duration: 0.01ms !important;
+      }
+    }
+
     @media (max-width: 600px) {
       .container { padding: 16px; }
       .header { flex-direction: column; gap: 12px; align-items: flex-start; }
@@ -508,7 +524,7 @@ function generateDashboardHTML(data: DashboardData, environment: string): string
     </nav>
 
     <h2 id="summary" class="section-title">Summary</h2>
-    <div class="summary">
+    <div class="summary animate-fadeUp">
       <div class="card card-glow card-accent">
         <h3>Endpoints</h3>
         <div class="value">${summary.totalEndpoints}</div>
@@ -532,7 +548,7 @@ function generateDashboardHTML(data: DashboardData, environment: string): string
     </div>
 
     <h2 id="daily" class="section-title">Daily Activity (Last 7 Days)</h2>
-    <div class="chart-container card-glow card-accent">
+    <div class="chart-container card-glow card-accent animate-fadeUp" style="animation-delay: 0.1s">
       <div class="bar-chart">
         ${daily.map((day) => {
           const successHeight = Math.max((day.successfulCalls / maxDailyCalls) * 100, 2);
@@ -552,7 +568,7 @@ function generateDashboardHTML(data: DashboardData, environment: string): string
     </div>
 
     <h2 id="endpoints" class="section-title">Endpoint Metrics</h2>
-    <div class="table-container card-glow card-accent">
+    <div class="table-container card-glow card-accent animate-fadeUp" style="animation-delay: 0.2s">
       <div class="table-scroll">
         <table id="endpoints-table">
           <thead>
@@ -595,7 +611,7 @@ function generateDashboardHTML(data: DashboardData, environment: string): string
     </div>
 
     <h2 id="models" class="section-title">LLM Model Usage</h2>
-    <div class="chart-container card-glow card-accent">
+    <div class="chart-container card-glow card-accent animate-fadeUp" style="animation-delay: 0.3s">
       <div class="model-grid">
         ${modelStats.length > 0 ? modelStats.map((model) => `
           <div class="model-card card-glow card-accent">
