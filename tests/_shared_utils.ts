@@ -61,14 +61,24 @@ export function shuffle<T>(array: T[]): T[] {
  * Pick N random items from an array (without replacement)
  */
 export function sampleArray<T>(array: T[], n: number): T[] {
-  if (n >= array.length) return shuffle(array);
-  return shuffle(array).slice(0, n);
+  if (array.length === 0) return [];
+
+  // Normalize n to a safe, non-negative integer within array bounds
+  let count = Math.floor(n);
+  if (!Number.isFinite(count)) count = 0;
+  if (count <= 0) return [];
+  if (count >= array.length) return shuffle(array);
+
+  return shuffle(array).slice(0, count);
 }
 
 /**
  * Pick a random item from an array
  */
 export function pickRandom<T>(array: T[]): T {
+  if (array.length === 0) {
+    throw new Error("pickRandom: cannot pick from an empty array");
+  }
   return array[Math.floor(Math.random() * array.length)];
 }
 
