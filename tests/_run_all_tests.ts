@@ -18,6 +18,12 @@
  *   bun run tests/_run_all_tests.ts --delay=1000       # 1s delay between tests
  *   bun run tests/_run_all_tests.ts --retries=3        # 3 retries for rate limits
  *
+ * Randomization (for cron variance):
+ *   bun run tests/_run_all_tests.ts --sample=5         # Run 5 random stateless endpoints
+ *   bun run tests/_run_all_tests.ts --random-lifecycle=2  # Run 2 random lifecycle categories
+ *   bun run tests/_run_all_tests.ts --random-token     # Pick one random token (STX/sBTC/USDCx)
+ *   bun run tests/_run_all_tests.ts --mode=full --sample=5 --random-lifecycle=2 --random-token
+ *
  * Environment:
  *   X402_CLIENT_PK      - Mnemonic for payments (required)
  *   X402_NETWORK        - Network (default: testnet)
@@ -43,6 +49,7 @@ import {
   X402_CLIENT_PK,
   X402_NETWORK,
   X402_WORKER_URL,
+  TEST_TOKENS,
   createTestLogger,
   DEFAULT_TEST_DELAY_MS,
   POST_LIFECYCLE_DELAY_MS,
@@ -51,6 +58,8 @@ import {
   calculateBackoff,
   sleep,
   NONCE_CONFLICT_DELAY_MS,
+  sampleArray,
+  pickRandom,
 } from "./_shared_utils";
 
 // Import lifecycle test runners
@@ -78,6 +87,35 @@ const LIFECYCLE_RUNNERS: Record<
   memory: runMemoryLifecycle,
   inference: runInferenceLifecycle,
 };
+
+// =============================================================================
+// Expected Assets (must match TOKEN_CONTRACTS in src/middleware/x402.ts)
+// =============================================================================
+
+/**
+ * Expected asset strings for each token type per network.
+ * STX is always "STX", SIP-010 tokens use "address.contract-name" format.
+ */
+const EXPECTED_ASSETS: Record<"mainnet" | "testnet", Record<TokenType, string>> = {
+  mainnet: {
+    STX: "STX",
+    sBTC: "SM3VDXK3WZZSA84XXFKAFAF15NNZX32CTSG82JFQ4.sbtc-token",
+    USDCx: "SP120SBRBQJ00MCWS7TM5R8WJNTTKD5K0HFRC2CNE.usdcx",
+  },
+  testnet: {
+    STX: "STX",
+    sBTC: "ST1F7QA2MDF17S807EPA36TSS8AMEFY4KA9TVGWXT.sbtc-token",
+    USDCx: "ST1PQHQKV0RJXZFY1DGX8MNSNYVE3VGZJSRTPGZGM.usdcx",
+  },
+};
+
+/**
+ * Get expected asset string for a token type on current network
+ */
+function getExpectedAsset(tokenType: TokenType): string {
+  const network = X402_NETWORK as "mainnet" | "testnet";
+  return EXPECTED_ASSETS[network][tokenType];
+}
 
 // =============================================================================
 // Error Types
@@ -162,6 +200,10 @@ interface RunConfig {
   verbose: boolean;
   delayMs: number;
   maxRetries: number;
+  // Randomization options
+  sampleSize: number | null; // --sample=N: run N random stateless endpoints
+  randomLifecycleCount: number | null; // --random-lifecycle=N: run N random lifecycle categories
+  randomToken: boolean; // --random-token: pick one random token
 }
 
 function parseArgs(): RunConfig {
@@ -175,6 +217,10 @@ function parseArgs(): RunConfig {
     verbose: process.env.VERBOSE === "1",
     delayMs: parseInt(process.env.TEST_DELAY_MS || String(DEFAULT_TEST_DELAY_MS), 10),
     maxRetries: parseInt(process.env.TEST_MAX_RETRIES || "3", 10),
+    // Randomization defaults
+    sampleSize: null,
+    randomLifecycleCount: null,
+    randomToken: false,
   };
 
   let tokenSpecified = false;
@@ -187,6 +233,9 @@ function parseArgs(): RunConfig {
     } else if (arg === "--all-tokens") {
       config.tokens = ["STX", "sBTC", "USDCx"];
       tokenSpecified = true;
+    } else if (arg === "--random-token") {
+      // Pick one random token - applied after parsing
+      config.randomToken = true;
     } else if (arg.startsWith("--token=")) {
       const rawToken = arg.split("=")[1].toUpperCase();
       // Normalize token name (SBTC -> sBTC, USDCX -> USDCx)
@@ -204,6 +253,16 @@ function parseArgs(): RunConfig {
           config.tokens.push(token);
         }
       }
+    } else if (arg.startsWith("--sample=")) {
+      const sampleValue = parseInt(arg.split("=")[1], 10);
+      if (!Number.isNaN(sampleValue) && sampleValue > 0) {
+        config.sampleSize = sampleValue;
+      }
+    } else if (arg.startsWith("--random-lifecycle=")) {
+      const lifecycleValue = parseInt(arg.split("=")[1], 10);
+      if (!Number.isNaN(lifecycleValue) && lifecycleValue > 0) {
+        config.randomLifecycleCount = lifecycleValue;
+      }
     } else if (arg.startsWith("--category=")) {
       config.category = arg.split("=")[1].toLowerCase();
     } else if (arg.startsWith("--filter=")) {
@@ -217,6 +276,14 @@ function parseArgs(): RunConfig {
     } else if (arg === "--verbose" || arg === "-v") {
       config.verbose = true;
     }
+  }
+
+  // Apply random token selection if requested (only if tokens weren't explicitly specified)
+  if (config.randomToken && !tokenSpecified) {
+    config.tokens = [pickRandom(TEST_TOKENS)];
+  } else if (config.randomToken && tokenSpecified) {
+    // Clear randomToken flag if tokens were explicitly set (so we don't print "(random)")
+    config.randomToken = false;
   }
 
   return config;
@@ -308,11 +375,12 @@ async function testEndpointWithToken(
       // Get the payment requirements from accepts array (inside loop to use fresh requirements after retry)
       const requirements = paymentReq.accepts[0];
 
-      // Validate that the accepted asset matches the requested token type
-      if (requirements.asset !== tokenType) {
+      // Validate that the accepted asset matches the expected asset for this token type
+      const expectedAsset = getExpectedAsset(tokenType);
+      if (requirements.asset !== expectedAsset) {
         return {
           passed: false,
-          error: `Payment requirements asset ${requirements.asset} does not match requested token type ${tokenType}`,
+          error: `Payment requirements asset ${requirements.asset} does not match expected ${expectedAsset} for token type ${tokenType}`,
         };
       }
 
@@ -665,6 +733,16 @@ async function runTests(runConfig: RunConfig): Promise<RunStats> {
     );
   }
 
+  // Apply random sampling if specified
+  if (runConfig.sampleSize !== null && endpointsToTest.length > 0) {
+    endpointsToTest = sampleArray(endpointsToTest, runConfig.sampleSize);
+  }
+
+  // Apply random lifecycle sampling if specified
+  if (runConfig.randomLifecycleCount !== null && lifecycleCategories.length > 0) {
+    lifecycleCategories = sampleArray(lifecycleCategories, runConfig.randomLifecycleCount);
+  }
+
   // Print header
   console.log(`\n${COLORS.bright}${"=".repeat(70)}${COLORS.reset}`);
   console.log(`${COLORS.bright}  X402 API ENDPOINT TEST RUNNER${COLORS.reset}`);
@@ -676,12 +754,17 @@ async function runTests(runConfig: RunConfig): Promise<RunStats> {
   if (runConfig.category) {
     console.log(`  Category:   ${runConfig.category}`);
   }
-  console.log(`  Tokens:     ${runConfig.tokens.join(", ")}`);
+  console.log(`  Tokens:     ${runConfig.tokens.join(", ")}${runConfig.randomToken ? " (random)" : ""}`);
   if (endpointsToTest.length > 0) {
-    console.log(`  Endpoints:  ${endpointsToTest.length} stateless`);
+    const sampleNote = runConfig.sampleSize !== null ? ` (sampled from ${STATELESS_ENDPOINTS.length})` : "";
+    console.log(`  Endpoints:  ${endpointsToTest.length} stateless${sampleNote}`);
+    if (runConfig.sampleSize !== null) {
+      console.log(`              [${endpointsToTest.map((e) => e.name).join(", ")}]`);
+    }
   }
   if (lifecycleCategories.length > 0) {
-    console.log(`  Lifecycle:  ${lifecycleCategories.join(", ")}`);
+    const lifecycleNote = runConfig.randomLifecycleCount !== null ? ` (sampled from ${STATEFUL_CATEGORIES.length})` : "";
+    console.log(`  Lifecycle:  ${lifecycleCategories.join(", ")}${lifecycleNote}`);
   }
   console.log(`  Delay:      ${runConfig.delayMs}ms between tests`);
   console.log(`  Retries:    ${runConfig.maxRetries} for rate-limited requests`);

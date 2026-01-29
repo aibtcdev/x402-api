@@ -34,6 +34,12 @@ npm run test:kv       # Just KV lifecycle test
 # Filter tests
 bun run tests/_run_all_tests.ts --category=hashing
 bun run tests/_run_all_tests.ts --filter=sha256 --all-tokens
+
+# Randomized tests (for cron variance)
+bun run tests/_run_all_tests.ts --sample=5                      # 5 random stateless
+bun run tests/_run_all_tests.ts --random-lifecycle=2            # 2 random lifecycle
+bun run tests/_run_all_tests.ts --random-token                  # Random STX/sBTC/USDCx
+bun run tests/_run_all_tests.ts --mode=full --sample=3 --random-lifecycle=2 --random-token
 ```
 
 ## Domains

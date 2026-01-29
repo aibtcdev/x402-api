@@ -1,8 +1,16 @@
 #!/bin/bash
-# Cron script to run full test suite - only logs failures
+# Cron script to run randomized test samples - ensures full coverage over time
 # Usage: ./scripts/run-tests-cron.sh [--network=testnet|mainnet]
-# Cron:  0 4,12,20 * * * /path/to/run-tests-cron.sh
-#        0 10      * * * /path/to/run-tests-cron.sh --network=mainnet
+#
+# Recommended cron schedule (every 2 hours for testnet, every 4 hours for mainnet):
+#   0 */2 * * * /path/to/run-tests-cron.sh                        # testnet (12x/day)
+#   0 2,6,10,14,18,22 * * * /path/to/run-tests-cron.sh --network=mainnet  # mainnet (6x/day)
+#
+# Coverage calculation:
+#   - 14 stateless endpoints, 7 lifecycle categories
+#   - Each run: 3 stateless + 2 lifecycle = good variance
+#   - Testnet (12x/day): 36 stateless + 24 lifecycle = ~2.5x coverage
+#   - Mainnet (6x/day): 18 stateless + 12 lifecycle = ~1.3x coverage, random token each run
 
 # Set up PATH for cron environment (bun, node, npm, etc.)
 NODE_VERSIONS_DIR="$HOME/.nvm/versions/node"
@@ -73,8 +81,17 @@ echo "Network: ${X402_NETWORK}" >> "$TEMP_LOG"
 echo "Server: (derived from network)" >> "$TEMP_LOG"
 echo "" >> "$TEMP_LOG"
 
-# Run the full test suite
-bun run tests/_run_all_tests.ts --mode=full >> "$TEMP_LOG" 2>&1
+# Build test command based on network
+# - Both: sample 3 stateless endpoints + 2 random lifecycle categories
+# - Mainnet: also randomize token (STX/sBTC/USDCx)
+if [ "$X402_NETWORK" = "mainnet" ]; then
+  TEST_ARGS="--mode=full --sample=3 --random-lifecycle=2 --random-token"
+else
+  TEST_ARGS="--mode=full --sample=3 --random-lifecycle=2"
+fi
+
+# Run the randomized test suite
+bun run tests/_run_all_tests.ts $TEST_ARGS >> "$TEMP_LOG" 2>&1
 EXIT_CODE=$?
 
 echo "" >> "$TEMP_LOG"

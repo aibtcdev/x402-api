@@ -42,6 +42,47 @@ export const X402_WORKER_URL = getWorkerUrl();
 export const TEST_TOKENS: TokenType[] = ["STX", "sBTC", "USDCx"];
 
 // =============================================================================
+// Randomization Helpers
+// =============================================================================
+
+/**
+ * Fisher-Yates shuffle - returns a new shuffled array
+ */
+export function shuffle<T>(array: T[]): T[] {
+  const result = [...array];
+  for (let i = result.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [result[i], result[j]] = [result[j], result[i]];
+  }
+  return result;
+}
+
+/**
+ * Pick N random items from an array (without replacement)
+ */
+export function sampleArray<T>(array: T[], n: number): T[] {
+  if (array.length === 0) return [];
+
+  // Normalize n to a safe, non-negative integer within array bounds
+  let count = Math.floor(n);
+  if (!Number.isFinite(count)) count = 0;
+  if (count <= 0) return [];
+  if (count >= array.length) return shuffle(array);
+
+  return shuffle(array).slice(0, count);
+}
+
+/**
+ * Pick a random item from an array
+ */
+export function pickRandom<T>(array: T[]): T {
+  if (array.length === 0) {
+    throw new Error("pickRandom: cannot pick from an empty array");
+  }
+  return array[Math.floor(Math.random() * array.length)];
+}
+
+// =============================================================================
 // Timing Constants
 // =============================================================================
 
