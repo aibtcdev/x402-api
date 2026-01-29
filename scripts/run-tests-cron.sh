@@ -98,14 +98,22 @@ echo "" >> "$TEMP_LOG"
 echo "=== Test Run Completed: $(date) ===" >> "$TEMP_LOG"
 echo "Exit Code: $EXIT_CODE" >> "$TEMP_LOG"
 
-# Only keep log if tests failed
+# Handle test results
 if [ $EXIT_CODE -ne 0 ]; then
+  # Failure: keep full log
   mv "$TEMP_LOG" "$LOG_FILE"
   # Keep only last 7 days of failure logs
   if ! find "$LOG_DIR" -name "test-*.log" -mtime +7 -delete 2>/dev/null; then
     echo "Warning: failed to delete old test logs in '$LOG_DIR'" >&2
   fi
 else
+  # Success: write minimal marker file (overwritten each run)
+  SUCCESS_FILE="${LOG_DIR}/latest-success.log"
+  echo "=== Last Successful Run ===" > "$SUCCESS_FILE"
+  echo "Timestamp: $(date)" >> "$SUCCESS_FILE"
+  echo "Network: ${X402_NETWORK}" >> "$SUCCESS_FILE"
+  # Extract summary line from test output
+  grep -E "passed \([0-9]+\.[0-9]+%\)" "$TEMP_LOG" | tail -1 >> "$SUCCESS_FILE"
   rm -f "$TEMP_LOG"
 fi
 
