@@ -89,6 +89,35 @@ const LIFECYCLE_RUNNERS: Record<
 };
 
 // =============================================================================
+// Expected Assets (must match TOKEN_CONTRACTS in src/middleware/x402.ts)
+// =============================================================================
+
+/**
+ * Expected asset strings for each token type per network.
+ * STX is always "STX", SIP-010 tokens use "address.contract-name" format.
+ */
+const EXPECTED_ASSETS: Record<"mainnet" | "testnet", Record<TokenType, string>> = {
+  mainnet: {
+    STX: "STX",
+    sBTC: "SM3VDXK3WZZSA84XXFKAFAF15NNZX32CTSG82JFQ4.sbtc-token",
+    USDCx: "SP120SBRBQJ00MCWS7TM5R8WJNTTKD5K0HFRC2CNE.usdcx",
+  },
+  testnet: {
+    STX: "STX",
+    sBTC: "ST1F7QA2MDF17S807EPA36TSS8AMEFY4KA9TVGWXT.sbtc-token",
+    USDCx: "ST1PQHQKV0RJXZFY1DGX8MNSNYVE3VGZJSRTPGZGM.usdcx",
+  },
+};
+
+/**
+ * Get expected asset string for a token type on current network
+ */
+function getExpectedAsset(tokenType: TokenType): string {
+  const network = X402_NETWORK as "mainnet" | "testnet";
+  return EXPECTED_ASSETS[network][tokenType];
+}
+
+// =============================================================================
 // Error Types
 // =============================================================================
 
@@ -337,11 +366,12 @@ async function testEndpointWithToken(
       // Get the payment requirements from accepts array (inside loop to use fresh requirements after retry)
       const requirements = paymentReq.accepts[0];
 
-      // Validate that the accepted asset matches the requested token type
-      if (requirements.asset !== tokenType) {
+      // Validate that the accepted asset matches the expected asset for this token type
+      const expectedAsset = getExpectedAsset(tokenType);
+      if (requirements.asset !== expectedAsset) {
         return {
           passed: false,
-          error: `Payment requirements asset ${requirements.asset} does not match requested token type ${tokenType}`,
+          error: `Payment requirements asset ${requirements.asset} does not match expected ${expectedAsset} for token type ${tokenType}`,
         };
       }
 
