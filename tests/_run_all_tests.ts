@@ -254,9 +254,15 @@ function parseArgs(): RunConfig {
         }
       }
     } else if (arg.startsWith("--sample=")) {
-      config.sampleSize = parseInt(arg.split("=")[1], 10);
+      const sampleValue = parseInt(arg.split("=")[1], 10);
+      if (!Number.isNaN(sampleValue) && sampleValue > 0) {
+        config.sampleSize = sampleValue;
+      }
     } else if (arg.startsWith("--random-lifecycle=")) {
-      config.randomLifecycleCount = parseInt(arg.split("=")[1], 10);
+      const lifecycleValue = parseInt(arg.split("=")[1], 10);
+      if (!Number.isNaN(lifecycleValue) && lifecycleValue > 0) {
+        config.randomLifecycleCount = lifecycleValue;
+      }
     } else if (arg.startsWith("--category=")) {
       config.category = arg.split("=")[1].toLowerCase();
     } else if (arg.startsWith("--filter=")) {
@@ -272,9 +278,12 @@ function parseArgs(): RunConfig {
     }
   }
 
-  // Apply random token selection if requested
+  // Apply random token selection if requested (only if tokens weren't explicitly specified)
   if (config.randomToken && !tokenSpecified) {
     config.tokens = [pickRandom(TEST_TOKENS)];
+  } else if (config.randomToken && tokenSpecified) {
+    // Clear randomToken flag if tokens were explicitly set (so we don't print "(random)")
+    config.randomToken = false;
   }
 
   return config;
