@@ -2,6 +2,7 @@
  * Memory Delete Endpoint
  */
 import { StorageWriteEndpoint } from "../../base";
+import { tokenTypeParam, response402 } from "../../schema";
 import type { AppContext } from "../../../types";
 
 export class MemoryDelete extends StorageWriteEndpoint {
@@ -26,27 +27,26 @@ export class MemoryDelete extends StorageWriteEndpoint {
         },
       },
     },
-    parameters: [
-      { name: "tokenType", in: "query" as const, required: false, schema: { type: "string" as const, enum: ["STX", "sBTC", "USDCx"], default: "STX" } },
-    ],
+    parameters: [tokenTypeParam],
     responses: {
       "200": { description: "Delete result" },
-      "402": { description: "Payment required" },
+      "402": response402,
     },
   };
 
   async handle(c: AppContext) {
     const tokenType = this.getTokenType(c);
-    let body: { ids?: string[] };
-    try { body = await c.req.json(); } catch { return this.errorResponse(c, "Invalid JSON body", 400); }
+    const body = await this.parseBody<{ ids?: string[] }>(c);
+
+    if (body instanceof Response) return body;
 
     const { ids } = body;
     if (!ids || !Array.isArray(ids) || ids.length === 0) {
       return this.errorResponse(c, "ids array is required", 400);
     }
 
-    const storageDO = this.getStorageDO(c);
-    if (!storageDO) return this.errorResponse(c, "Storage not available", 500);
+    const storageDO = this.requireStorageDO(c);
+    if (storageDO instanceof Response) return storageDO;
 
     const result = await storageDO.memoryDelete(ids);
     return c.json({ ok: true, ...result, tokenType });

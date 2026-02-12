@@ -3,6 +3,7 @@
  * Store text with vector embeddings for semantic search
  */
 import { StorageWriteLargeEndpoint } from "../../base";
+import { tokenTypeParam, response402 } from "../../schema";
 import type { AppContext } from "../../../types";
 
 export class MemoryStore extends StorageWriteLargeEndpoint {
@@ -35,19 +36,17 @@ export class MemoryStore extends StorageWriteLargeEndpoint {
         },
       },
     },
-    parameters: [
-      { name: "tokenType", in: "query" as const, required: false, schema: { type: "string" as const, enum: ["STX", "sBTC", "USDCx"], default: "STX" } },
-    ],
+    parameters: [tokenTypeParam],
     responses: {
       "200": { description: "Store result" },
-      "402": { description: "Payment required" },
+      "402": response402,
     },
   };
 
   async handle(c: AppContext) {
     const tokenType = this.getTokenType(c);
-    let body: { items?: Array<{ id: string; text: string; metadata?: Record<string, unknown> }> };
-    try { body = await c.req.json(); } catch { return this.errorResponse(c, "Invalid JSON body", 400); }
+    const body = await this.parseBody<{ items?: Array<{ id: string; text: string; metadata?: Record<string, unknown> }> }>(c);
+    if (body instanceof Response) return body;
 
     const { items } = body;
     if (!items || !Array.isArray(items) || items.length === 0) {
@@ -61,8 +60,8 @@ export class MemoryStore extends StorageWriteLargeEndpoint {
       }
     }
 
-    const storageDO = this.getStorageDO(c);
-    if (!storageDO) return this.errorResponse(c, "Storage not available", 500);
+    const storageDO = this.requireStorageDO(c);
+    if (storageDO instanceof Response) return storageDO;
 
     // Generate embeddings using Cloudflare AI
     const env = c.env;

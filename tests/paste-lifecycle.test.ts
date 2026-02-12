@@ -111,7 +111,7 @@ export async function runPasteLifecycle(verbose = false): Promise<LifecycleTestR
     return { passed: 0, total: totalTests, success: false };
   }
 
-  await new Promise((resolve) => setTimeout(resolve, STEP_DELAY_MS));
+  await sleep(STEP_DELAY_MS);
 
   // Test 2: Get the paste back
   logger.info("2. Testing /storage/paste/:id (GET)...");
@@ -132,7 +132,7 @@ export async function runPasteLifecycle(verbose = false): Promise<LifecycleTestR
     logger.error(`Get failed: ${JSON.stringify(getResult.data)}`);
   }
 
-  await new Promise((resolve) => setTimeout(resolve, STEP_DELAY_MS));
+  await sleep(STEP_DELAY_MS);
 
   // Test 3: Delete the paste
   logger.info("3. Testing /storage/paste/:id (DELETE)...");
@@ -153,7 +153,7 @@ export async function runPasteLifecycle(verbose = false): Promise<LifecycleTestR
     logger.error(`Delete failed: ${JSON.stringify(deleteResult.data)}`);
   }
 
-  await new Promise((resolve) => setTimeout(resolve, STEP_DELAY_MS));
+  await sleep(STEP_DELAY_MS);
 
   // Test 4: Verify deletion
   logger.info("4. Verifying deletion...");

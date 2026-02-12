@@ -29,12 +29,6 @@ export const response402 = { description: "Payment required" };
 /** Standard 400 Bad Request response */
 export const response400 = { description: "Invalid request" };
 
-/** Standard 404 Not Found response */
-export const response404 = { description: "Not found" };
-
-/** Standard 500 Server Error response */
-export const response500 = { description: "Server error" };
-
 // =============================================================================
 // Common Property Schemas
 // =============================================================================

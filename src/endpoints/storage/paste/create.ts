@@ -48,12 +48,8 @@ export class PasteCreate extends StorageWriteLargeEndpoint {
   async handle(c: AppContext) {
     const tokenType = this.getTokenType(c);
 
-    let body: { content?: string; title?: string; language?: string; ttl?: number };
-    try {
-      body = await c.req.json();
-    } catch {
-      return this.errorResponse(c, "Invalid JSON body", 400);
-    }
+    const body = await this.parseBody<{ content?: string; title?: string; language?: string; ttl?: number }>(c);
+    if (body instanceof Response) return body;
 
     const { content, title, language, ttl } = body;
 
@@ -61,10 +57,8 @@ export class PasteCreate extends StorageWriteLargeEndpoint {
       return this.errorResponse(c, "content is required", 400);
     }
 
-    const storageDO = this.getStorageDO(c);
-    if (!storageDO) {
-      return this.errorResponse(c, "Storage not available", 500);
-    }
+    const storageDO = this.requireStorageDO(c);
+    if (storageDO instanceof Response) return storageDO;
 
     const result = await storageDO.pasteCreate(content, { title, language, ttl });
 

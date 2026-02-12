@@ -114,7 +114,7 @@ export async function runMemoryLifecycle(verbose = false): Promise<LifecycleTest
     return { passed: 0, total: totalTests, success: false };
   }
 
-  await new Promise((resolve) => setTimeout(resolve, STEP_DELAY_MS));
+  await sleep(STEP_DELAY_MS);
 
   // Test 2: List items
   logger.info("2. Testing /storage/memory/list (GET)...");
@@ -141,7 +141,7 @@ export async function runMemoryLifecycle(verbose = false): Promise<LifecycleTest
     logger.error(`List failed: ${JSON.stringify(listResult.data)}`);
   }
 
-  await new Promise((resolve) => setTimeout(resolve, STEP_DELAY_MS));
+  await sleep(STEP_DELAY_MS);
 
   // Test 3: Search (semantic similarity)
   logger.info("3. Testing /storage/memory/search (POST)...");
@@ -163,7 +163,7 @@ export async function runMemoryLifecycle(verbose = false): Promise<LifecycleTest
     logger.error(`Search failed: ${JSON.stringify(searchResult.data)}`);
   }
 
-  await new Promise((resolve) => setTimeout(resolve, STEP_DELAY_MS));
+  await sleep(STEP_DELAY_MS);
 
   // Test 4: Delete one item
   logger.info("4. Testing /storage/memory/delete (POST)...");
@@ -184,7 +184,7 @@ export async function runMemoryLifecycle(verbose = false): Promise<LifecycleTest
     logger.error(`Delete failed: ${JSON.stringify(deleteResult.data)}`);
   }
 
-  await new Promise((resolve) => setTimeout(resolve, STEP_DELAY_MS));
+  await sleep(STEP_DELAY_MS);
 
   // Test 5: Clear all remaining items
   logger.info("5. Testing /storage/memory/clear (POST)...");
@@ -205,7 +205,7 @@ export async function runMemoryLifecycle(verbose = false): Promise<LifecycleTest
     logger.error(`Clear failed: ${JSON.stringify(clearResult.data)}`);
   }
 
-  await new Promise((resolve) => setTimeout(resolve, STEP_DELAY_MS));
+  await sleep(STEP_DELAY_MS);
 
   // Test 6: Verify memory is empty
   logger.info("6. Verifying memory is empty...");

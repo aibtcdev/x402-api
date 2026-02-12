@@ -6,6 +6,8 @@
  */
 
 import { SimpleEndpoint } from "../base";
+import { tokenTypeParam, response400, response402 } from "../schema";
+import { stripHexPrefix } from "../../utils/encoding";
 import {
   verifyMessageSignatureRsv,
 } from "@stacks/encryption";
@@ -63,18 +65,7 @@ export class VerifySIP018 extends SimpleEndpoint {
         },
       },
     },
-    parameters: [
-      {
-        name: "tokenType",
-        in: "query" as const,
-        required: false,
-        schema: {
-          type: "string" as const,
-          enum: ["STX", "sBTC", "USDCx"],
-          default: "STX",
-        },
-      },
-    ],
+    parameters: [tokenTypeParam],
     responses: {
       "200": {
         description: "Verification result",
@@ -93,25 +84,21 @@ export class VerifySIP018 extends SimpleEndpoint {
           },
         },
       },
-      "400": { description: "Invalid input" },
-      "402": { description: "Payment required" },
+      "400": response400,
+      "402": response402,
     },
   };
 
   async handle(c: AppContext) {
     const tokenType = this.getTokenType(c);
 
-    let body: {
+    const body = await this.parseBody<{
       signature?: string;
       publicKey?: string;
       domain?: SIP018Domain;
       message?: string;
-    };
-    try {
-      body = await c.req.json();
-    } catch {
-      return this.errorResponse(c, "Invalid JSON body", 400);
-    }
+    }>(c);
+    if (body instanceof Response) return body;
 
     const { signature, publicKey, domain, message } = body;
 
@@ -133,9 +120,9 @@ export class VerifySIP018 extends SimpleEndpoint {
 
     try {
       // Normalize hex values
-      const cleanSig = signature.startsWith("0x") ? signature.slice(2) : signature;
-      const cleanPubKey = publicKey.startsWith("0x") ? publicKey.slice(2) : publicKey;
-      const cleanMessage = message.startsWith("0x") ? message.slice(2) : message;
+      const cleanSig = stripHexPrefix(signature);
+      const cleanPubKey = stripHexPrefix(publicKey);
+      const cleanMessage = stripHexPrefix(message);
 
       // Construct SIP-018 domain tuple
       const domainTuple = tupleCV({

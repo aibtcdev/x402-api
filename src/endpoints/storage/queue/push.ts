@@ -2,6 +2,7 @@
  * Queue Push Endpoint
  */
 import { StorageWriteEndpoint } from "../../base";
+import { tokenTypeParam, response402 } from "../../schema";
 import type { AppContext } from "../../../types";
 
 export class QueuePush extends StorageWriteEndpoint {
@@ -32,27 +33,25 @@ export class QueuePush extends StorageWriteEndpoint {
         },
       },
     },
-    parameters: [
-      { name: "tokenType", in: "query" as const, required: false, schema: { type: "string" as const, enum: ["STX", "sBTC", "USDCx"], default: "STX" } },
-    ],
+    parameters: [tokenTypeParam],
     responses: {
       "200": { description: "Push result" },
-      "402": { description: "Payment required" },
+      "402": response402,
     },
   };
 
   async handle(c: AppContext) {
     const tokenType = this.getTokenType(c);
-    let body: { name?: string; items?: unknown[]; priority?: number };
-    try { body = await c.req.json(); } catch { return this.errorResponse(c, "Invalid JSON body", 400); }
+    const body = await this.parseBody<{ name?: string; items?: unknown[]; priority?: number }>(c);
+    if (body instanceof Response) return body;
 
     const { name, items, priority } = body;
     if (!name || !items || !Array.isArray(items)) {
       return this.errorResponse(c, "name and items array are required", 400);
     }
 
-    const storageDO = this.getStorageDO(c);
-    if (!storageDO) return this.errorResponse(c, "Storage not available", 500);
+    const storageDO = this.requireStorageDO(c);
+    if (storageDO instanceof Response) return storageDO;
 
     const result = await storageDO.queuePush(name, items, { priority });
     return c.json({ ok: true, ...result, tokenType });

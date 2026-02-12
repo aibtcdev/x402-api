@@ -2,6 +2,7 @@
  * Queue Pop Endpoint
  */
 import { StorageWriteEndpoint } from "../../base";
+import { tokenTypeParam, response402 } from "../../schema";
 import type { AppContext } from "../../../types";
 
 export class QueuePop extends StorageWriteEndpoint {
@@ -27,25 +28,23 @@ export class QueuePop extends StorageWriteEndpoint {
         },
       },
     },
-    parameters: [
-      { name: "tokenType", in: "query" as const, required: false, schema: { type: "string" as const, enum: ["STX", "sBTC", "USDCx"], default: "STX" } },
-    ],
+    parameters: [tokenTypeParam],
     responses: {
       "200": { description: "Popped items" },
-      "402": { description: "Payment required" },
+      "402": response402,
     },
   };
 
   async handle(c: AppContext) {
     const tokenType = this.getTokenType(c);
-    let body: { name?: string; count?: number };
-    try { body = await c.req.json(); } catch { return this.errorResponse(c, "Invalid JSON body", 400); }
+    const body = await this.parseBody<{ name?: string; count?: number }>(c);
+    if (body instanceof Response) return body;
 
     const { name, count = 1 } = body;
     if (!name) return this.errorResponse(c, "name is required", 400);
 
-    const storageDO = this.getStorageDO(c);
-    if (!storageDO) return this.errorResponse(c, "Storage not available", 500);
+    const storageDO = this.requireStorageDO(c);
+    if (storageDO instanceof Response) return storageDO;
 
     const result = await storageDO.queuePop(name, count) as {
       items: Array<{ id: string; data: unknown }>;

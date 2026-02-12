@@ -2,6 +2,7 @@
  * Sync Unlock Endpoint
  */
 import { StorageWriteEndpoint } from "../../base";
+import { tokenTypeParam, response402 } from "../../schema";
 import type { AppContext } from "../../../types";
 
 export class SyncUnlock extends StorageWriteEndpoint {
@@ -23,25 +24,23 @@ export class SyncUnlock extends StorageWriteEndpoint {
         },
       },
     },
-    parameters: [
-      { name: "tokenType", in: "query" as const, required: false, schema: { type: "string" as const, enum: ["STX", "sBTC", "USDCx"], default: "STX" } },
-    ],
+    parameters: [tokenTypeParam],
     responses: {
       "200": { description: "Unlock result" },
-      "402": { description: "Payment required" },
+      "402": response402,
     },
   };
 
   async handle(c: AppContext) {
     const tokenType = this.getTokenType(c);
-    let body: { name?: string; token?: string };
-    try { body = await c.req.json(); } catch { return this.errorResponse(c, "Invalid JSON body", 400); }
+    const body = await this.parseBody<{ name?: string; token?: string }>(c);
+    if (body instanceof Response) return body;
 
     const { name, token } = body;
     if (!name || !token) return this.errorResponse(c, "name and token are required", 400);
 
-    const storageDO = this.getStorageDO(c);
-    if (!storageDO) return this.errorResponse(c, "Storage not available", 500);
+    const storageDO = this.requireStorageDO(c);
+    if (storageDO instanceof Response) return storageDO;
 
     const result = await storageDO.syncUnlock(name, token);
     return c.json({ ok: true, ...result, tokenType });

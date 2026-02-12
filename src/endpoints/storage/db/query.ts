@@ -2,6 +2,7 @@
  * DB Query Endpoint
  */
 import { StorageReadEndpoint } from "../../base";
+import { tokenTypeParam, response400, response402 } from "../../schema";
 import type { AppContext } from "../../../types";
 
 export class DbQuery extends StorageReadEndpoint {
@@ -23,26 +24,24 @@ export class DbQuery extends StorageReadEndpoint {
         },
       },
     },
-    parameters: [
-      { name: "tokenType", in: "query" as const, required: false, schema: { type: "string" as const, enum: ["STX", "sBTC", "USDCx"], default: "STX" } },
-    ],
+    parameters: [tokenTypeParam],
     responses: {
       "200": { description: "Query results" },
-      "400": { description: "Invalid query" },
-      "402": { description: "Payment required" },
+      "400": response400,
+      "402": response402,
     },
   };
 
   async handle(c: AppContext) {
     const tokenType = this.getTokenType(c);
-    let body: { query?: string; params?: unknown[] };
-    try { body = await c.req.json(); } catch { return this.errorResponse(c, "Invalid JSON body", 400); }
+    const body = await this.parseBody<{ query?: string; params?: unknown[] }>(c);
+    if (body instanceof Response) return body;
 
     const { query, params = [] } = body;
     if (!query) return this.errorResponse(c, "query is required", 400);
 
-    const storageDO = this.getStorageDO(c);
-    if (!storageDO) return this.errorResponse(c, "Storage not available", 500);
+    const storageDO = this.requireStorageDO(c);
+    if (storageDO instanceof Response) return storageDO;
 
     try {
       const result = await storageDO.sqlQuery(query, params) as { rows: unknown[]; rowCount: number; columns: string[] };

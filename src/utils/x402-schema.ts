@@ -64,7 +64,7 @@ export interface GeneratorConfig {
 }
 
 // =============================================================================
-// Endpoint Registry (for static generation without OpenAPI fetch)
+// Endpoint Registry (derived from OpenAPI routes)
 // =============================================================================
 
 interface EndpointInfo {
@@ -74,15 +74,19 @@ interface EndpointInfo {
   tier: PricingTier;
 }
 
-// Array format allows multiple methods per path
+/**
+ * Static endpoint registry for x402.json generation.
+ * Includes method and description metadata not present in ENDPOINT_CONFIG.
+ *
+ * Note: This is the minimal registry needed for x402 discovery.
+ * For pricing/category info, see ENDPOINT_CONFIG in src/index.ts.
+ */
 const ENDPOINT_REGISTRY: EndpointInfo[] = [
-  // Inference - OpenRouter (dynamic pricing, use standard as placeholder)
+  // Inference
   { path: "/inference/openrouter/chat", method: "POST", description: "Chat completion via OpenRouter (100+ models)", tier: "dynamic" },
-
-  // Inference - Cloudflare
   { path: "/inference/cloudflare/chat", method: "POST", description: "Chat completion via Cloudflare AI", tier: "standard" },
 
-  // Stacks endpoints
+  // Stacks
   { path: "/stacks/address/:address", method: "GET", description: "Convert between Stacks address formats", tier: "standard" },
   { path: "/stacks/decode/clarity", method: "POST", description: "Decode Clarity value from hex", tier: "standard" },
   { path: "/stacks/decode/transaction", method: "POST", description: "Decode raw Stacks transaction", tier: "standard" },
@@ -90,7 +94,7 @@ const ENDPOINT_REGISTRY: EndpointInfo[] = [
   { path: "/stacks/verify/message", method: "POST", description: "Verify signed message", tier: "standard" },
   { path: "/stacks/verify/sip018", method: "POST", description: "Verify SIP-018 structured data signature", tier: "standard" },
 
-  // Hashing endpoints
+  // Hashing
   { path: "/hashing/sha256", method: "POST", description: "SHA256 hash (Clarity-compatible)", tier: "standard" },
   { path: "/hashing/sha512", method: "POST", description: "SHA512 hash", tier: "standard" },
   { path: "/hashing/sha512-256", method: "POST", description: "SHA512/256 hash (Clarity-compatible)", tier: "standard" },
@@ -98,13 +102,13 @@ const ENDPOINT_REGISTRY: EndpointInfo[] = [
   { path: "/hashing/hash160", method: "POST", description: "Hash160 (SHA256 + RIPEMD160, Clarity-compatible)", tier: "standard" },
   { path: "/hashing/ripemd160", method: "POST", description: "RIPEMD160 hash", tier: "standard" },
 
-  // Storage - KV (same path, different methods)
+  // Storage - KV
   { path: "/storage/kv/:key", method: "GET", description: "Get value by key", tier: "standard" },
   { path: "/storage/kv", method: "POST", description: "Set key-value pair", tier: "standard" },
   { path: "/storage/kv/:key", method: "DELETE", description: "Delete key", tier: "standard" },
   { path: "/storage/kv", method: "GET", description: "List all keys", tier: "standard" },
 
-  // Storage - Paste (same path, different methods)
+  // Storage - Paste
   { path: "/storage/paste", method: "POST", description: "Create paste", tier: "standard" },
   { path: "/storage/paste/:id", method: "GET", description: "Get paste by ID", tier: "standard" },
   { path: "/storage/paste/:id", method: "DELETE", description: "Delete paste", tier: "standard" },
@@ -114,7 +118,7 @@ const ENDPOINT_REGISTRY: EndpointInfo[] = [
   { path: "/storage/db/execute", method: "POST", description: "Execute SQL statement", tier: "standard" },
   { path: "/storage/db/schema", method: "GET", description: "Get database schema", tier: "standard" },
 
-  // Storage - Sync (Locks)
+  // Storage - Sync
   { path: "/storage/sync/lock", method: "POST", description: "Acquire distributed lock", tier: "standard" },
   { path: "/storage/sync/unlock", method: "POST", description: "Release distributed lock", tier: "standard" },
   { path: "/storage/sync/extend", method: "POST", description: "Extend lock TTL", tier: "standard" },
@@ -128,7 +132,7 @@ const ENDPOINT_REGISTRY: EndpointInfo[] = [
   { path: "/storage/queue/status", method: "GET", description: "Get queue status", tier: "standard" },
   { path: "/storage/queue/clear", method: "POST", description: "Clear queue", tier: "standard" },
 
-  // Storage - Memory (Vector)
+  // Storage - Memory
   { path: "/storage/memory/store", method: "POST", description: "Store memory with embedding", tier: "standard" },
   { path: "/storage/memory/search", method: "POST", description: "Semantic search memories", tier: "standard" },
   { path: "/storage/memory/delete", method: "POST", description: "Delete memory", tier: "standard" },

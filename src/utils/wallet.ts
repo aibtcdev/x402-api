@@ -15,13 +15,13 @@ export async function deriveChildAccount(
   index: number
 ) {
   // Create wallet with empty password (wallet isn't persisted)
-  const wallet = await generateWallet({
+  let wallet = await generateWallet({
     secretKey: mnemonic,
     password: "",
   });
   // Generate accounts up to the requested index
   for (let i = 0; i <= index; i++) {
-    generateNewAccount(wallet);
+    wallet = generateNewAccount(wallet);
   }
   // Return address and key for selected index
   return {

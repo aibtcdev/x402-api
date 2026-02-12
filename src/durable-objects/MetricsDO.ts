@@ -162,7 +162,6 @@ export class MetricsDO extends DurableObject<Env> {
       CREATE INDEX IF NOT EXISTS idx_metrics_endpoint ON metrics(endpoint);
       CREATE INDEX IF NOT EXISTS idx_metrics_category ON metrics(category);
       CREATE INDEX IF NOT EXISTS idx_metrics_colo ON metrics(colo);
-      CREATE INDEX IF NOT EXISTS idx_daily_stats_date ON daily_stats(date);
     `);
   }
 
@@ -441,7 +440,7 @@ export class MetricsDO extends DurableObject<Env> {
   }> {
     const endpointCount = this.sql
       .exec("SELECT COUNT(*) as cnt FROM endpoint_stats")
-      .toArray()[0]?.cnt as number || 0;
+      .toArray()[0]?.cnt as number ?? 0;
 
     const totals = this.sql
       .exec(
@@ -455,17 +454,17 @@ export class MetricsDO extends DurableObject<Env> {
       )
       .toArray()[0];
 
-    const totalCalls = (totals?.total_calls as number) || 0;
-    const successful = (totals?.successful as number) || 0;
+    const totalCalls = (totals?.total_calls as number) ?? 0;
+    const successful = (totals?.successful as number) ?? 0;
 
     return {
       totalEndpoints: endpointCount,
       totalCalls,
       totalSuccessful: successful,
       avgSuccessRate: totalCalls > 0 ? (successful / totalCalls) * 100 : 0,
-      earningsSTX: (totals?.stx as number) || 0,
-      earningsSBTC: (totals?.sbtc as number) || 0,
-      earningsUSDCx: (totals?.usdcx as number) || 0,
+      earningsSTX: (totals?.stx as number) ?? 0,
+      earningsSBTC: (totals?.sbtc as number) ?? 0,
+      earningsUSDCx: (totals?.usdcx as number) ?? 0,
     };
   }
 

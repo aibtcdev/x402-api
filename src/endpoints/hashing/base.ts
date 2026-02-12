@@ -83,12 +83,8 @@ export function createHashingEndpoint(config: HashingEndpointConfig) {
     async handle(c: AppContext) {
       const tokenType = this.getTokenType(c);
 
-      let body: { data?: string; encoding?: string };
-      try {
-        body = await c.req.json();
-      } catch {
-        return this.errorResponse(c, "Invalid JSON body", 400);
-      }
+      const body = await this.parseBody<{ data?: string; encoding?: string }>(c);
+      if (body instanceof Response) return body;
 
       const { data, encoding = "hex" } = body;
 

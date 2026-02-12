@@ -5,6 +5,8 @@
  */
 
 import { SimpleEndpoint } from "../base";
+import { tokenTypeParam, response400, response402 } from "../schema";
+import { stripHexPrefix } from "../../utils/encoding";
 import { verifyMessageSignatureRsv } from "@stacks/encryption";
 import type { AppContext } from "../../types";
 
@@ -38,18 +40,7 @@ export class VerifyMessage extends SimpleEndpoint {
         },
       },
     },
-    parameters: [
-      {
-        name: "tokenType",
-        in: "query" as const,
-        required: false,
-        schema: {
-          type: "string" as const,
-          enum: ["STX", "sBTC", "USDCx"],
-          default: "STX",
-        },
-      },
-    ],
+    parameters: [tokenTypeParam],
     responses: {
       "200": {
         description: "Verification result",
@@ -67,20 +58,16 @@ export class VerifyMessage extends SimpleEndpoint {
           },
         },
       },
-      "400": { description: "Invalid input" },
-      "402": { description: "Payment required" },
+      "400": response400,
+      "402": response402,
     },
   };
 
   async handle(c: AppContext) {
     const tokenType = this.getTokenType(c);
 
-    let body: { message?: string; signature?: string; publicKey?: string };
-    try {
-      body = await c.req.json();
-    } catch {
-      return this.errorResponse(c, "Invalid JSON body", 400);
-    }
+    const body = await this.parseBody<{ message?: string; signature?: string; publicKey?: string }>(c);
+    if (body instanceof Response) return body;
 
     const { message, signature, publicKey } = body;
 
@@ -96,8 +83,8 @@ export class VerifyMessage extends SimpleEndpoint {
 
     try {
       // Normalize signature (remove 0x prefix if present)
-      const cleanSig = signature.startsWith("0x") ? signature.slice(2) : signature;
-      const cleanPubKey = publicKey.startsWith("0x") ? publicKey.slice(2) : publicKey;
+      const cleanSig = stripHexPrefix(signature);
+      const cleanPubKey = stripHexPrefix(publicKey);
 
       // Verify the signature
       let valid: boolean;

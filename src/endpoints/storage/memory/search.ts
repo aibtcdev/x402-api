@@ -3,6 +3,7 @@
  * Semantic search using vector embeddings
  */
 import { StorageReadEndpoint } from "../../base";
+import { tokenTypeParam, response402 } from "../../schema";
 import type { AppContext } from "../../../types";
 
 export class MemorySearch extends StorageReadEndpoint {
@@ -25,25 +26,23 @@ export class MemorySearch extends StorageReadEndpoint {
         },
       },
     },
-    parameters: [
-      { name: "tokenType", in: "query" as const, required: false, schema: { type: "string" as const, enum: ["STX", "sBTC", "USDCx"], default: "STX" } },
-    ],
+    parameters: [tokenTypeParam],
     responses: {
       "200": { description: "Search results" },
-      "402": { description: "Payment required" },
+      "402": response402,
     },
   };
 
   async handle(c: AppContext) {
     const tokenType = this.getTokenType(c);
-    let body: { query?: string; limit?: number; threshold?: number };
-    try { body = await c.req.json(); } catch { return this.errorResponse(c, "Invalid JSON body", 400); }
+    const body = await this.parseBody<{ query?: string; limit?: number; threshold?: number }>(c);
+    if (body instanceof Response) return body;
 
     const { query, limit = 10, threshold = 0.5 } = body;
     if (!query) return this.errorResponse(c, "query is required", 400);
 
-    const storageDO = this.getStorageDO(c);
-    if (!storageDO) return this.errorResponse(c, "Storage not available", 500);
+    const storageDO = this.requireStorageDO(c);
+    if (storageDO instanceof Response) return storageDO;
 
     // Generate embedding for query
     const env = c.env;

@@ -43,7 +43,7 @@ import {
   isStatefulCategory,
   ENDPOINT_COUNTS,
 } from "./endpoint-registry";
-import type { TestConfig } from "./_test_generator";
+import type { TestConfig } from "./_shared_utils";
 import {
   COLORS,
   X402_CLIENT_PK,
@@ -60,6 +60,8 @@ import {
   NONCE_CONFLICT_DELAY_MS,
   sampleArray,
   pickRandom,
+  parseErrorResponse,
+  formatErrorMessage,
 } from "./_shared_utils";
 
 // Import lifecycle test runners
@@ -121,69 +123,6 @@ function getExpectedAsset(tokenType: TokenType): string {
 // Error Types
 // =============================================================================
 
-type PaymentErrorCode =
-  | "FACILITATOR_UNAVAILABLE"
-  | "FACILITATOR_ERROR"
-  | "PAYMENT_INVALID"
-  | "INSUFFICIENT_FUNDS"
-  | "PAYMENT_EXPIRED"
-  | "AMOUNT_TOO_LOW"
-  | "NETWORK_ERROR"
-  | "UNKNOWN_ERROR";
-
-interface PaymentErrorResponse {
-  error: string;
-  code: PaymentErrorCode;
-  retryAfter?: number;
-  tokenType: TokenType;
-  resource: string;
-  details?: {
-    settleError?: string;
-    settleReason?: string;
-    settleStatus?: string;
-    exceptionMessage?: string;
-  };
-}
-
-function isPaymentErrorResponse(obj: unknown): obj is PaymentErrorResponse {
-  return (
-    typeof obj === "object" &&
-    obj !== null &&
-    "error" in obj &&
-    "code" in obj &&
-    typeof (obj as PaymentErrorResponse).error === "string" &&
-    typeof (obj as PaymentErrorResponse).code === "string"
-  );
-}
-
-interface ParsedErrorResponse {
-  message: string;
-  details?: PaymentErrorResponse["details"];
-  raw?: string;
-}
-
-function formatErrorResponse(
-  status: number,
-  body: string,
-  retryAfter: string | null
-): ParsedErrorResponse {
-  try {
-    const parsed = JSON.parse(body);
-    if (isPaymentErrorResponse(parsed)) {
-      let msg = `[${parsed.code}] ${parsed.error}`;
-      if (parsed.retryAfter || retryAfter) {
-        msg += ` (retry after ${parsed.retryAfter || retryAfter}s)`;
-      }
-      return { message: msg, details: parsed.details, raw: body };
-    }
-    if (parsed.error) {
-      return { message: parsed.error.slice(0, 80), raw: body };
-    }
-  } catch {
-    /* not JSON */
-  }
-  return { message: body.slice(0, 80), raw: body };
-}
 
 // =============================================================================
 // Configuration
@@ -515,8 +454,8 @@ async function testEndpointWithToken(
         continue;
       }
 
-      const parsedError = formatErrorResponse(retryRes.status, errText, retryAfterHeader);
-      lastError = `(${retryRes.status}) ${parsedError.message}`;
+      const parsedError = parseErrorResponse(errText, retryRes.status, retryAfterHeader);
+      lastError = `(${retryRes.status}) ${formatErrorMessage(parsedError)}`;
 
       if (parsedError.details) {
         logger.debug("Error details:", parsedError.details);

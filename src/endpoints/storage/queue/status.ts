@@ -2,6 +2,7 @@
  * Queue Status Endpoint
  */
 import { StorageReadEndpoint } from "../../base";
+import { tokenTypeParam, response402 } from "../../schema";
 import type { AppContext } from "../../../types";
 
 export class QueueStatus extends StorageReadEndpoint {
@@ -10,11 +11,11 @@ export class QueueStatus extends StorageReadEndpoint {
     summary: "(paid, storage_read) Get queue status",
     parameters: [
       { name: "name", in: "query" as const, required: true, schema: { type: "string" as const } },
-      { name: "tokenType", in: "query" as const, required: false, schema: { type: "string" as const, enum: ["STX", "sBTC", "USDCx"], default: "STX" } },
+      tokenTypeParam,
     ],
     responses: {
       "200": { description: "Queue status" },
-      "402": { description: "Payment required" },
+      "402": response402,
     },
   };
 
@@ -24,8 +25,8 @@ export class QueueStatus extends StorageReadEndpoint {
 
     if (!name) return this.errorResponse(c, "name is required", 400);
 
-    const storageDO = this.getStorageDO(c);
-    if (!storageDO) return this.errorResponse(c, "Storage not available", 500);
+    const storageDO = this.requireStorageDO(c);
+    if (storageDO instanceof Response) return storageDO;
 
     const result = await storageDO.queueStatus(name);
     return c.json({ ok: true, name, ...result, tokenType });

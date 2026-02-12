@@ -5,7 +5,7 @@
  * Used by _run_all_tests.ts for comprehensive E2E payment testing.
  */
 
-import type { TestConfig } from "./_test_generator";
+import type { TestConfig } from "./_shared_utils";
 import type { TokenType } from "x402-stacks";
 import { generateTestId, hasTokenType, hasField, hasFields, isOk } from "./_shared_utils";
 

@@ -5,14 +5,14 @@
  * Free endpoint (no payment required).
  */
 
-import { OpenAPIRoute } from "chanfana";
+import { FreeEndpoint } from "./base";
 import type { AppContext } from "../types";
 
 // =============================================================================
 // Dashboard Endpoint
 // =============================================================================
 
-export class Dashboard extends OpenAPIRoute {
+export class Dashboard extends FreeEndpoint {
   schema = {
     tags: ["Info"],
     summary: "View API metrics dashboard (free)",

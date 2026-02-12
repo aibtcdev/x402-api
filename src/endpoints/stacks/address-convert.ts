@@ -5,6 +5,7 @@
  */
 
 import { SimpleEndpoint } from "../base";
+import { tokenTypeParam, response400, response402 } from "../schema";
 import { Address, AddressVersion } from "@stacks/transactions";
 import type { AppContext } from "../../types";
 
@@ -32,16 +33,7 @@ export class AddressConvert extends SimpleEndpoint {
         },
         description: "Target network for conversion",
       },
-      {
-        name: "tokenType",
-        in: "query" as const,
-        required: false,
-        schema: {
-          type: "string" as const,
-          enum: ["STX", "sBTC", "USDCx"],
-          default: "STX",
-        },
-      },
+      tokenTypeParam,
     ],
     responses: {
       "200": {
@@ -62,8 +54,8 @@ export class AddressConvert extends SimpleEndpoint {
           },
         },
       },
-      "400": { description: "Invalid address" },
-      "402": { description: "Payment required" },
+      "400": response400,
+      "402": response402,
     },
   };
 

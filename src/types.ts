@@ -7,16 +7,7 @@ import type { UsageDO } from "./durable-objects/UsageDO";
 import type { StorageDO } from "./durable-objects/StorageDO";
 import type { MetricsDO } from "./durable-objects/MetricsDO";
 
-// Re-export v2 types from x402-stacks for use across the codebase
-export type {
-  NetworkV2,
-  PaymentRequiredV2,
-  PaymentRequirementsV2,
-  PaymentPayloadV2,
-  SettlementResponseV2,
-  ResourceInfo,
-  StacksPayloadV2,
-} from "x402-stacks";
+// Note: x402-stacks types are imported directly where needed
 
 // =============================================================================
 // Logger Types (matching worker-logs RPC interface)
@@ -46,9 +37,6 @@ export interface Env {
   USAGE_DO: DurableObjectNamespace<UsageDO>;
   STORAGE_DO: DurableObjectNamespace<StorageDO>;
   METRICS_DO: DurableObjectNamespace<MetricsDO>;
-  // KV Namespaces
-  METRICS: KVNamespace;
-  STORAGE: KVNamespace;
   // AI Binding
   AI: Ai;
   // Service bindings (optional - uncomment in wrangler.jsonc if available)
@@ -152,11 +140,6 @@ export interface DailyStats {
   totalRequests: number;
   totalRevenue: number;
   uniquePayers: number;
-}
-
-export interface AgentIdentity {
-  agentId: string;
-  createdAt: string;
 }
 
 // =============================================================================
@@ -269,17 +252,4 @@ export interface StacksProfile {
   }>;
 }
 
-// =============================================================================
-// Clarity Types (JSON-serializable)
-// =============================================================================
-
-export type ClarityArgument =
-  | { type: "uint" | "int"; value: string }
-  | { type: "bool"; value: boolean }
-  | { type: "principal"; value: string }
-  | { type: "string-ascii" | "string-utf8"; value: string }
-  | { type: "buffer"; value: string }  // hex-encoded
-  | { type: "none" }
-  | { type: "some" | "ok" | "err"; value: ClarityArgument }
-  | { type: "list"; value: ClarityArgument[] }
-  | { type: "tuple"; value: Record<string, ClarityArgument> };
+// Note: Clarity types are used directly from @stacks/transactions where needed

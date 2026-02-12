@@ -57,6 +57,7 @@ const hashingEndpoints: EndpointMetadata[] = [
     description: "Compute SHA-256 hash using SubtleCrypto. Clarity-compatible output.",
     bodyType: "json",
     bodySchema: HASH_BODY_SCHEMA,
+    queryParams: TOKEN_TYPE_QUERY,
     outputExample: {
       ok: true,
       hash: "0x9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
@@ -71,6 +72,7 @@ const hashingEndpoints: EndpointMetadata[] = [
     description: "Compute SHA-512 hash using SubtleCrypto. Clarity-compatible output.",
     bodyType: "json",
     bodySchema: HASH_BODY_SCHEMA,
+    queryParams: TOKEN_TYPE_QUERY,
     outputExample: {
       ok: true,
       hash: "0xee26b0dd4af7e749aa1a8ee3c10ae9923f618980772e473f8819a5d4940e0db27ac185f8a0e1d5f84f88bc887fd67b143732c304cc5fa9ad8e6f57f50028a8ff",
@@ -85,6 +87,7 @@ const hashingEndpoints: EndpointMetadata[] = [
     description: "Compute SHA-512/256 hash. Clarity-compatible output.",
     bodyType: "json",
     bodySchema: HASH_BODY_SCHEMA,
+    queryParams: TOKEN_TYPE_QUERY,
     outputExample: {
       ok: true,
       hash: "0x3d37fe58435e0d87323dee4a2c1b339ef954de63716ee79f5747f94d974f913f",
@@ -99,6 +102,7 @@ const hashingEndpoints: EndpointMetadata[] = [
     description: "Compute Keccak-256 hash. Ethereum-compatible.",
     bodyType: "json",
     bodySchema: HASH_BODY_SCHEMA,
+    queryParams: TOKEN_TYPE_QUERY,
     outputExample: {
       ok: true,
       hash: "0x9c22ff5f21f0b81b113e63f7db6da94fedef11b2119b4088b89664fb9a3cb658",
@@ -113,6 +117,7 @@ const hashingEndpoints: EndpointMetadata[] = [
     description: "Compute Hash160 (RIPEMD-160 of SHA-256). Bitcoin-compatible.",
     bodyType: "json",
     bodySchema: HASH_BODY_SCHEMA,
+    queryParams: TOKEN_TYPE_QUERY,
     outputExample: {
       ok: true,
       hash: "0x5e52fee47e6b070565f74372468cdc699de89107",
@@ -127,6 +132,7 @@ const hashingEndpoints: EndpointMetadata[] = [
     description: "Compute RIPEMD-160 hash.",
     bodyType: "json",
     bodySchema: HASH_BODY_SCHEMA,
+    queryParams: TOKEN_TYPE_QUERY,
     outputExample: {
       ok: true,
       hash: "0x5e52fee47e6b070565f74372468cdc699de89107",

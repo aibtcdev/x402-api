@@ -5,6 +5,8 @@
  */
 
 import { SimpleEndpoint } from "../base";
+import { tokenTypeParam, response400, response402 } from "../schema";
+import { stripHexPrefix } from "../../utils/encoding";
 import { cvToJSON, hexToCV, ClarityType } from "@stacks/transactions";
 import type { AppContext } from "../../types";
 import type { ClarityValue } from "@stacks/transactions";
@@ -31,18 +33,7 @@ export class DecodeClarity extends SimpleEndpoint {
         },
       },
     },
-    parameters: [
-      {
-        name: "tokenType",
-        in: "query" as const,
-        required: false,
-        schema: {
-          type: "string" as const,
-          enum: ["STX", "sBTC", "USDCx"],
-          default: "STX",
-        },
-      },
-    ],
+    parameters: [tokenTypeParam],
     responses: {
       "200": {
         description: "Decoded Clarity value",
@@ -62,20 +53,16 @@ export class DecodeClarity extends SimpleEndpoint {
           },
         },
       },
-      "400": { description: "Invalid hex" },
-      "402": { description: "Payment required" },
+      "400": response400,
+      "402": response402,
     },
   };
 
   async handle(c: AppContext) {
     const tokenType = this.getTokenType(c);
 
-    let body: { hex?: string };
-    try {
-      body = await c.req.json();
-    } catch {
-      return this.errorResponse(c, "Invalid JSON body", 400);
-    }
+    const body = await this.parseBody<{ hex?: string }>(c);
+    if (body instanceof Response) return body;
 
     const { hex } = body;
     if (!hex || typeof hex !== "string") {
@@ -84,7 +71,7 @@ export class DecodeClarity extends SimpleEndpoint {
 
     try {
       // Normalize hex (remove 0x prefix if present)
-      const cleanHex = hex.startsWith("0x") ? hex.slice(2) : hex;
+      const cleanHex = stripHexPrefix(hex);
 
       // Decode to Clarity Value
       const cv = hexToCV(cleanHex);
@@ -111,7 +98,7 @@ export class DecodeClarity extends SimpleEndpoint {
 
       const cvWithType = cv as ClarityValue & { type: ClarityType };
       const cvType = cvWithType.type as unknown as number;
-      const typeName = typeMap[cvType] || `unknown(${cvType})`;
+      const typeName = typeMap[cvType] ?? `unknown(${cvType})`;
 
       return c.json({
         ok: true,

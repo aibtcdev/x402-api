@@ -48,12 +48,8 @@ export class KvSet extends StorageWriteEndpoint {
   async handle(c: AppContext) {
     const tokenType = this.getTokenType(c);
 
-    let body: { key?: string; value?: string; metadata?: Record<string, unknown>; ttl?: number };
-    try {
-      body = await c.req.json();
-    } catch {
-      return this.errorResponse(c, "Invalid JSON body", 400);
-    }
+    const body = await this.parseBody<{ key?: string; value?: string; metadata?: Record<string, unknown>; ttl?: number }>(c);
+    if (body instanceof Response) return body;
 
     const { key, value, metadata, ttl } = body;
 
@@ -64,10 +60,8 @@ export class KvSet extends StorageWriteEndpoint {
       return this.errorResponse(c, "value is required", 400);
     }
 
-    const storageDO = this.getStorageDO(c);
-    if (!storageDO) {
-      return this.errorResponse(c, "Storage not available", 500);
-    }
+    const storageDO = this.requireStorageDO(c);
+    if (storageDO instanceof Response) return storageDO;
 
     const result = await storageDO.kvSet(key, value, { metadata, ttl });
 

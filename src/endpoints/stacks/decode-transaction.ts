@@ -5,6 +5,8 @@
  */
 
 import { SimpleEndpoint } from "../base";
+import { tokenTypeParam, response400, response402 } from "../schema";
+import { stripHexPrefix } from "../../utils/encoding";
 import {
   deserializeTransaction,
   AddressVersion,
@@ -34,18 +36,7 @@ export class DecodeTransaction extends SimpleEndpoint {
         },
       },
     },
-    parameters: [
-      {
-        name: "tokenType",
-        in: "query" as const,
-        required: false,
-        schema: {
-          type: "string" as const,
-          enum: ["STX", "sBTC", "USDCx"],
-          default: "STX",
-        },
-      },
-    ],
+    parameters: [tokenTypeParam],
     responses: {
       "200": {
         description: "Decoded transaction",
@@ -67,20 +58,16 @@ export class DecodeTransaction extends SimpleEndpoint {
           },
         },
       },
-      "400": { description: "Invalid transaction" },
-      "402": { description: "Payment required" },
+      "400": response400,
+      "402": response402,
     },
   };
 
   async handle(c: AppContext) {
     const tokenType = this.getTokenType(c);
 
-    let body: { hex?: string };
-    try {
-      body = await c.req.json();
-    } catch {
-      return this.errorResponse(c, "Invalid JSON body", 400);
-    }
+    const body = await this.parseBody<{ hex?: string }>(c);
+    if (body instanceof Response) return body;
 
     const { hex } = body;
     if (!hex || typeof hex !== "string") {
@@ -89,7 +76,7 @@ export class DecodeTransaction extends SimpleEndpoint {
 
     try {
       // Normalize hex
-      const cleanHex = hex.startsWith("0x") ? hex.slice(2) : hex;
+      const cleanHex = stripHexPrefix(hex);
 
       // Deserialize transaction
       const tx = deserializeTransaction(cleanHex);
