@@ -7,6 +7,7 @@
 
 import { SimpleEndpoint } from "../base";
 import { tokenTypeParam, response400, response402 } from "../schema";
+import { stripHexPrefix } from "../../utils/encoding";
 import {
   verifyMessageSignatureRsv,
 } from "@stacks/encryption";
@@ -123,9 +124,9 @@ export class VerifySIP018 extends SimpleEndpoint {
 
     try {
       // Normalize hex values
-      const cleanSig = signature.startsWith("0x") ? signature.slice(2) : signature;
-      const cleanPubKey = publicKey.startsWith("0x") ? publicKey.slice(2) : publicKey;
-      const cleanMessage = message.startsWith("0x") ? message.slice(2) : message;
+      const cleanSig = stripHexPrefix(signature);
+      const cleanPubKey = stripHexPrefix(publicKey);
+      const cleanMessage = stripHexPrefix(message);
 
       // Construct SIP-018 domain tuple
       const domainTuple = tupleCV({

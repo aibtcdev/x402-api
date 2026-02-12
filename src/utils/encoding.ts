@@ -5,10 +5,19 @@
  */
 
 /**
+ * Remove "0x" prefix from hex string if present
+ * @param hex - Hex string with or without "0x" prefix
+ * @returns Hex string without "0x" prefix
+ */
+export function stripHexPrefix(hex: string): string {
+  return hex.startsWith("0x") ? hex.slice(2) : hex;
+}
+
+/**
  * Convert a hex string (with optional 0x prefix) to Uint8Array
  */
 export function hexToBytes(hex: string): Uint8Array {
-  const cleanHex = hex.startsWith("0x") ? hex.slice(2) : hex;
+  const cleanHex = stripHexPrefix(hex);
   const matches = cleanHex.match(/.{1,2}/g);
   if (!matches) return new Uint8Array(0);
   return new Uint8Array(matches.map((byte) => parseInt(byte, 16)));

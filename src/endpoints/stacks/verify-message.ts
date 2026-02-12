@@ -6,6 +6,7 @@
 
 import { SimpleEndpoint } from "../base";
 import { tokenTypeParam, response400, response402 } from "../schema";
+import { stripHexPrefix } from "../../utils/encoding";
 import { verifyMessageSignatureRsv } from "@stacks/encryption";
 import type { AppContext } from "../../types";
 
@@ -86,8 +87,8 @@ export class VerifyMessage extends SimpleEndpoint {
 
     try {
       // Normalize signature (remove 0x prefix if present)
-      const cleanSig = signature.startsWith("0x") ? signature.slice(2) : signature;
-      const cleanPubKey = publicKey.startsWith("0x") ? publicKey.slice(2) : publicKey;
+      const cleanSig = stripHexPrefix(signature);
+      const cleanPubKey = stripHexPrefix(publicKey);
 
       // Verify the signature
       let valid: boolean;

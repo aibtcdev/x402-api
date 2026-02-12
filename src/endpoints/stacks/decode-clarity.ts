@@ -6,6 +6,7 @@
 
 import { SimpleEndpoint } from "../base";
 import { tokenTypeParam, response400, response402 } from "../schema";
+import { stripHexPrefix } from "../../utils/encoding";
 import { cvToJSON, hexToCV, ClarityType } from "@stacks/transactions";
 import type { AppContext } from "../../types";
 import type { ClarityValue } from "@stacks/transactions";
@@ -74,7 +75,7 @@ export class DecodeClarity extends SimpleEndpoint {
 
     try {
       // Normalize hex (remove 0x prefix if present)
-      const cleanHex = hex.startsWith("0x") ? hex.slice(2) : hex;
+      const cleanHex = stripHexPrefix(hex);
 
       // Decode to Clarity Value
       const cv = hexToCV(cleanHex);
