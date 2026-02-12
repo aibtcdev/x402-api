@@ -204,11 +204,9 @@ export class StorageDO extends DurableObject<Env> {
 
   async kvDelete(key: string): Promise<{ deleted: boolean }> {
     this.initializeSchema();
-    const existing = this.sql.exec("SELECT 1 FROM kv WHERE key = ?", key).toArray();
-    if (existing.length === 0) return { deleted: false };
-
-    this.sql.exec("DELETE FROM kv WHERE key = ?", key);
-    return { deleted: true };
+    // DELETE is a no-op if row doesn't exist - just run it directly
+    const result = this.sql.exec("DELETE FROM kv WHERE key = ?", key);
+    return { deleted: result.rowsWritten > 0 };
   }
 
   async kvList(options?: { prefix?: string; limit?: number }): Promise<
@@ -305,11 +303,9 @@ export class StorageDO extends DurableObject<Env> {
 
   async pasteDelete(id: string): Promise<{ deleted: boolean }> {
     this.initializeSchema();
-    const existing = this.sql.exec("SELECT 1 FROM pastes WHERE id = ?", id).toArray();
-    if (existing.length === 0) return { deleted: false };
-
-    this.sql.exec("DELETE FROM pastes WHERE id = ?", id);
-    return { deleted: true };
+    // DELETE is a no-op if row doesn't exist - just run it directly
+    const result = this.sql.exec("DELETE FROM pastes WHERE id = ?", id);
+    return { deleted: result.rowsWritten > 0 };
   }
 
   // ===========================================================================
