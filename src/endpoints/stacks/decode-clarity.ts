@@ -111,7 +111,7 @@ export class DecodeClarity extends SimpleEndpoint {
 
       const cvWithType = cv as ClarityValue & { type: ClarityType };
       const cvType = cvWithType.type as unknown as number;
-      const typeName = typeMap[cvType] || `unknown(${cvType})`;
+      const typeName = typeMap[cvType] ?? `unknown(${cvType})`;
 
       return c.json({
         ok: true,
