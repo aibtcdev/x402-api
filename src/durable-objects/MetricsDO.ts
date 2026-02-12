@@ -162,7 +162,6 @@ export class MetricsDO extends DurableObject<Env> {
       CREATE INDEX IF NOT EXISTS idx_metrics_endpoint ON metrics(endpoint);
       CREATE INDEX IF NOT EXISTS idx_metrics_category ON metrics(category);
       CREATE INDEX IF NOT EXISTS idx_metrics_colo ON metrics(colo);
-      CREATE INDEX IF NOT EXISTS idx_daily_stats_date ON daily_stats(date);
     `);
   }
 
