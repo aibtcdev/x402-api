@@ -150,24 +150,25 @@ export class StorageDO extends DurableObject<Env> {
       : null;
     const metadata = options?.metadata ? JSON.stringify(options.metadata) : null;
 
+    // Check if key exists before upsert to determine created flag
     const existing = this.sql
       .exec("SELECT 1 FROM kv WHERE key = ?", key)
       .toArray();
+    const created = existing.length === 0;
 
-    if (existing.length > 0) {
-      this.sql.exec(
-        `UPDATE kv SET value = ?, metadata = ?, expires_at = ?, updated_at = ? WHERE key = ?`,
-        value, metadata, expiresAt, now, key
-      );
-      return { key, created: false };
-    }
-
+    // Use upsert pattern to eliminate one SQL round-trip
     this.sql.exec(
       `INSERT INTO kv (key, value, metadata, expires_at, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?)`,
+       VALUES (?, ?, ?, ?, ?, ?)
+       ON CONFLICT(key) DO UPDATE SET
+         value = excluded.value,
+         metadata = excluded.metadata,
+         expires_at = excluded.expires_at,
+         updated_at = excluded.updated_at`,
       key, value, metadata, expiresAt, now, now
     );
-    return { key, created: true };
+
+    return { key, created };
   }
 
   async kvGet(key: string): Promise<{
@@ -661,20 +662,17 @@ export class StorageDO extends DurableObject<Env> {
       const embeddingStr = JSON.stringify(item.embedding);
       const metadataStr = item.metadata ? JSON.stringify(item.metadata) : null;
 
-      const existing = this.sql.exec("SELECT 1 FROM memories WHERE key = ?", item.id).toArray();
-
-      if (existing.length > 0) {
-        this.sql.exec(
-          `UPDATE memories SET content = ?, tags = ?, embedding = ?, updated_at = ? WHERE key = ?`,
-          item.text, metadataStr, embeddingStr, now, item.id
-        );
-      } else {
-        this.sql.exec(
-          `INSERT INTO memories (key, content, tags, type, importance, embedding, created_at, updated_at)
-           VALUES (?, ?, ?, 'embedding', 5, ?, ?, ?)`,
-          item.id, item.text, metadataStr, embeddingStr, now, now
-        );
-      }
+      // Use upsert pattern to eliminate one SQL round-trip per item
+      this.sql.exec(
+        `INSERT INTO memories (key, content, tags, type, importance, embedding, created_at, updated_at)
+         VALUES (?, ?, ?, 'embedding', 5, ?, ?, ?)
+         ON CONFLICT(key) DO UPDATE SET
+           content = excluded.content,
+           tags = excluded.tags,
+           embedding = excluded.embedding,
+           updated_at = excluded.updated_at`,
+        item.id, item.text, metadataStr, embeddingStr, now, now
+      );
       storedIds.push(item.id);
     }
 
