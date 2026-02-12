@@ -288,19 +288,12 @@ export function x402Middleware(
       };
 
       // Add Bazaar discovery extension if metadata exists for this endpoint
-      const endpointMetadata = getEndpointMetadata(c.req.path);
+      const endpointMetadata = getEndpointMetadata(c.req.path, c.req.method);
       if (endpointMetadata) {
-        const bazaarExtension = buildBazaarExtension(endpointMetadata);
         paymentRequired.extensions = {
-          bazaar: bazaarExtension.bazaar,
+          bazaar: buildBazaarExtension(endpointMetadata).bazaar,
         };
-        log.debug("Added Bazaar extension to 402 response", {
-          path: c.req.path,
-          hasInfo: !!bazaarExtension.bazaar.info,
-          hasSchema: !!bazaarExtension.bazaar.schema,
-        });
-      } else {
-        log.debug("No Bazaar metadata found for endpoint", { path: c.req.path });
+        log.debug("Added Bazaar extension to 402 response", { path: c.req.path });
       }
 
       // Set payment-required header (base64 encoded)

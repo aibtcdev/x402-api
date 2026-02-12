@@ -9,49 +9,29 @@
  */
 
 /**
- * HTTP input specification for an endpoint
- */
-export interface BazaarInputHttp {
-  type: "http";
-  method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
-  queryParams?: Record<string, unknown>; // JSON Schema properties
-  bodyType?: "json" | "form" | "text" | "binary";
-}
-
-/**
- * JSON output specification for an endpoint
- */
-export interface BazaarOutputJson {
-  type: "json";
-  example: Record<string, unknown>; // Realistic response data
-}
-
-/**
- * Discovery metadata info structure
- */
-export interface BazaarInfo {
-  input: BazaarInputHttp;
-  output: BazaarOutputJson;
-}
-
-/**
- * JSON Schema validator for the info structure
- */
-export interface BazaarSchema {
-  $schema: "https://json-schema.org/draft/2020-12/schema";
-  type: "object";
-  properties: Record<string, unknown>;
-  required?: string[];
-  additionalProperties?: boolean;
-}
-
-/**
- * Complete Bazaar extension object
+ * Complete Bazaar extension object attached to 402 responses
  */
 export interface BazaarExtension {
   bazaar: {
-    info: BazaarInfo;
-    schema: BazaarSchema;
+    info: {
+      input: {
+        type: "http";
+        method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
+        queryParams?: Record<string, unknown>;
+        bodyType?: "json" | "form" | "text" | "binary";
+      };
+      output: {
+        type: "json";
+        example: Record<string, unknown>;
+      };
+    };
+    schema: {
+      $schema: "https://json-schema.org/draft/2020-12/schema";
+      type: "object";
+      properties: Record<string, unknown>;
+      required?: string[];
+      additionalProperties?: boolean;
+    };
   };
 }
 
@@ -59,15 +39,13 @@ export interface BazaarExtension {
  * Endpoint metadata for registry
  */
 export interface EndpointMetadata {
-  path: string; // e.g., "/hashing/sha256"
+  path: string;
   method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
-  category: string; // e.g., "hashing", "stacks", "storage"
+  category: string;
   description: string;
-  // Input specification
-  queryParams?: Record<string, unknown>; // JSON Schema for query params
-  bodySchema?: Record<string, unknown>; // JSON Schema for request body
+  queryParams?: Record<string, unknown>;
+  bodySchema?: Record<string, unknown>;
   bodyType?: "json" | "form" | "text" | "binary";
-  // Output specification
-  outputExample: Record<string, unknown>; // Realistic example response
-  outputSchema?: Record<string, unknown>; // JSON Schema for response
+  outputExample: Record<string, unknown>;
+  outputSchema?: Record<string, unknown>;
 }

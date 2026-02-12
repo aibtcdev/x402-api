@@ -8,6 +8,44 @@
 import type { EndpointMetadata } from "./types";
 
 // =============================================================================
+// Shared Constants
+// =============================================================================
+
+/** Token type query parameter, repeated across most paid endpoints */
+const TOKEN_TYPE_PARAM = {
+  type: "string",
+  enum: ["STX", "sBTC", "USDCx"],
+  default: "STX",
+} as const;
+
+/** Standard queryParams containing only the tokenType selector */
+const TOKEN_TYPE_QUERY: Record<string, unknown> = {
+  tokenType: TOKEN_TYPE_PARAM,
+};
+
+/** Request body schema shared by all hashing endpoints */
+const HASH_BODY_SCHEMA: Record<string, unknown> = {
+  type: "object",
+  required: ["data"],
+  properties: {
+    data: { type: "string", description: "Data to hash" },
+  },
+};
+
+/** Chat messages array schema shared by OpenRouter and Cloudflare chat */
+const CHAT_MESSAGES_SCHEMA = {
+  type: "array",
+  items: {
+    type: "object",
+    required: ["role", "content"],
+    properties: {
+      role: { type: "string", enum: ["system", "user", "assistant"] },
+      content: { type: "string" },
+    },
+  },
+};
+
+// =============================================================================
 // HASHING ENDPOINTS (6)
 // =============================================================================
 
@@ -18,13 +56,7 @@ const hashingEndpoints: EndpointMetadata[] = [
     category: "hashing",
     description: "Compute SHA-256 hash using SubtleCrypto. Clarity-compatible output.",
     bodyType: "json",
-    bodySchema: {
-      type: "object",
-      required: ["data"],
-      properties: {
-        data: { type: "string", description: "Data to hash" },
-      },
-    },
+    bodySchema: HASH_BODY_SCHEMA,
     outputExample: {
       ok: true,
       hash: "0x9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
@@ -38,13 +70,7 @@ const hashingEndpoints: EndpointMetadata[] = [
     category: "hashing",
     description: "Compute SHA-512 hash using SubtleCrypto. Clarity-compatible output.",
     bodyType: "json",
-    bodySchema: {
-      type: "object",
-      required: ["data"],
-      properties: {
-        data: { type: "string", description: "Data to hash" },
-      },
-    },
+    bodySchema: HASH_BODY_SCHEMA,
     outputExample: {
       ok: true,
       hash: "0xee26b0dd4af7e749aa1a8ee3c10ae9923f618980772e473f8819a5d4940e0db27ac185f8a0e1d5f84f88bc887fd67b143732c304cc5fa9ad8e6f57f50028a8ff",
@@ -58,13 +84,7 @@ const hashingEndpoints: EndpointMetadata[] = [
     category: "hashing",
     description: "Compute SHA-512/256 hash. Clarity-compatible output.",
     bodyType: "json",
-    bodySchema: {
-      type: "object",
-      required: ["data"],
-      properties: {
-        data: { type: "string", description: "Data to hash" },
-      },
-    },
+    bodySchema: HASH_BODY_SCHEMA,
     outputExample: {
       ok: true,
       hash: "0x3d37fe58435e0d87323dee4a2c1b339ef954de63716ee79f5747f94d974f913f",
@@ -78,13 +98,7 @@ const hashingEndpoints: EndpointMetadata[] = [
     category: "hashing",
     description: "Compute Keccak-256 hash. Ethereum-compatible.",
     bodyType: "json",
-    bodySchema: {
-      type: "object",
-      required: ["data"],
-      properties: {
-        data: { type: "string", description: "Data to hash" },
-      },
-    },
+    bodySchema: HASH_BODY_SCHEMA,
     outputExample: {
       ok: true,
       hash: "0x9c22ff5f21f0b81b113e63f7db6da94fedef11b2119b4088b89664fb9a3cb658",
@@ -98,13 +112,7 @@ const hashingEndpoints: EndpointMetadata[] = [
     category: "hashing",
     description: "Compute Hash160 (RIPEMD-160 of SHA-256). Bitcoin-compatible.",
     bodyType: "json",
-    bodySchema: {
-      type: "object",
-      required: ["data"],
-      properties: {
-        data: { type: "string", description: "Data to hash" },
-      },
-    },
+    bodySchema: HASH_BODY_SCHEMA,
     outputExample: {
       ok: true,
       hash: "0x5e52fee47e6b070565f74372468cdc699de89107",
@@ -118,13 +126,7 @@ const hashingEndpoints: EndpointMetadata[] = [
     category: "hashing",
     description: "Compute RIPEMD-160 hash.",
     bodyType: "json",
-    bodySchema: {
-      type: "object",
-      required: ["data"],
-      properties: {
-        data: { type: "string", description: "Data to hash" },
-      },
-    },
+    bodySchema: HASH_BODY_SCHEMA,
     outputExample: {
       ok: true,
       hash: "0x5e52fee47e6b070565f74372468cdc699de89107",
@@ -144,13 +146,7 @@ const stacksEndpoints: EndpointMetadata[] = [
     method: "GET",
     category: "stacks",
     description: "Convert Stacks address between mainnet and testnet versions.",
-    queryParams: {
-      tokenType: {
-        type: "string",
-        enum: ["STX", "sBTC", "USDCx"],
-        default: "STX",
-      },
-    },
+    queryParams: TOKEN_TYPE_QUERY,
     outputExample: {
       ok: true,
       original: "SP2PABAF9FTAJYNFZH93XENAJ8FVY99RRM50D2JG9",
@@ -209,13 +205,7 @@ const stacksEndpoints: EndpointMetadata[] = [
     method: "GET",
     category: "stacks",
     description: "Get comprehensive profile for a Stacks address including balances, BNS name, and token holdings.",
-    queryParams: {
-      tokenType: {
-        type: "string",
-        enum: ["STX", "sBTC", "USDCx"],
-        default: "STX",
-      },
-    },
+    queryParams: TOKEN_TYPE_QUERY,
     outputExample: {
       ok: true,
       profile: {
@@ -323,29 +313,13 @@ const inferenceEndpoints: EndpointMetadata[] = [
       required: ["model", "messages"],
       properties: {
         model: { type: "string", description: "Model ID (e.g., openai/gpt-4o)" },
-        messages: {
-          type: "array",
-          items: {
-            type: "object",
-            required: ["role", "content"],
-            properties: {
-              role: { type: "string", enum: ["system", "user", "assistant"] },
-              content: { type: "string" },
-            },
-          },
-        },
+        messages: CHAT_MESSAGES_SCHEMA,
         temperature: { type: "number", minimum: 0, maximum: 2 },
         max_tokens: { type: "integer", minimum: 1 },
         stream: { type: "boolean", default: false },
       },
     },
-    queryParams: {
-      tokenType: {
-        type: "string",
-        enum: ["STX", "sBTC", "USDCx"],
-        default: "STX",
-      },
-    },
+    queryParams: TOKEN_TYPE_QUERY,
     outputExample: {
       id: "gen-123",
       model: "openai/gpt-4o",
@@ -391,28 +365,12 @@ const inferenceEndpoints: EndpointMetadata[] = [
       required: ["model", "messages"],
       properties: {
         model: { type: "string", description: "Model name (e.g., @cf/meta/llama-3.1-8b-instruct)" },
-        messages: {
-          type: "array",
-          items: {
-            type: "object",
-            required: ["role", "content"],
-            properties: {
-              role: { type: "string", enum: ["system", "user", "assistant"] },
-              content: { type: "string" },
-            },
-          },
-        },
+        messages: CHAT_MESSAGES_SCHEMA,
         temperature: { type: "number" },
         max_tokens: { type: "integer" },
       },
     },
-    queryParams: {
-      tokenType: {
-        type: "string",
-        enum: ["STX", "sBTC", "USDCx"],
-        default: "STX",
-      },
-    },
+    queryParams: TOKEN_TYPE_QUERY,
     outputExample: {
       response: "Hello! How can I assist you today?",
       tokenType: "STX",
@@ -441,13 +399,7 @@ const kvEndpoints: EndpointMetadata[] = [
         ttl: { type: "integer", description: "TTL in seconds (optional)" },
       },
     },
-    queryParams: {
-      tokenType: {
-        type: "string",
-        enum: ["STX", "sBTC", "USDCx"],
-        default: "STX",
-      },
-    },
+    queryParams: TOKEN_TYPE_QUERY,
     outputExample: {
       ok: true,
       key: "my-key",
@@ -460,13 +412,7 @@ const kvEndpoints: EndpointMetadata[] = [
     method: "GET",
     category: "storage",
     description: "Get a value from the KV store.",
-    queryParams: {
-      tokenType: {
-        type: "string",
-        enum: ["STX", "sBTC", "USDCx"],
-        default: "STX",
-      },
-    },
+    queryParams: TOKEN_TYPE_QUERY,
     outputExample: {
       ok: true,
       key: "my-key",
@@ -483,11 +429,7 @@ const kvEndpoints: EndpointMetadata[] = [
     queryParams: {
       prefix: { type: "string", description: "Filter keys by prefix" },
       limit: { type: "integer", description: "Maximum number of keys to return" },
-      tokenType: {
-        type: "string",
-        enum: ["STX", "sBTC", "USDCx"],
-        default: "STX",
-      },
+      tokenType: TOKEN_TYPE_PARAM,
     },
     outputExample: {
       ok: true,
@@ -501,13 +443,7 @@ const kvEndpoints: EndpointMetadata[] = [
     method: "DELETE",
     category: "storage",
     description: "Delete a key from the KV store.",
-    queryParams: {
-      tokenType: {
-        type: "string",
-        enum: ["STX", "sBTC", "USDCx"],
-        default: "STX",
-      },
-    },
+    queryParams: TOKEN_TYPE_QUERY,
     outputExample: {
       ok: true,
       key: "my-key",
@@ -537,13 +473,7 @@ const pasteEndpoints: EndpointMetadata[] = [
         ttl: { type: "integer", description: "TTL in seconds (optional)" },
       },
     },
-    queryParams: {
-      tokenType: {
-        type: "string",
-        enum: ["STX", "sBTC", "USDCx"],
-        default: "STX",
-      },
-    },
+    queryParams: TOKEN_TYPE_QUERY,
     outputExample: {
       ok: true,
       id: "paste-abc123",
@@ -556,13 +486,7 @@ const pasteEndpoints: EndpointMetadata[] = [
     method: "GET",
     category: "storage",
     description: "Get a paste by ID.",
-    queryParams: {
-      tokenType: {
-        type: "string",
-        enum: ["STX", "sBTC", "USDCx"],
-        default: "STX",
-      },
-    },
+    queryParams: TOKEN_TYPE_QUERY,
     outputExample: {
       ok: true,
       id: "paste-abc123",
@@ -577,13 +501,7 @@ const pasteEndpoints: EndpointMetadata[] = [
     method: "DELETE",
     category: "storage",
     description: "Delete a paste by ID.",
-    queryParams: {
-      tokenType: {
-        type: "string",
-        enum: ["STX", "sBTC", "USDCx"],
-        default: "STX",
-      },
-    },
+    queryParams: TOKEN_TYPE_QUERY,
     outputExample: {
       ok: true,
       id: "paste-abc123",
@@ -612,13 +530,7 @@ const dbEndpoints: EndpointMetadata[] = [
         params: { type: "array", description: "Query parameters for placeholders" },
       },
     },
-    queryParams: {
-      tokenType: {
-        type: "string",
-        enum: ["STX", "sBTC", "USDCx"],
-        default: "STX",
-      },
-    },
+    queryParams: TOKEN_TYPE_QUERY,
     outputExample: {
       ok: true,
       rows: [{ id: 1, name: "test" }],
@@ -641,13 +553,7 @@ const dbEndpoints: EndpointMetadata[] = [
         params: { type: "array", description: "Query parameters for placeholders" },
       },
     },
-    queryParams: {
-      tokenType: {
-        type: "string",
-        enum: ["STX", "sBTC", "USDCx"],
-        default: "STX",
-      },
-    },
+    queryParams: TOKEN_TYPE_QUERY,
     outputExample: {
       ok: true,
       rowsAffected: 1,
@@ -659,13 +565,7 @@ const dbEndpoints: EndpointMetadata[] = [
     method: "GET",
     category: "storage",
     description: "Get the database schema (list of tables and columns).",
-    queryParams: {
-      tokenType: {
-        type: "string",
-        enum: ["STX", "sBTC", "USDCx"],
-        default: "STX",
-      },
-    },
+    queryParams: TOKEN_TYPE_QUERY,
     outputExample: {
       ok: true,
       tables: [
@@ -701,13 +601,7 @@ const syncEndpoints: EndpointMetadata[] = [
         ttl: { type: "integer", description: "Lock TTL in seconds (default: 30)" },
       },
     },
-    queryParams: {
-      tokenType: {
-        type: "string",
-        enum: ["STX", "sBTC", "USDCx"],
-        default: "STX",
-      },
-    },
+    queryParams: TOKEN_TYPE_QUERY,
     outputExample: {
       ok: true,
       acquired: true,
@@ -731,13 +625,7 @@ const syncEndpoints: EndpointMetadata[] = [
         token: { type: "string", description: "Lock token from acquire" },
       },
     },
-    queryParams: {
-      tokenType: {
-        type: "string",
-        enum: ["STX", "sBTC", "USDCx"],
-        default: "STX",
-      },
-    },
+    queryParams: TOKEN_TYPE_QUERY,
     outputExample: {
       ok: true,
       released: true,
@@ -760,13 +648,7 @@ const syncEndpoints: EndpointMetadata[] = [
         ttl: { type: "integer", description: "New TTL in seconds" },
       },
     },
-    queryParams: {
-      tokenType: {
-        type: "string",
-        enum: ["STX", "sBTC", "USDCx"],
-        default: "STX",
-      },
-    },
+    queryParams: TOKEN_TYPE_QUERY,
     outputExample: {
       ok: true,
       extended: true,
@@ -780,13 +662,7 @@ const syncEndpoints: EndpointMetadata[] = [
     method: "GET",
     category: "storage",
     description: "Get the status of a lock.",
-    queryParams: {
-      tokenType: {
-        type: "string",
-        enum: ["STX", "sBTC", "USDCx"],
-        default: "STX",
-      },
-    },
+    queryParams: TOKEN_TYPE_QUERY,
     outputExample: {
       ok: true,
       name: "my-lock",
@@ -800,13 +676,7 @@ const syncEndpoints: EndpointMetadata[] = [
     method: "GET",
     category: "storage",
     description: "List all locks.",
-    queryParams: {
-      tokenType: {
-        type: "string",
-        enum: ["STX", "sBTC", "USDCx"],
-        default: "STX",
-      },
-    },
+    queryParams: TOKEN_TYPE_QUERY,
     outputExample: {
       ok: true,
       locks: [
@@ -842,13 +712,7 @@ const queueEndpoints: EndpointMetadata[] = [
         priority: { type: "integer", description: "Priority level (higher = processed first)" },
       },
     },
-    queryParams: {
-      tokenType: {
-        type: "string",
-        enum: ["STX", "sBTC", "USDCx"],
-        default: "STX",
-      },
-    },
+    queryParams: TOKEN_TYPE_QUERY,
     outputExample: {
       ok: true,
       pushed: 1,
@@ -870,13 +734,7 @@ const queueEndpoints: EndpointMetadata[] = [
         count: { type: "integer", description: "Number of items to pop (default: 1)" },
       },
     },
-    queryParams: {
-      tokenType: {
-        type: "string",
-        enum: ["STX", "sBTC", "USDCx"],
-        default: "STX",
-      },
-    },
+    queryParams: TOKEN_TYPE_QUERY,
     outputExample: {
       ok: true,
       items: [{ task: "process data" }],
@@ -892,11 +750,7 @@ const queueEndpoints: EndpointMetadata[] = [
     queryParams: {
       name: { type: "string", description: "Queue name" },
       count: { type: "integer", description: "Number of items to peek (default: 10)" },
-      tokenType: {
-        type: "string",
-        enum: ["STX", "sBTC", "USDCx"],
-        default: "STX",
-      },
+      tokenType: TOKEN_TYPE_PARAM,
     },
     outputExample: {
       ok: true,
@@ -912,11 +766,7 @@ const queueEndpoints: EndpointMetadata[] = [
     description: "Get queue status (length, oldest item timestamp, etc.).",
     queryParams: {
       name: { type: "string", description: "Queue name" },
-      tokenType: {
-        type: "string",
-        enum: ["STX", "sBTC", "USDCx"],
-        default: "STX",
-      },
+      tokenType: TOKEN_TYPE_PARAM,
     },
     outputExample: {
       ok: true,
@@ -939,13 +789,7 @@ const queueEndpoints: EndpointMetadata[] = [
         name: { type: "string", description: "Queue name" },
       },
     },
-    queryParams: {
-      tokenType: {
-        type: "string",
-        enum: ["STX", "sBTC", "USDCx"],
-        default: "STX",
-      },
-    },
+    queryParams: TOKEN_TYPE_QUERY,
     outputExample: {
       ok: true,
       name: "my-queue",
@@ -984,13 +828,7 @@ const memoryEndpoints: EndpointMetadata[] = [
         },
       },
     },
-    queryParams: {
-      tokenType: {
-        type: "string",
-        enum: ["STX", "sBTC", "USDCx"],
-        default: "STX",
-      },
-    },
+    queryParams: TOKEN_TYPE_QUERY,
     outputExample: {
       ok: true,
       stored: 1,
@@ -1011,13 +849,7 @@ const memoryEndpoints: EndpointMetadata[] = [
         limit: { type: "integer", description: "Max results (default: 10)" },
       },
     },
-    queryParams: {
-      tokenType: {
-        type: "string",
-        enum: ["STX", "sBTC", "USDCx"],
-        default: "STX",
-      },
-    },
+    queryParams: TOKEN_TYPE_QUERY,
     outputExample: {
       ok: true,
       results: [
@@ -1048,13 +880,7 @@ const memoryEndpoints: EndpointMetadata[] = [
         },
       },
     },
-    queryParams: {
-      tokenType: {
-        type: "string",
-        enum: ["STX", "sBTC", "USDCx"],
-        default: "STX",
-      },
-    },
+    queryParams: TOKEN_TYPE_QUERY,
     outputExample: {
       ok: true,
       deleted: 1,
@@ -1069,11 +895,7 @@ const memoryEndpoints: EndpointMetadata[] = [
     queryParams: {
       limit: { type: "integer", description: "Max items (default: 100)" },
       offset: { type: "integer", description: "Pagination offset" },
-      tokenType: {
-        type: "string",
-        enum: ["STX", "sBTC", "USDCx"],
-        default: "STX",
-      },
+      tokenType: TOKEN_TYPE_PARAM,
     },
     outputExample: {
       ok: true,
@@ -1098,13 +920,7 @@ const memoryEndpoints: EndpointMetadata[] = [
       type: "object",
       properties: {},
     },
-    queryParams: {
-      tokenType: {
-        type: "string",
-        enum: ["STX", "sBTC", "USDCx"],
-        default: "STX",
-      },
-    },
+    queryParams: TOKEN_TYPE_QUERY,
     outputExample: {
       ok: true,
       cleared: true,
@@ -1117,73 +933,66 @@ const memoryEndpoints: EndpointMetadata[] = [
 // REGISTRY EXPORT
 // =============================================================================
 
-/**
- * Complete endpoint metadata registry
- * Maps endpoint path to metadata for discovery
- */
-export const ENDPOINT_METADATA_REGISTRY = new Map<string, EndpointMetadata>([
-  // Hashing
-  ...hashingEndpoints.map((e) => [e.path, e] as const),
-  // Stacks
-  ...stacksEndpoints.map((e) => [e.path, e] as const),
-  // Inference
-  ...inferenceEndpoints.map((e) => [e.path, e] as const),
-  // Storage - KV
-  ...kvEndpoints.map((e) => [e.path, e] as const),
-  // Storage - Paste
-  ...pasteEndpoints.map((e) => [e.path, e] as const),
-  // Storage - DB
-  ...dbEndpoints.map((e) => [e.path, e] as const),
-  // Storage - Sync
-  ...syncEndpoints.map((e) => [e.path, e] as const),
-  // Storage - Queue
-  ...queueEndpoints.map((e) => [e.path, e] as const),
-  // Storage - Memory
-  ...memoryEndpoints.map((e) => [e.path, e] as const),
-]);
+/** All endpoint metadata arrays combined */
+const ALL_ENDPOINTS: EndpointMetadata[] = [
+  ...hashingEndpoints,
+  ...stacksEndpoints,
+  ...inferenceEndpoints,
+  ...kvEndpoints,
+  ...pasteEndpoints,
+  ...dbEndpoints,
+  ...syncEndpoints,
+  ...queueEndpoints,
+  ...memoryEndpoints,
+];
 
 /**
- * Get metadata for an endpoint by path
+ * Build a registry key from method and path.
+ * Uses "METHOD /path" format to avoid collisions when multiple
+ * HTTP methods share the same path (e.g., GET and POST on /storage/kv).
  */
-export function getEndpointMetadata(path: string): EndpointMetadata | undefined {
-  // Try exact match first
-  if (ENDPOINT_METADATA_REGISTRY.has(path)) {
-    return ENDPOINT_METADATA_REGISTRY.get(path);
+function registryKey(method: string, path: string): string {
+  return `${method} ${path}`;
+}
+
+/**
+ * Complete endpoint metadata registry.
+ * Keyed by "METHOD /path" to disambiguate endpoints that share a path.
+ */
+export const ENDPOINT_METADATA_REGISTRY = new Map<string, EndpointMetadata>(
+  ALL_ENDPOINTS.map((e) => [registryKey(e.method, e.path), e])
+);
+
+/**
+ * Get metadata for an endpoint by path and optional method.
+ *
+ * When method is provided, performs an exact lookup.
+ * When method is omitted, falls back to scanning for any matching path
+ * (for backward compatibility).
+ *
+ * Supports parameterized paths: /stacks/address/SP123... matches /stacks/address/{address}
+ */
+export function getEndpointMetadata(
+  path: string,
+  method?: string
+): EndpointMetadata | undefined {
+  // Exact lookup when method is provided
+  if (method) {
+    const exact = ENDPOINT_METADATA_REGISTRY.get(registryKey(method, path));
+    if (exact) return exact;
   }
 
-  // Try pattern matching for parameterized paths
-  // e.g., /stacks/address/SP123... matches /stacks/address/{address}
-  for (const [pattern, metadata] of ENDPOINT_METADATA_REGISTRY.entries()) {
-    if (pattern.includes("{")) {
-      const regex = new RegExp(`^${pattern.replace(/\{[^}]+\}/g, "[^/]+")}$`);
-      if (regex.test(path)) {
-        return metadata;
-      }
+  // Scan for matching path (exact or parameterized pattern)
+  for (const metadata of ENDPOINT_METADATA_REGISTRY.values()) {
+    if (method && metadata.method !== method) continue;
+
+    if (metadata.path === path) return metadata;
+
+    if (metadata.path.includes("{")) {
+      const regex = new RegExp(`^${metadata.path.replace(/\{[^}]+\}/g, "[^/]+")}$`);
+      if (regex.test(path)) return metadata;
     }
   }
 
   return undefined;
 }
-
-/**
- * Get all endpoints in a category
- */
-export function getEndpointsByCategory(category: string): EndpointMetadata[] {
-  return Array.from(ENDPOINT_METADATA_REGISTRY.values()).filter(
-    (e) => e.category === category
-  );
-}
-
-/**
- * Registry statistics
- */
-export const REGISTRY_STATS = {
-  total: ENDPOINT_METADATA_REGISTRY.size,
-  categories: {
-    hashing: hashingEndpoints.length,
-    stacks: stacksEndpoints.length,
-    inference: inferenceEndpoints.length,
-    storage: kvEndpoints.length + pasteEndpoints.length + dbEndpoints.length +
-             syncEndpoints.length + queueEndpoints.length + memoryEndpoints.length,
-  },
-};

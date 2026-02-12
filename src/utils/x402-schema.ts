@@ -12,8 +12,8 @@
 
 import { TIER_PRICING, stxToTokenAmount } from "../services/pricing";
 import type { PricingTier, TokenType } from "../types";
-import { getEndpointMetadata } from "../bazaar/registry";
-import type { EndpointMetadata } from "../bazaar/types";
+import { getEndpointMetadata } from "../bazaar";
+import type { EndpointMetadata } from "../bazaar";
 
 // =============================================================================
 // Types
@@ -239,7 +239,7 @@ export function generateX402Schema(config: GeneratorConfig): X402Schema {
 
     // Normalize path and lookup in Bazaar registry for rich metadata
     const normalizedPath = normalizePath(info.path);
-    const metadata = getEndpointMetadata(normalizedPath);
+    const metadata = getEndpointMetadata(normalizedPath, info.method);
 
     // Create entry for each supported token
     for (const token of TOKENS) {
