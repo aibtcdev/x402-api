@@ -56,10 +56,12 @@ export function buildBazaarExtension(metadata: EndpointMetadata): BazaarExtensio
           method: metadata.method,
           ...(metadata.queryParams && { queryParams: metadata.queryParams }),
           ...(metadata.bodyType && { bodyType: metadata.bodyType }),
+          ...(metadata.bodySchema && { bodySchema: metadata.bodySchema }),
         },
         output: {
           type: "json",
           example: metadata.outputExample,
+          ...(metadata.outputSchema && { schema: metadata.outputSchema }),
         },
       },
       schema: BAZAAR_INFO_SCHEMA,

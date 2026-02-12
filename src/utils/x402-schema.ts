@@ -255,7 +255,7 @@ export function generateX402Schema(config: GeneratorConfig): X402Schema {
         payTo: config.payTo,
         maxAmountRequired: amount,
         maxTimeoutSeconds: timeout,
-        resource: info.path,
+        resource: normalizedPath,
         description: info.description,
         mimeType: "application/json",
         outputSchema: buildOutputSchema(info, metadata),

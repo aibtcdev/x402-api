@@ -19,10 +19,12 @@ export interface BazaarExtension {
         method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
         queryParams?: Record<string, unknown>;
         bodyType?: "json" | "form" | "text" | "binary";
+        bodySchema?: Record<string, unknown>;
       };
       output: {
         type: "json";
         example: Record<string, unknown>;
+        schema?: Record<string, unknown>;
       };
     };
     schema: {
