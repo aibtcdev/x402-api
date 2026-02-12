@@ -111,29 +111,3 @@ export function loggerMiddleware(
 
   return next();
 }
-
-/**
- * Get logger from Hono context
- */
-export function getLogger(c: Context<{ Bindings: Env; Variables: AppVariables }>): Logger {
-  const logger = c.get("logger");
-  if (!logger) {
-    console.warn("[logger] No logger in context, using console fallback");
-    return createConsoleLogger({ path: c.req.path });
-  }
-  return logger;
-}
-
-/**
- * Create a standalone logger for use outside of request handlers
- */
-export function createStandaloneLogger(
-  env: Env,
-  ctx: ExecutionContext,
-  baseContext?: Record<string, unknown>
-): Logger {
-  if (env.LOGS) {
-    return createLogger(env.LOGS as unknown as LogsRPC, ctx, baseContext);
-  }
-  return createConsoleLogger(baseContext);
-}
