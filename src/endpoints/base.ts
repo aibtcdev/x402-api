@@ -99,6 +99,23 @@ export class BaseEndpoint extends OpenAPIRoute {
     }
   }
 
+  /**
+   * Get Storage DO stub with error handling
+   * Returns StorageDO stub or error response
+   *
+   * Usage:
+   *   const storageDO = this.requireStorageDO(c);
+   *   if (storageDO instanceof Response) return storageDO;
+   *   // storageDO is now DurableObjectStub<StorageDO>
+   */
+  protected requireStorageDO(c: AppContext): DurableObjectStub<StorageDO> | Response {
+    const storageDO = this.getStorageDO(c);
+    if (!storageDO) {
+      return this.errorResponse(c, "Storage not available", 500);
+    }
+    return storageDO;
+  }
+
 }
 
 /**

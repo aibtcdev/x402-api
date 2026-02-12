@@ -25,8 +25,8 @@ export class MemoryList extends StorageReadEndpoint {
     const limit = parseInt(c.req.query("limit") || "100", 10);
     const offset = parseInt(c.req.query("offset") || "0", 10);
 
-    const storageDO = this.getStorageDO(c);
-    if (!storageDO) return this.errorResponse(c, "Storage not available", 500);
+    const storageDO = this.requireStorageDO(c);
+    if (storageDO instanceof Response) return storageDO;
 
     const result = await storageDO.memoryList({ limit, offset }) as {
       items: Array<{ id: string; text: string; metadata: Record<string, unknown> | null; createdAt: string }>;

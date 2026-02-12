@@ -45,8 +45,8 @@ export class MemoryDelete extends StorageWriteEndpoint {
       return this.errorResponse(c, "ids array is required", 400);
     }
 
-    const storageDO = this.getStorageDO(c);
-    if (!storageDO) return this.errorResponse(c, "Storage not available", 500);
+    const storageDO = this.requireStorageDO(c);
+    if (storageDO instanceof Response) return storageDO;
 
     const result = await storageDO.memoryDelete(ids);
     return c.json({ ok: true, ...result, tokenType });

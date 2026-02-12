@@ -36,10 +36,8 @@ export class PasteGet extends StorageReadEndpoint {
       return this.errorResponse(c, "id parameter is required", 400);
     }
 
-    const storageDO = this.getStorageDO(c);
-    if (!storageDO) {
-      return this.errorResponse(c, "Storage not available", 500);
-    }
+    const storageDO = this.requireStorageDO(c);
+    if (storageDO instanceof Response) return storageDO;
 
     const result = await storageDO.pasteGet(id);
 

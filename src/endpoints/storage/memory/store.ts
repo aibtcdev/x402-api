@@ -60,8 +60,8 @@ export class MemoryStore extends StorageWriteLargeEndpoint {
       }
     }
 
-    const storageDO = this.getStorageDO(c);
-    if (!storageDO) return this.errorResponse(c, "Storage not available", 500);
+    const storageDO = this.requireStorageDO(c);
+    if (storageDO instanceof Response) return storageDO;
 
     // Generate embeddings using Cloudflare AI
     const env = c.env;

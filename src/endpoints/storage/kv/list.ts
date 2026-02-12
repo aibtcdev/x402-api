@@ -47,10 +47,8 @@ export class KvList extends StorageReadEndpoint {
     const prefix = c.req.query("prefix");
     const limit = parseInt(c.req.query("limit") || "100", 10);
 
-    const storageDO = this.getStorageDO(c);
-    if (!storageDO) {
-      return this.errorResponse(c, "Storage not available", 500);
-    }
+    const storageDO = this.requireStorageDO(c);
+    if (storageDO instanceof Response) return storageDO;
 
     const keys = await storageDO.kvList({ prefix, limit }) as Array<{
       key: string;

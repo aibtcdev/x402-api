@@ -24,8 +24,8 @@ export class SyncStatus extends StorageReadEndpoint {
     const name = c.req.param("name");
     if (!name) return this.errorResponse(c, "name is required", 400);
 
-    const storageDO = this.getStorageDO(c);
-    if (!storageDO) return this.errorResponse(c, "Storage not available", 500);
+    const storageDO = this.requireStorageDO(c);
+    if (storageDO instanceof Response) return storageDO;
 
     const result = await storageDO.syncStatus(name);
     return c.json({ ok: true, name, ...result, tokenType });

@@ -40,8 +40,8 @@ export class DbExecute extends StorageWriteEndpoint {
     const { query, params = [] } = body;
     if (!query) return this.errorResponse(c, "query is required", 400);
 
-    const storageDO = this.getStorageDO(c);
-    if (!storageDO) return this.errorResponse(c, "Storage not available", 500);
+    const storageDO = this.requireStorageDO(c);
+    if (storageDO instanceof Response) return storageDO;
 
     try {
       const result = await storageDO.sqlExecute(query, params);

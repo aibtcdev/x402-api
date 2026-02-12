@@ -50,8 +50,8 @@ export class QueuePush extends StorageWriteEndpoint {
       return this.errorResponse(c, "name and items array are required", 400);
     }
 
-    const storageDO = this.getStorageDO(c);
-    if (!storageDO) return this.errorResponse(c, "Storage not available", 500);
+    const storageDO = this.requireStorageDO(c);
+    if (storageDO instanceof Response) return storageDO;
 
     const result = await storageDO.queuePush(name, items, { priority });
     return c.json({ ok: true, ...result, tokenType });

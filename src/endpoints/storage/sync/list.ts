@@ -18,8 +18,8 @@ export class SyncList extends StorageReadEndpoint {
 
   async handle(c: AppContext) {
     const tokenType = this.getTokenType(c);
-    const storageDO = this.getStorageDO(c);
-    if (!storageDO) return this.errorResponse(c, "Storage not available", 500);
+    const storageDO = this.requireStorageDO(c);
+    if (storageDO instanceof Response) return storageDO;
 
     const locks = await storageDO.syncList();
     return c.json({ ok: true, locks, count: locks.length, tokenType });

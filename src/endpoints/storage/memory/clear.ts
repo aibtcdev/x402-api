@@ -19,8 +19,8 @@ export class MemoryClear extends StorageWriteEndpoint {
   async handle(c: AppContext) {
     const tokenType = this.getTokenType(c);
 
-    const storageDO = this.getStorageDO(c);
-    if (!storageDO) return this.errorResponse(c, "Storage not available", 500);
+    const storageDO = this.requireStorageDO(c);
+    if (storageDO instanceof Response) return storageDO;
 
     const result = await storageDO.memoryClear();
     return c.json({ ok: true, ...result, tokenType });

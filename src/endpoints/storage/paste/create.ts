@@ -57,10 +57,8 @@ export class PasteCreate extends StorageWriteLargeEndpoint {
       return this.errorResponse(c, "content is required", 400);
     }
 
-    const storageDO = this.getStorageDO(c);
-    if (!storageDO) {
-      return this.errorResponse(c, "Storage not available", 500);
-    }
+    const storageDO = this.requireStorageDO(c);
+    if (storageDO instanceof Response) return storageDO;
 
     const result = await storageDO.pasteCreate(content, { title, language, ttl });
 

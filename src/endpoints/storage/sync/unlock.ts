@@ -39,8 +39,8 @@ export class SyncUnlock extends StorageWriteEndpoint {
     const { name, token } = body;
     if (!name || !token) return this.errorResponse(c, "name and token are required", 400);
 
-    const storageDO = this.getStorageDO(c);
-    if (!storageDO) return this.errorResponse(c, "Storage not available", 500);
+    const storageDO = this.requireStorageDO(c);
+    if (storageDO instanceof Response) return storageDO;
 
     const result = await storageDO.syncUnlock(name, token);
     return c.json({ ok: true, ...result, tokenType });

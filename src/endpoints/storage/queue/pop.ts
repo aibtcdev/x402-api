@@ -43,8 +43,8 @@ export class QueuePop extends StorageWriteEndpoint {
     const { name, count = 1 } = body;
     if (!name) return this.errorResponse(c, "name is required", 400);
 
-    const storageDO = this.getStorageDO(c);
-    if (!storageDO) return this.errorResponse(c, "Storage not available", 500);
+    const storageDO = this.requireStorageDO(c);
+    if (storageDO instanceof Response) return storageDO;
 
     const result = await storageDO.queuePop(name, count) as {
       items: Array<{ id: string; data: unknown }>;

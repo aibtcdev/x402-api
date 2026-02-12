@@ -41,8 +41,8 @@ export class MemorySearch extends StorageReadEndpoint {
     const { query, limit = 10, threshold = 0.5 } = body;
     if (!query) return this.errorResponse(c, "query is required", 400);
 
-    const storageDO = this.getStorageDO(c);
-    if (!storageDO) return this.errorResponse(c, "Storage not available", 500);
+    const storageDO = this.requireStorageDO(c);
+    if (storageDO instanceof Response) return storageDO;
 
     // Generate embedding for query
     const env = c.env;

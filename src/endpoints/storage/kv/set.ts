@@ -60,10 +60,8 @@ export class KvSet extends StorageWriteEndpoint {
       return this.errorResponse(c, "value is required", 400);
     }
 
-    const storageDO = this.getStorageDO(c);
-    if (!storageDO) {
-      return this.errorResponse(c, "Storage not available", 500);
-    }
+    const storageDO = this.requireStorageDO(c);
+    if (storageDO instanceof Response) return storageDO;
 
     const result = await storageDO.kvSet(key, value, { metadata, ttl });
 
