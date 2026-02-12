@@ -50,13 +50,14 @@ export class StorageDO extends DurableObject<Env> {
     // Use blockConcurrencyWhile for one-time schema initialization
     // This ensures schema is ready before any requests are processed
     ctx.blockConcurrencyWhile(async () => {
-      });
+      this.initializeSchema();
+    });
   }
 
   /**
    * Clean up expired entries from a table with expires_at column
    */
-  private cleanupExpired(table: string): void {
+  private cleanupExpired(table: "kv" | "pastes" | "memories"): void {
     this.sql.exec(
       `DELETE FROM ${table} WHERE expires_at IS NOT NULL AND expires_at < ?`,
       new Date().toISOString()
@@ -699,16 +700,25 @@ export class StorageDO extends DurableObject<Env> {
   async memoryDelete(ids: string[]): Promise<{ deleted: number; ids: string[] }> {
     if (ids.length === 0) return { deleted: 0, ids: [] };
 
-    // Batch delete with single query instead of per-item SELECT+DELETE
+    // Find which IDs actually exist before deleting
     const placeholders = ids.map(() => '?').join(',');
+    const existingRows = this.sql
+      .exec(`SELECT key FROM memories WHERE key IN (${placeholders})`, ...ids)
+      .toArray();
+
+    const existingIds = existingRows.map((row) => row.key as string);
+    if (existingIds.length === 0) {
+      return { deleted: 0, ids: [] };
+    }
+
+    // Delete only existing IDs
+    const deletePlaceholders = existingIds.map(() => '?').join(',');
     const result = this.sql.exec(
-      `DELETE FROM memories WHERE key IN (${placeholders})`,
-      ...ids
+      `DELETE FROM memories WHERE key IN (${deletePlaceholders})`,
+      ...existingIds
     );
 
-    // Return all ids since we can't determine which were actually deleted
-    // (but this matches the pattern of other delete operations)
-    return { deleted: result.rowsWritten, ids };
+    return { deleted: result.rowsWritten, ids: existingIds };
   }
 
   async memoryList(options?: { limit?: number; offset?: number }): Promise<{
