@@ -232,10 +232,15 @@ function classifyError(statusCode: number): string {
 // =============================================================================
 
 // Routes that don't require payment
-const FREE_ROUTES = new Set(["/", "/health", "/docs", "/openapi.json", "/x402.json", "/dashboard"]);
-
-// Free endpoints (model listings)
-const FREE_ENDPOINTS = new Set([
+const FREE_ROUTES = new Set([
+  // Info/docs
+  "/",
+  "/health",
+  "/docs",
+  "/openapi.json",
+  "/x402.json",
+  "/dashboard",
+  // Free endpoints
   "/inference/openrouter/models",
   "/inference/cloudflare/models",
 ]);
@@ -245,7 +250,7 @@ app.use("*", async (c, next) => {
   const path = c.req.path;
 
   // Skip free routes
-  if (FREE_ROUTES.has(path) || FREE_ENDPOINTS.has(path)) {
+  if (FREE_ROUTES.has(path)) {
     return next();
   }
 
