@@ -70,19 +70,12 @@ const TOKEN_CONTRACTS: Record<"mainnet" | "testnet", Record<"sBTC" | "USDCx", To
 // =============================================================================
 
 /**
- * Safely serialize object with BigInt values converted to strings
- */
-function safeStringify(obj: unknown): string {
-  return JSON.stringify(obj, (_, value) =>
-    typeof value === "bigint" ? value.toString() : value
-  );
-}
-
-/**
  * Encode object to base64 JSON for headers
  */
 function encodeBase64Json(obj: unknown): string {
-  const json = safeStringify(obj);
+  const json = JSON.stringify(obj, (_, value) =>
+    typeof value === "bigint" ? value.toString() : value
+  );
   return btoa(json);
 }
 
@@ -417,21 +410,4 @@ export function x402Middleware(
   };
 }
 
-/**
- * Get x402 context from Hono context
- */
-export function getX402Context(
-  c: Context<{ Bindings: Env; Variables: AppVariables }>
-): X402Context | null {
-  return c.var.x402 || null;
-}
-
-// =============================================================================
-// Convenience Middleware Creators
-// =============================================================================
-
-/** Standard paid endpoints (0.001 STX) */
-export const x402Standard = () => x402Middleware({ tier: "standard" });
-
-/** Dynamic pricing for LLM endpoints (pass-through + 20%) */
-export const x402Dynamic = () => x402Middleware({ dynamic: true });
+// No exported convenience functions - use x402Middleware directly
