@@ -6,7 +6,7 @@ This file provides guidance to Claude Code when working with this repository.
 
 x402 Stacks API Host - A Cloudflare Worker that exposes APIs on a pay-per-use basis using the x402 protocol. Agents pay per request via Stacks blockchain payments (STX, sBTC, USDCx).
 
-**Status**: Multi-category API implemented. See REQUIREMENTS.md for architecture decisions.
+**Status**: Multi-category API implemented. Original planning doc archived at `.planning/archive/REQUIREMENTS.md`.
 
 ## Commands
 
@@ -72,43 +72,7 @@ See `/docs` endpoint for full OpenAPI specification.
 - worker-logs service binding (RPC to wbd.host)
 - Cloudflare AI binding for embeddings
 
-**Project Structure:**
-```
-src/
-├── index.ts                    # Hono app, Chanfana registry, Scalar at /docs
-├── types.ts                    # Shared types and Env interface
-├── endpoints/
-│   ├── base.ts                 # BaseEndpoint classes with pricing tiers
-│   ├── inference/              # OpenRouter + Cloudflare AI
-│   ├── stacks/                 # Blockchain utilities
-│   ├── hashing/                # Clarity-compatible hashing
-│   └── storage/                # Stateful operations (kv, paste, db, sync, queue, memory)
-├── middleware/
-│   └── x402.ts                 # Payment middleware (fixed + dynamic)
-├── durable-objects/
-│   ├── UsageDO.ts              # Per-payer usage tracking
-│   ├── StorageDO.ts            # Per-payer stateful storage
-│   └── MetricsDO.ts            # Global metrics tracking
-├── services/
-│   ├── pricing.ts              # Tier definitions + dynamic estimators
-│   ├── openrouter.ts           # OpenRouter client
-│   ├── hiro.ts                 # Hiro API client
-│   └── tenero.ts               # Tenero API client
-└── utils/
-    ├── logger.ts               # Logging utilities
-    ├── pricing.ts              # Pricing helpers
-    └── wallet.ts               # Wallet derivation for tests
-
-tests/
-├── _shared_utils.ts            # Colors, env vars, test logger
-├── _test_generator.ts          # TestConfig interface, X402 payment flow
-├── _run_all_tests.ts           # Main CLI runner with modes, filtering
-├── endpoint-registry.ts        # All endpoint configs with validation
-└── kv-lifecycle.test.ts        # KV storage lifecycle test
-
-scripts/
-└── run-tests-cron.sh           # Cron wrapper for automated test runs
-```
+**Layout:** `src/` has `endpoints/`, `middleware/`, `durable-objects/`, `services/`, `utils/`, and `bazaar/`. Tests are in `tests/`, cron scripts in `scripts/`.
 
 ## Pricing Strategy
 
@@ -199,36 +163,13 @@ export async function runKvLifecycle(verbose = false) {
 }
 ```
 
-## Reference Patterns
+## Reference Documentation
 
-When implementing `/stacks` endpoints, reference patterns from:
-- `~/dev/whoabuddy/stacks-tracker/src/api/hiro-client.ts` - Hiro API client
-- `~/dev/whoabuddy/stacks-tracker/src/crypto/key-derivation.ts` - Address validation
-- `~/dev/whoabuddy/stacks-tracker/src/utils/clarity-converter.ts` - Clarity types
-
-When migrating endpoints, reference:
-- `~/dev/whoabuddy/stx402/` - Production endpoints to migrate
-
-## Important: Consult Documentation
-
-**ALWAYS check official docs before implementing features:**
-
-### Cloudflare Workers & Durable Objects
-- [Rules of Durable Objects](https://developers.cloudflare.com/durable-objects/best-practices/rules-of-durable-objects/)
-- [SQLite in DOs](https://developers.cloudflare.com/durable-objects/api/sqlite-storage-api/)
-- [Workers AI](https://developers.cloudflare.com/workers-ai/)
-
-### APIs
-- [OpenRouter API](https://openrouter.ai/docs/api/reference/overview)
-- [Hiro API](https://docs.hiro.so/stacks/api)
-- [Tenero API](https://docs.tenero.io/)
-
-### x402 Protocol
-- [x402 Protocol](https://www.x402.org/)
-- [x402-stacks npm](https://www.npmjs.com/package/x402-stacks)
+- [Cloudflare Durable Objects](https://developers.cloudflare.com/durable-objects/best-practices/rules-of-durable-objects/) | [SQLite in DOs](https://developers.cloudflare.com/durable-objects/api/sqlite-storage-api/) | [Workers AI](https://developers.cloudflare.com/workers-ai/)
+- [OpenRouter API](https://openrouter.ai/docs/api/reference/overview) | [Hiro API](https://docs.hiro.so/stacks/api)
+- [x402 Protocol](https://www.x402.org/) | [x402-stacks npm](https://www.npmjs.com/package/x402-stacks)
 
 ## Related Projects
 
 - `~/dev/whoabuddy/worker-logs/` - Universal logging service
 - `~/dev/whoabuddy/stacks-tracker/` - Stacks blockchain tracker (reference patterns)
-- `~/dev/whoabuddy/stx402/` - Production x402 API (source for migration)
