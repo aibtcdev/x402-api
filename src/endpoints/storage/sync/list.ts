@@ -2,18 +2,17 @@
  * Sync List Endpoint
  */
 import { StorageReadEndpoint } from "../../base";
+import { tokenTypeParam, response402 } from "../../schema";
 import type { AppContext } from "../../../types";
 
 export class SyncList extends StorageReadEndpoint {
   schema = {
     tags: ["Storage - Sync"],
     summary: "(paid, storage_read) List active locks",
-    parameters: [
-      { name: "tokenType", in: "query" as const, required: false, schema: { type: "string" as const, enum: ["STX", "sBTC", "USDCx"], default: "STX" } },
-    ],
+    parameters: [tokenTypeParam],
     responses: {
       "200": { description: "List of locks" },
-      "402": { description: "Payment required" },
+      "402": response402,
     },
   };
 

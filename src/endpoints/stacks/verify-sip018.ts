@@ -6,6 +6,7 @@
  */
 
 import { SimpleEndpoint } from "../base";
+import { tokenTypeParam, response400, response402 } from "../schema";
 import {
   verifyMessageSignatureRsv,
 } from "@stacks/encryption";
@@ -63,18 +64,7 @@ export class VerifySIP018 extends SimpleEndpoint {
         },
       },
     },
-    parameters: [
-      {
-        name: "tokenType",
-        in: "query" as const,
-        required: false,
-        schema: {
-          type: "string" as const,
-          enum: ["STX", "sBTC", "USDCx"],
-          default: "STX",
-        },
-      },
-    ],
+    parameters: [tokenTypeParam],
     responses: {
       "200": {
         description: "Verification result",
@@ -93,8 +83,8 @@ export class VerifySIP018 extends SimpleEndpoint {
           },
         },
       },
-      "400": { description: "Invalid input" },
-      "402": { description: "Payment required" },
+      "400": response400,
+      "402": response402,
     },
   };
 

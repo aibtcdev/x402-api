@@ -2,18 +2,17 @@
  * Memory Clear Endpoint
  */
 import { StorageWriteEndpoint } from "../../base";
+import { tokenTypeParam, response402 } from "../../schema";
 import type { AppContext } from "../../../types";
 
 export class MemoryClear extends StorageWriteEndpoint {
   schema = {
     tags: ["Storage - Memory"],
     summary: "(paid, storage_write) Clear all memory items",
-    parameters: [
-      { name: "tokenType", in: "query" as const, required: false, schema: { type: "string" as const, enum: ["STX", "sBTC", "USDCx"], default: "STX" } },
-    ],
+    parameters: [tokenTypeParam],
     responses: {
       "200": { description: "Clear result" },
-      "402": { description: "Payment required" },
+      "402": response402,
     },
   };
 

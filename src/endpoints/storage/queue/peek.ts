@@ -2,6 +2,7 @@
  * Queue Peek Endpoint
  */
 import { StorageReadEndpoint } from "../../base";
+import { tokenTypeParam, response402 } from "../../schema";
 import type { AppContext } from "../../../types";
 
 export class QueuePeek extends StorageReadEndpoint {
@@ -11,11 +12,11 @@ export class QueuePeek extends StorageReadEndpoint {
     parameters: [
       { name: "name", in: "query" as const, required: true, schema: { type: "string" as const } },
       { name: "count", in: "query" as const, required: false, schema: { type: "integer" as const, default: 1 } },
-      { name: "tokenType", in: "query" as const, required: false, schema: { type: "string" as const, enum: ["STX", "sBTC", "USDCx"], default: "STX" } },
+      tokenTypeParam,
     ],
     responses: {
       "200": { description: "Queue items" },
-      "402": { description: "Payment required" },
+      "402": response402,
     },
   };
 

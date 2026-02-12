@@ -2,6 +2,7 @@
  * Sync Unlock Endpoint
  */
 import { StorageWriteEndpoint } from "../../base";
+import { tokenTypeParam, response402 } from "../../schema";
 import type { AppContext } from "../../../types";
 
 export class SyncUnlock extends StorageWriteEndpoint {
@@ -23,12 +24,10 @@ export class SyncUnlock extends StorageWriteEndpoint {
         },
       },
     },
-    parameters: [
-      { name: "tokenType", in: "query" as const, required: false, schema: { type: "string" as const, enum: ["STX", "sBTC", "USDCx"], default: "STX" } },
-    ],
+    parameters: [tokenTypeParam],
     responses: {
       "200": { description: "Unlock result" },
-      "402": { description: "Payment required" },
+      "402": response402,
     },
   };
 

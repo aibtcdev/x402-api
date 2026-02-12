@@ -5,6 +5,7 @@
  */
 
 import { SimpleEndpoint } from "../base";
+import { tokenTypeParam, response400, response402 } from "../schema";
 import { Address } from "@stacks/transactions";
 import { HiroClient, HiroError } from "../../services/hiro";
 import type { AppContext, StacksProfile } from "../../types";
@@ -22,16 +23,7 @@ export class Profile extends SimpleEndpoint {
         schema: { type: "string" as const },
         description: "Stacks address or BNS name (e.g., SP1234... or satoshi.btc)",
       },
-      {
-        name: "tokenType",
-        in: "query" as const,
-        required: false,
-        schema: {
-          type: "string" as const,
-          enum: ["STX", "sBTC", "USDCx"],
-          default: "STX",
-        },
-      },
+      tokenTypeParam,
     ],
     responses: {
       "200": {
@@ -61,8 +53,8 @@ export class Profile extends SimpleEndpoint {
           },
         },
       },
-      "400": { description: "Invalid input" },
-      "402": { description: "Payment required" },
+      "400": response400,
+      "402": response402,
       "404": { description: "Address not found" },
     },
   };

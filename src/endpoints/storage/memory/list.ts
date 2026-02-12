@@ -2,6 +2,7 @@
  * Memory List Endpoint
  */
 import { StorageReadEndpoint } from "../../base";
+import { tokenTypeParam, response402 } from "../../schema";
 import type { AppContext } from "../../../types";
 
 export class MemoryList extends StorageReadEndpoint {
@@ -11,11 +12,11 @@ export class MemoryList extends StorageReadEndpoint {
     parameters: [
       { name: "limit", in: "query" as const, required: false, schema: { type: "integer" as const, default: 100 } },
       { name: "offset", in: "query" as const, required: false, schema: { type: "integer" as const, default: 0 } },
-      { name: "tokenType", in: "query" as const, required: false, schema: { type: "string" as const, enum: ["STX", "sBTC", "USDCx"], default: "STX" } },
+      tokenTypeParam,
     ],
     responses: {
       "200": { description: "Memory items" },
-      "402": { description: "Payment required" },
+      "402": response402,
     },
   };
 

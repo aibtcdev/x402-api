@@ -5,6 +5,7 @@
  */
 
 import { SimpleEndpoint } from "../base";
+import { tokenTypeParam, response400, response402 } from "../schema";
 import {
   deserializeTransaction,
   AddressVersion,
@@ -34,18 +35,7 @@ export class DecodeTransaction extends SimpleEndpoint {
         },
       },
     },
-    parameters: [
-      {
-        name: "tokenType",
-        in: "query" as const,
-        required: false,
-        schema: {
-          type: "string" as const,
-          enum: ["STX", "sBTC", "USDCx"],
-          default: "STX",
-        },
-      },
-    ],
+    parameters: [tokenTypeParam],
     responses: {
       "200": {
         description: "Decoded transaction",
@@ -67,8 +57,8 @@ export class DecodeTransaction extends SimpleEndpoint {
           },
         },
       },
-      "400": { description: "Invalid transaction" },
-      "402": { description: "Payment required" },
+      "400": response400,
+      "402": response402,
     },
   };
 

@@ -2,6 +2,7 @@
  * DB Execute Endpoint
  */
 import { StorageWriteEndpoint } from "../../base";
+import { tokenTypeParam, response400, response402 } from "../../schema";
 import type { AppContext } from "../../../types";
 
 export class DbExecute extends StorageWriteEndpoint {
@@ -23,13 +24,11 @@ export class DbExecute extends StorageWriteEndpoint {
         },
       },
     },
-    parameters: [
-      { name: "tokenType", in: "query" as const, required: false, schema: { type: "string" as const, enum: ["STX", "sBTC", "USDCx"], default: "STX" } },
-    ],
+    parameters: [tokenTypeParam],
     responses: {
       "200": { description: "Execution result" },
-      "400": { description: "Invalid query" },
-      "402": { description: "Payment required" },
+      "400": response400,
+      "402": response402,
     },
   };
 

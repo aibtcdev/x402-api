@@ -3,6 +3,7 @@
  * Semantic search using vector embeddings
  */
 import { StorageReadEndpoint } from "../../base";
+import { tokenTypeParam, response402 } from "../../schema";
 import type { AppContext } from "../../../types";
 
 export class MemorySearch extends StorageReadEndpoint {
@@ -25,12 +26,10 @@ export class MemorySearch extends StorageReadEndpoint {
         },
       },
     },
-    parameters: [
-      { name: "tokenType", in: "query" as const, required: false, schema: { type: "string" as const, enum: ["STX", "sBTC", "USDCx"], default: "STX" } },
-    ],
+    parameters: [tokenTypeParam],
     responses: {
       "200": { description: "Search results" },
-      "402": { description: "Payment required" },
+      "402": response402,
     },
   };
 

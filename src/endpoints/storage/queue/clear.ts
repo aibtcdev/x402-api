@@ -2,6 +2,7 @@
  * Queue Clear Endpoint
  */
 import { StorageWriteEndpoint } from "../../base";
+import { tokenTypeParam, response402 } from "../../schema";
 import type { AppContext } from "../../../types";
 
 export class QueueClear extends StorageWriteEndpoint {
@@ -22,12 +23,10 @@ export class QueueClear extends StorageWriteEndpoint {
         },
       },
     },
-    parameters: [
-      { name: "tokenType", in: "query" as const, required: false, schema: { type: "string" as const, enum: ["STX", "sBTC", "USDCx"], default: "STX" } },
-    ],
+    parameters: [tokenTypeParam],
     responses: {
       "200": { description: "Clear result" },
-      "402": { description: "Payment required" },
+      "402": response402,
     },
   };
 

@@ -5,6 +5,7 @@
  */
 
 import { SimpleEndpoint } from "../base";
+import { tokenTypeParam, response400, response402 } from "../schema";
 import { cvToJSON, hexToCV, ClarityType } from "@stacks/transactions";
 import type { AppContext } from "../../types";
 import type { ClarityValue } from "@stacks/transactions";
@@ -31,18 +32,7 @@ export class DecodeClarity extends SimpleEndpoint {
         },
       },
     },
-    parameters: [
-      {
-        name: "tokenType",
-        in: "query" as const,
-        required: false,
-        schema: {
-          type: "string" as const,
-          enum: ["STX", "sBTC", "USDCx"],
-          default: "STX",
-        },
-      },
-    ],
+    parameters: [tokenTypeParam],
     responses: {
       "200": {
         description: "Decoded Clarity value",
@@ -62,8 +52,8 @@ export class DecodeClarity extends SimpleEndpoint {
           },
         },
       },
-      "400": { description: "Invalid hex" },
-      "402": { description: "Payment required" },
+      "400": response400,
+      "402": response402,
     },
   };
 

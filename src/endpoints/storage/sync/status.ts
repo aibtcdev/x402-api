@@ -2,6 +2,7 @@
  * Sync Status Endpoint
  */
 import { StorageReadEndpoint } from "../../base";
+import { tokenTypeParam, response402 } from "../../schema";
 import type { AppContext } from "../../../types";
 
 export class SyncStatus extends StorageReadEndpoint {
@@ -10,11 +11,11 @@ export class SyncStatus extends StorageReadEndpoint {
     summary: "(paid, storage_read) Check lock status",
     parameters: [
       { name: "name", in: "path" as const, required: true, schema: { type: "string" as const } },
-      { name: "tokenType", in: "query" as const, required: false, schema: { type: "string" as const, enum: ["STX", "sBTC", "USDCx"], default: "STX" } },
+      tokenTypeParam,
     ],
     responses: {
       "200": { description: "Lock status" },
-      "402": { description: "Payment required" },
+      "402": response402,
     },
   };
 

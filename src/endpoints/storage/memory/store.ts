@@ -3,6 +3,7 @@
  * Store text with vector embeddings for semantic search
  */
 import { StorageWriteLargeEndpoint } from "../../base";
+import { tokenTypeParam, response402 } from "../../schema";
 import type { AppContext } from "../../../types";
 
 export class MemoryStore extends StorageWriteLargeEndpoint {
@@ -35,12 +36,10 @@ export class MemoryStore extends StorageWriteLargeEndpoint {
         },
       },
     },
-    parameters: [
-      { name: "tokenType", in: "query" as const, required: false, schema: { type: "string" as const, enum: ["STX", "sBTC", "USDCx"], default: "STX" } },
-    ],
+    parameters: [tokenTypeParam],
     responses: {
       "200": { description: "Store result" },
-      "402": { description: "Payment required" },
+      "402": response402,
     },
   };
 
