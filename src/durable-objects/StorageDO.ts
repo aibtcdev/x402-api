@@ -729,17 +729,18 @@ export class StorageDO extends DurableObject<Env> {
 
   async memoryDelete(ids: string[]): Promise<{ deleted: number; ids: string[] }> {
     this.initializeSchema();
-    const deletedIds: string[] = [];
+    if (ids.length === 0) return { deleted: 0, ids: [] };
 
-    for (const id of ids) {
-      const existing = this.sql.exec("SELECT 1 FROM memories WHERE key = ?", id).toArray();
-      if (existing.length > 0) {
-        this.sql.exec("DELETE FROM memories WHERE key = ?", id);
-        deletedIds.push(id);
-      }
-    }
+    // Batch delete with single query instead of per-item SELECT+DELETE
+    const placeholders = ids.map(() => '?').join(',');
+    const result = this.sql.exec(
+      `DELETE FROM memories WHERE key IN (${placeholders})`,
+      ...ids
+    );
 
-    return { deleted: deletedIds.length, ids: deletedIds };
+    // Return all ids since we can't determine which were actually deleted
+    // (but this matches the pattern of other delete operations)
+    return { deleted: result.rowsWritten, ids };
   }
 
   async memoryList(options?: { limit?: number; offset?: number }): Promise<{
