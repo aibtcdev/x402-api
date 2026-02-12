@@ -3,10 +3,17 @@
  *
  * Generates x402.json format for StacksX402 scanner discovery.
  * Static generation without network calls (Cloudflare Workers can't self-fetch).
+ *
+ * V2 format includes Bazaar-compatible metadata with:
+ * - Full input/output examples
+ * - JSON schemas per endpoint
+ * - Rich discovery metadata from the registry
  */
 
 import { TIER_PRICING, stxToTokenAmount } from "../services/pricing";
 import type { PricingTier, TokenType } from "../types";
+import { getEndpointMetadata } from "../bazaar/registry";
+import type { EndpointMetadata } from "../bazaar/types";
 
 // =============================================================================
 // Types
@@ -24,25 +31,26 @@ export interface X402Entry {
   mimeType: "application/json";
   outputSchema: {
     input: X402InputSchema;
-    output: Record<string, string>;
+    output: X402OutputSchema;
   };
 }
 
 export interface X402InputSchema {
   type: "http";
   method: "GET" | "POST" | "DELETE";
-  bodyType?: "json";
-  bodyFields?: Record<string, X402FieldSchema>;
+  bodyType?: "json" | "form" | "text" | "binary";
+  bodySchema?: Record<string, unknown>; // Full JSON Schema
+  queryParams?: Record<string, unknown>; // Query parameter schema
 }
 
-export interface X402FieldSchema {
-  type: string;
-  required: boolean;
-  description?: string;
+export interface X402OutputSchema {
+  type: "json";
+  example: Record<string, unknown>; // Realistic output example
+  schema?: Record<string, unknown>; // Full JSON Schema (optional)
 }
 
 export interface X402Schema {
-  x402Version: number;
+  x402Version: 2; // V2 includes Bazaar metadata
   name: string;
   image: string;
   accepts: X402Entry[];
@@ -168,8 +176,56 @@ function getAmountForTier(tier: PricingTier, token: TokenType): string {
 // =============================================================================
 
 /**
- * Generate x402.json schema statically
- * Uses hardcoded endpoint registry - no network calls needed
+ * Build rich input/output schema from Bazaar metadata
+ */
+function buildOutputSchema(
+  basicInfo: EndpointInfo,
+  metadata?: EndpointMetadata
+): { input: X402InputSchema; output: X402OutputSchema } {
+  // Build input schema
+  const input: X402InputSchema = {
+    type: "http",
+    method: basicInfo.method,
+  };
+
+  // Add rich metadata if available
+  if (metadata) {
+    if (metadata.bodyType) {
+      input.bodyType = metadata.bodyType;
+    }
+    if (metadata.bodySchema) {
+      input.bodySchema = metadata.bodySchema;
+    }
+    if (metadata.queryParams) {
+      input.queryParams = metadata.queryParams;
+    }
+  }
+
+  // Build output schema
+  const output: X402OutputSchema = {
+    type: "json",
+    example: metadata?.outputExample || {},
+  };
+
+  // Add output schema if available
+  if (metadata?.outputSchema) {
+    output.schema = metadata.outputSchema;
+  }
+
+  return { input, output };
+}
+
+/**
+ * Normalize path from basic registry to Bazaar pattern format
+ * e.g., "/stacks/address/:address" -> "/stacks/address/{address}"
+ */
+function normalizePath(path: string): string {
+  return path.replace(/:([^/]+)/g, "{$1}");
+}
+
+/**
+ * Generate x402.json schema statically (v2 format with Bazaar metadata)
+ * Uses hardcoded endpoint registry + Bazaar registry - no network calls needed
  */
 export function generateX402Schema(config: GeneratorConfig): X402Schema {
   const accepts: X402Entry[] = [];
@@ -180,6 +236,10 @@ export function generateX402Schema(config: GeneratorConfig): X402Schema {
     if (info.tier === "free") continue;
 
     const timeout = getTimeoutForTier(info.tier);
+
+    // Normalize path and lookup in Bazaar registry for rich metadata
+    const normalizedPath = normalizePath(info.path);
+    const metadata = getEndpointMetadata(normalizedPath);
 
     // Create entry for each supported token
     for (const token of TOKENS) {
@@ -198,19 +258,13 @@ export function generateX402Schema(config: GeneratorConfig): X402Schema {
         resource: info.path,
         description: info.description,
         mimeType: "application/json",
-        outputSchema: {
-          input: {
-            type: "http",
-            method: info.method,
-          },
-          output: {},
-        },
+        outputSchema: buildOutputSchema(info, metadata),
       });
     }
   }
 
   return {
-    x402Version: 1,
+    x402Version: 2,
     name: config.name || "x402 Stacks API",
     image: config.image || "https://aibtc.dev/logos/aibtcdev-avatar-1000px.png",
     accepts,
