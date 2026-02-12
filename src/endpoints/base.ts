@@ -9,12 +9,10 @@
  */
 
 import { OpenAPIRoute } from "chanfana";
-import { Address } from "@stacks/transactions";
-import { validateTokenType, getFixedTierEstimate } from "../services/pricing";
-import type { AppContext, TokenType, PricingTier, PriceEstimate } from "../types";
+import { validateTokenType } from "../services/pricing";
+import type { AppContext, TokenType, PricingTier } from "../types";
 import type { ContentfulStatusCode } from "hono/utils/http-status";
 import type { StorageDO } from "../durable-objects/StorageDO";
-import type { UsageDO } from "../durable-objects/UsageDO";
 
 /**
  * Base class for all API endpoints
@@ -35,31 +33,6 @@ export class BaseEndpoint extends OpenAPIRoute {
       c.req.query("tokenType") ||
       "STX";
     return validateTokenType(rawTokenType);
-  }
-
-  /**
-   * Get the price estimate for this endpoint
-   */
-  protected getPriceEstimate(c: AppContext): PriceEstimate {
-    const tokenType = this.getTokenType(c);
-    return getFixedTierEstimate(this.pricingTier, tokenType);
-  }
-
-  /**
-   * Validate a Stacks address parameter
-   * Returns normalized address or null if invalid
-   */
-  protected validateAddress(c: AppContext): string | null {
-    const address = c.req.param("address");
-    if (!address) return null;
-
-    try {
-      const addressObj = Address.parse(address);
-      return Address.stringify(addressObj);
-    } catch (e) {
-      c.var.logger.warn("Invalid address format", { address, error: String(e) });
-      return null;
-    }
   }
 
   /**
@@ -96,21 +69,6 @@ export class BaseEndpoint extends OpenAPIRoute {
   }
 
   /**
-   * Return a standardized success response
-   */
-  protected successResponse(
-    c: AppContext,
-    data: Record<string, unknown>
-  ): Response {
-    const tokenType = this.getTokenType(c);
-    return c.json({
-      ok: true,
-      tokenType,
-      ...data,
-    });
-  }
-
-  /**
    * Get the Storage DO stub for the current payer
    * Returns null if no payer address available
    */
@@ -124,19 +82,6 @@ export class BaseEndpoint extends OpenAPIRoute {
     return c.env.STORAGE_DO.get(id);
   }
 
-  /**
-   * Get the Usage DO stub for the current payer
-   * Returns null if no payer address available
-   */
-  protected getUsageDO(c: AppContext): DurableObjectStub<UsageDO> | null {
-    const payerAddress = this.getPayerAddress(c);
-    if (!payerAddress) {
-      return null;
-    }
-
-    const id = c.env.USAGE_DO.idFromName(payerAddress);
-    return c.env.USAGE_DO.get(id);
-  }
 }
 
 /**
