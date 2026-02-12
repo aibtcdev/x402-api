@@ -236,9 +236,9 @@ export class UsageDO extends DurableObject<Env> {
     const lastTs = lastResult[0]?.last_ts as number | null;
 
     return {
-      totalRequests: (stats?.total_requests as number) || 0,
-      totalRevenue: (stats?.total_revenue as number) || 0,
-      totalTokens: (stats?.total_tokens as number) || 0,
+      totalRequests: (stats?.total_requests as number) ?? 0,
+      totalRevenue: (stats?.total_revenue as number) ?? 0,
+      totalTokens: (stats?.total_tokens as number) ?? 0,
       firstRequest: firstTs ? new Date(firstTs).toISOString() : null,
       lastRequest: lastTs ? new Date(lastTs).toISOString() : null,
     };

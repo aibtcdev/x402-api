@@ -441,7 +441,7 @@ export class MetricsDO extends DurableObject<Env> {
   }> {
     const endpointCount = this.sql
       .exec("SELECT COUNT(*) as cnt FROM endpoint_stats")
-      .toArray()[0]?.cnt as number || 0;
+      .toArray()[0]?.cnt as number ?? 0;
 
     const totals = this.sql
       .exec(
@@ -455,17 +455,17 @@ export class MetricsDO extends DurableObject<Env> {
       )
       .toArray()[0];
 
-    const totalCalls = (totals?.total_calls as number) || 0;
-    const successful = (totals?.successful as number) || 0;
+    const totalCalls = (totals?.total_calls as number) ?? 0;
+    const successful = (totals?.successful as number) ?? 0;
 
     return {
       totalEndpoints: endpointCount,
       totalCalls,
       totalSuccessful: successful,
       avgSuccessRate: totalCalls > 0 ? (successful / totalCalls) * 100 : 0,
-      earningsSTX: (totals?.stx as number) || 0,
-      earningsSBTC: (totals?.sbtc as number) || 0,
-      earningsUSDCx: (totals?.usdcx as number) || 0,
+      earningsSTX: (totals?.stx as number) ?? 0,
+      earningsSBTC: (totals?.sbtc as number) ?? 0,
+      earningsUSDCx: (totals?.usdcx as number) ?? 0,
     };
   }
 
