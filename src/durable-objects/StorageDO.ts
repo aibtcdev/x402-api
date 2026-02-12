@@ -50,6 +50,16 @@ export class StorageDO extends DurableObject<Env> {
   }
 
   /**
+   * Clean up expired entries from a table with expires_at column
+   */
+  private cleanupExpired(table: string): void {
+    this.sql.exec(
+      `DELETE FROM ${table} WHERE expires_at IS NOT NULL AND expires_at < ?`,
+      new Date().toISOString()
+    );
+  }
+
+  /**
    * Initialize the database schema (called lazily)
    */
   private initializeSchema(): void {
@@ -179,12 +189,7 @@ export class StorageDO extends DurableObject<Env> {
     updatedAt: string;
   } | null> {
     this.initializeSchema();
-
-    // Clean up expired entries
-    this.sql.exec(
-      "DELETE FROM kv WHERE expires_at IS NOT NULL AND expires_at < ?",
-      new Date().toISOString()
-    );
+    this.cleanupExpired('kv');
 
     const result = this.sql
       .exec("SELECT value, metadata, created_at, updated_at FROM kv WHERE key = ?", key)
@@ -217,13 +222,8 @@ export class StorageDO extends DurableObject<Env> {
     }>
   > {
     this.initializeSchema();
+    this.cleanupExpired('kv');
     const limit = Math.min(options?.limit || 100, 1000);
-
-    // Clean up expired entries
-    this.sql.exec(
-      "DELETE FROM kv WHERE expires_at IS NOT NULL AND expires_at < ?",
-      new Date().toISOString()
-    );
 
     let query = "SELECT key, metadata, updated_at FROM kv";
     const params: unknown[] = [];
@@ -277,12 +277,7 @@ export class StorageDO extends DurableObject<Env> {
     expiresAt: string | null;
   } | null> {
     this.initializeSchema();
-
-    // Clean up expired
-    this.sql.exec(
-      "DELETE FROM pastes WHERE expires_at IS NOT NULL AND expires_at < ?",
-      new Date().toISOString()
-    );
+    this.cleanupExpired('pastes');
 
     const result = this.sql
       .exec("SELECT content, title, language, created_at, expires_at FROM pastes WHERE id = ?", id)
@@ -680,12 +675,7 @@ export class StorageDO extends DurableObject<Env> {
     threshold?: number;
   }): Promise<{ results: Array<{ id: string; text: string; metadata: Record<string, unknown> | null; similarity: number }> }> {
     this.initializeSchema();
-
-    // Clean up expired
-    this.sql.exec(
-      "DELETE FROM memories WHERE expires_at IS NOT NULL AND expires_at < ?",
-      new Date().toISOString()
-    );
+    this.cleanupExpired('memories');
 
     const limit = Math.min(options?.limit ?? 10, 100);
     const threshold = options?.threshold ?? 0.5;
@@ -748,14 +738,9 @@ export class StorageDO extends DurableObject<Env> {
     total: number;
   }> {
     this.initializeSchema();
+    this.cleanupExpired('memories');
     const limit = Math.min(options?.limit ?? 100, 1000);
     const offset = options?.offset ?? 0;
-
-    // Clean up expired
-    this.sql.exec(
-      "DELETE FROM memories WHERE expires_at IS NOT NULL AND expires_at < ?",
-      new Date().toISOString()
-    );
 
     const countResult = this.sql.exec("SELECT COUNT(*) as count FROM memories").toArray();
     const total = (countResult[0]?.count as number) || 0;
