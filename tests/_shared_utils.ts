@@ -11,6 +11,37 @@ import type {
 } from "x402-stacks";
 import { encodePaymentPayload, X402_HEADERS } from "x402-stacks";
 
+// =============================================================================
+// Test Configuration Types
+// =============================================================================
+
+export interface TestConfig {
+  /** Short name for the test (used in logs) */
+  name: string;
+  /** API endpoint path (e.g., "/hashing/sha256") */
+  endpoint: string;
+  /** HTTP method */
+  method: "GET" | "POST" | "DELETE";
+  /** Request body for POST requests */
+  body?: Record<string, unknown>;
+  /** Function to validate the response data */
+  validateResponse: (data: unknown, tokenType: TokenType) => boolean;
+  /** Optional description for logging */
+  description?: string;
+  /** Custom headers to include */
+  headers?: Record<string, string>;
+  /** Expected content type (defaults to application/json) */
+  expectedContentType?: string;
+  /** Additional HTTP status codes to accept as valid (besides 200) */
+  allowedStatuses?: number[];
+  /** Skip payment flow for free endpoints */
+  skipPayment?: boolean;
+}
+
+export interface TestResult {
+  tokenResults: Record<string, boolean>;
+}
+
 export const COLORS = {
   reset: "\x1b[0m",
   bright: "\x1b[1m",

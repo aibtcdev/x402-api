@@ -43,7 +43,7 @@ import {
   isStatefulCategory,
   ENDPOINT_COUNTS,
 } from "./endpoint-registry";
-import type { TestConfig } from "./_test_generator";
+import type { TestConfig } from "./_shared_utils";
 import {
   COLORS,
   X402_CLIENT_PK,
