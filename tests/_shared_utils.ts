@@ -233,14 +233,24 @@ export interface ParsedErrorInfo {
   errorCode?: string;
   errorMessage?: string;
   retryAfterSecs?: number;
+  details?: Record<string, unknown>;
   rawText: string;
 }
 
 /**
  * Parse error information from response text.
  * Attempts to extract structured error data from JSON, falls back to raw text.
+ *
+ * @param text - Response body text
+ * @param status - HTTP status code (optional, for better error messages)
+ * @param retryAfterHeader - Retry-After header value (optional, overrides body)
+ * @returns Parsed error information
  */
-export function parseErrorResponse(text: string): ParsedErrorInfo {
+export function parseErrorResponse(
+  text: string,
+  status?: number,
+  retryAfterHeader?: string | null
+): ParsedErrorInfo {
   const result: ParsedErrorInfo = { rawText: text };
 
   try {
@@ -248,11 +258,37 @@ export function parseErrorResponse(text: string): ParsedErrorInfo {
     result.errorCode = parsed.code;
     result.errorMessage = parsed.error;
     result.retryAfterSecs = parsed.retryAfter;
+    result.details = parsed.details;
+
+    // Override with header value if present
+    if (retryAfterHeader) {
+      const headerSecs = parseInt(retryAfterHeader, 10);
+      if (!isNaN(headerSecs)) {
+        result.retryAfterSecs = headerSecs;
+      }
+    }
   } catch {
     // Not JSON - rawText is already set
   }
 
   return result;
+}
+
+/**
+ * Format error response for display in test output
+ */
+export function formatErrorMessage(parsed: ParsedErrorInfo): string {
+  if (parsed.errorCode && parsed.errorMessage) {
+    let msg = `[${parsed.errorCode}] ${parsed.errorMessage}`;
+    if (parsed.retryAfterSecs) {
+      msg += ` (retry after ${parsed.retryAfterSecs}s)`;
+    }
+    return msg;
+  }
+  if (parsed.errorMessage) {
+    return parsed.errorMessage.slice(0, 80);
+  }
+  return parsed.rawText.slice(0, 80);
 }
 
 /**
