@@ -42,11 +42,15 @@ function parseJsonField(value: unknown): Record<string, unknown> | null {
 
 export class StorageDO extends DurableObject<Env> {
   private sql: SqlStorage;
-  private initialized = false;
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     this.sql = ctx.storage.sql;
+
+    // Use blockConcurrencyWhile for one-time schema initialization
+    // This ensures schema is ready before any requests are processed
+    ctx.blockConcurrencyWhile(async () => {
+      });
   }
 
   /**
@@ -60,10 +64,9 @@ export class StorageDO extends DurableObject<Env> {
   }
 
   /**
-   * Initialize the database schema (called lazily)
+   * Initialize the database schema (called once in constructor)
    */
   private initializeSchema(): void {
-    if (this.initialized) return;
 
     // KV table
     this.sql.exec(`
@@ -140,8 +143,6 @@ export class StorageDO extends DurableObject<Env> {
     `);
     this.sql.exec(`CREATE INDEX IF NOT EXISTS idx_memories_type ON memories(type)`);
     this.sql.exec(`CREATE INDEX IF NOT EXISTS idx_memories_importance ON memories(importance DESC)`);
-
-    this.initialized = true;
   }
 
   // ===========================================================================
@@ -153,7 +154,6 @@ export class StorageDO extends DurableObject<Env> {
     value: string,
     options?: { metadata?: Record<string, unknown>; ttl?: number }
   ): Promise<{ key: string; created: boolean }> {
-    this.initializeSchema();
     const now = new Date().toISOString();
     const expiresAt = options?.ttl
       ? new Date(Date.now() + options.ttl * 1000).toISOString()
@@ -188,7 +188,6 @@ export class StorageDO extends DurableObject<Env> {
     createdAt: string;
     updatedAt: string;
   } | null> {
-    this.initializeSchema();
     this.cleanupExpired('kv');
 
     const result = this.sql
@@ -208,7 +207,6 @@ export class StorageDO extends DurableObject<Env> {
   }
 
   async kvDelete(key: string): Promise<{ deleted: boolean }> {
-    this.initializeSchema();
     // DELETE is a no-op if row doesn't exist - just run it directly
     const result = this.sql.exec("DELETE FROM kv WHERE key = ?", key);
     return { deleted: result.rowsWritten > 0 };
@@ -221,7 +219,6 @@ export class StorageDO extends DurableObject<Env> {
       updatedAt: string;
     }>
   > {
-    this.initializeSchema();
     this.cleanupExpired('kv');
     const limit = Math.min(options?.limit || 100, 1000);
 
@@ -252,7 +249,6 @@ export class StorageDO extends DurableObject<Env> {
     content: string,
     options?: { title?: string; language?: string; ttl?: number }
   ): Promise<{ id: string; createdAt: string; expiresAt: string | null }> {
-    this.initializeSchema();
     const now = new Date().toISOString();
     const id = generateRandomString(8);
     const expiresAt = options?.ttl
@@ -276,7 +272,6 @@ export class StorageDO extends DurableObject<Env> {
     createdAt: string;
     expiresAt: string | null;
   } | null> {
-    this.initializeSchema();
     this.cleanupExpired('pastes');
 
     const result = this.sql
@@ -297,7 +292,6 @@ export class StorageDO extends DurableObject<Env> {
   }
 
   async pasteDelete(id: string): Promise<{ deleted: boolean }> {
-    this.initializeSchema();
     // DELETE is a no-op if row doesn't exist - just run it directly
     const result = this.sql.exec("DELETE FROM pastes WHERE id = ?", id);
     return { deleted: result.rowsWritten > 0 };
@@ -312,7 +306,6 @@ export class StorageDO extends DurableObject<Env> {
     rowCount: number;
     columns: string[];
   }> {
-    this.initializeSchema();
 
     // Security: Only allow SELECT queries
     const normalizedQuery = query.trim().toUpperCase();
@@ -339,7 +332,6 @@ export class StorageDO extends DurableObject<Env> {
     success: boolean;
     rowsAffected: number;
   }> {
-    this.initializeSchema();
 
     // Security: Prevent modification of system tables
     const normalizedQuery = query.trim().toUpperCase();
@@ -361,7 +353,6 @@ export class StorageDO extends DurableObject<Env> {
   }
 
   async sqlSchema(): Promise<{ tables: Array<{ name: string; sql: string }> }> {
-    this.initializeSchema();
     const tables = this.sql
       .exec("SELECT name, sql FROM sqlite_master WHERE type = 'table' ORDER BY name")
       .toArray();
@@ -388,7 +379,6 @@ export class StorageDO extends DurableObject<Env> {
     expiresAt: string | null;
     heldUntil?: string;
   }> {
-    this.initializeSchema();
     this.cleanupExpiredLocks();
 
     const now = new Date();
@@ -418,7 +408,6 @@ export class StorageDO extends DurableObject<Env> {
   }
 
   async syncUnlock(name: string, token: string): Promise<{ released: boolean; error?: string }> {
-    this.initializeSchema();
 
     const existing = this.sql
       .exec("SELECT token FROM locks WHERE name = ?", name)
@@ -436,7 +425,6 @@ export class StorageDO extends DurableObject<Env> {
     expiresAt: string | null;
     error?: string;
   }> {
-    this.initializeSchema();
 
     const existing = this.sql
       .exec("SELECT token, expires_at FROM locks WHERE name = ?", name)
@@ -461,7 +449,6 @@ export class StorageDO extends DurableObject<Env> {
     expiresAt: string | null;
     acquiredAt: string | null;
   }> {
-    this.initializeSchema();
     this.cleanupExpiredLocks();
 
     const existing = this.sql
@@ -478,7 +465,6 @@ export class StorageDO extends DurableObject<Env> {
   }
 
   async syncList(): Promise<Array<{ name: string; expiresAt: string; acquiredAt: string }>> {
-    this.initializeSchema();
     this.cleanupExpiredLocks();
 
     return this.sql
@@ -507,7 +493,6 @@ export class StorageDO extends DurableObject<Env> {
   async queuePush(queue: string, items: unknown[], options?: {
     priority?: number;
   }): Promise<{ pushed: number; queue: string }> {
-    this.initializeSchema();
     const now = new Date();
     const nowStr = now.toISOString();
     const priority = options?.priority ?? 0;
@@ -528,7 +513,6 @@ export class StorageDO extends DurableObject<Env> {
     items: Array<{ id: string; data: unknown }>;
     count: number;
   }> {
-    this.initializeSchema();
     this.cleanupVisibilityTimeouts(queue);
 
     const now = new Date();
@@ -564,7 +548,6 @@ export class StorageDO extends DurableObject<Env> {
     items: Array<{ id: string; data: unknown; priority: number }>;
     count: number;
   }> {
-    this.initializeSchema();
     this.cleanupVisibilityTimeouts(queue);
 
     const safeCount = Math.min(Math.max(count, 1), 100);
@@ -598,7 +581,6 @@ export class StorageDO extends DurableObject<Env> {
     completed: number;
     failed: number;
   }> {
-    this.initializeSchema();
     this.cleanupVisibilityTimeouts(queue);
 
     const counts = this.sql
@@ -620,7 +602,6 @@ export class StorageDO extends DurableObject<Env> {
   }
 
   async queueClear(queue: string, options?: { status?: string }): Promise<{ cleared: number }> {
-    this.initializeSchema();
 
     let result;
     if (options?.status) {
@@ -645,7 +626,6 @@ export class StorageDO extends DurableObject<Env> {
     embedding: number[];
     metadata?: Record<string, unknown>;
   }>): Promise<{ stored: number; items: string[] }> {
-    this.initializeSchema();
     const now = new Date().toISOString();
     const storedIds: string[] = [];
 
@@ -674,7 +654,6 @@ export class StorageDO extends DurableObject<Env> {
     limit?: number;
     threshold?: number;
   }): Promise<{ results: Array<{ id: string; text: string; metadata: Record<string, unknown> | null; similarity: number }> }> {
-    this.initializeSchema();
     this.cleanupExpired('memories');
 
     const limit = Math.min(options?.limit ?? 10, 100);
@@ -718,7 +697,6 @@ export class StorageDO extends DurableObject<Env> {
   }
 
   async memoryDelete(ids: string[]): Promise<{ deleted: number; ids: string[] }> {
-    this.initializeSchema();
     if (ids.length === 0) return { deleted: 0, ids: [] };
 
     // Batch delete with single query instead of per-item SELECT+DELETE
@@ -737,7 +715,6 @@ export class StorageDO extends DurableObject<Env> {
     items: Array<{ id: string; text: string; metadata: Record<string, unknown> | null; createdAt: string }>;
     total: number;
   }> {
-    this.initializeSchema();
     this.cleanupExpired('memories');
     const limit = Math.min(options?.limit ?? 100, 1000);
     const offset = options?.offset ?? 0;
@@ -760,7 +737,6 @@ export class StorageDO extends DurableObject<Env> {
   }
 
   async memoryClear(): Promise<{ cleared: number }> {
-    this.initializeSchema();
     const result = this.sql.exec("DELETE FROM memories");
     return { cleared: result.rowsWritten };
   }
