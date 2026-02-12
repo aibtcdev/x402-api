@@ -108,12 +108,8 @@ export class CloudflareChat extends AIEndpoint {
     }
 
     // Parse request body
-    let request: CloudflareChatRequest;
-    try {
-      request = await c.req.json();
-    } catch {
-      return this.errorResponse(c, "Invalid JSON body", 400);
-    }
+    const request = await this.parseBody<CloudflareChatRequest>(c);
+    if (request instanceof Response) return request;
 
     const { model = "@cf/meta/llama-3.1-8b-instruct", messages, max_tokens = 1024, temperature = 0.7, stream = false } = request;
 

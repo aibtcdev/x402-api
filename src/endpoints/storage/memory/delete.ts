@@ -36,8 +36,9 @@ export class MemoryDelete extends StorageWriteEndpoint {
 
   async handle(c: AppContext) {
     const tokenType = this.getTokenType(c);
-    let body: { ids?: string[] };
-    try { body = await c.req.json(); } catch { return this.errorResponse(c, "Invalid JSON body", 400); }
+    const body = await this.parseBody<{ ids?: string[] }>(c);
+
+    if (body instanceof Response) return body;
 
     const { ids } = body;
     if (!ids || !Array.isArray(ids) || ids.length === 0) {

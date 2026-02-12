@@ -66,12 +66,8 @@ export class VerifyMessage extends SimpleEndpoint {
   async handle(c: AppContext) {
     const tokenType = this.getTokenType(c);
 
-    let body: { message?: string; signature?: string; publicKey?: string };
-    try {
-      body = await c.req.json();
-    } catch {
-      return this.errorResponse(c, "Invalid JSON body", 400);
-    }
+    const body = await this.parseBody<{ message?: string; signature?: string; publicKey?: string }>(c);
+    if (body instanceof Response) return body;
 
     const { message, signature, publicKey } = body;
 

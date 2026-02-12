@@ -92,17 +92,13 @@ export class VerifySIP018 extends SimpleEndpoint {
   async handle(c: AppContext) {
     const tokenType = this.getTokenType(c);
 
-    let body: {
+    const body = await this.parseBody<{
       signature?: string;
       publicKey?: string;
       domain?: SIP018Domain;
       message?: string;
-    };
-    try {
-      body = await c.req.json();
-    } catch {
-      return this.errorResponse(c, "Invalid JSON body", 400);
-    }
+    }>(c);
+    if (body instanceof Response) return body;
 
     const { signature, publicKey, domain, message } = body;
 

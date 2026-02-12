@@ -61,12 +61,8 @@ export class DecodeClarity extends SimpleEndpoint {
   async handle(c: AppContext) {
     const tokenType = this.getTokenType(c);
 
-    let body: { hex?: string };
-    try {
-      body = await c.req.json();
-    } catch {
-      return this.errorResponse(c, "Invalid JSON body", 400);
-    }
+    const body = await this.parseBody<{ hex?: string }>(c);
+    if (body instanceof Response) return body;
 
     const { hex } = body;
     if (!hex || typeof hex !== "string") {

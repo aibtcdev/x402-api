@@ -45,8 +45,8 @@ export class MemoryStore extends StorageWriteLargeEndpoint {
 
   async handle(c: AppContext) {
     const tokenType = this.getTokenType(c);
-    let body: { items?: Array<{ id: string; text: string; metadata?: Record<string, unknown> }> };
-    try { body = await c.req.json(); } catch { return this.errorResponse(c, "Invalid JSON body", 400); }
+    const body = await this.parseBody<{ items?: Array<{ id: string; text: string; metadata?: Record<string, unknown> }> }>(c);
+    if (body instanceof Response) return body;
 
     const { items } = body;
     if (!items || !Array.isArray(items) || items.length === 0) {

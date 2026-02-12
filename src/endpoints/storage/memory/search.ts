@@ -35,8 +35,8 @@ export class MemorySearch extends StorageReadEndpoint {
 
   async handle(c: AppContext) {
     const tokenType = this.getTokenType(c);
-    let body: { query?: string; limit?: number; threshold?: number };
-    try { body = await c.req.json(); } catch { return this.errorResponse(c, "Invalid JSON body", 400); }
+    const body = await this.parseBody<{ query?: string; limit?: number; threshold?: number }>(c);
+    if (body instanceof Response) return body;
 
     const { query, limit = 10, threshold = 0.5 } = body;
     if (!query) return this.errorResponse(c, "query is required", 400);

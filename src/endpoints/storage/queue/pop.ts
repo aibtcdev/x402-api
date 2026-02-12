@@ -37,8 +37,8 @@ export class QueuePop extends StorageWriteEndpoint {
 
   async handle(c: AppContext) {
     const tokenType = this.getTokenType(c);
-    let body: { name?: string; count?: number };
-    try { body = await c.req.json(); } catch { return this.errorResponse(c, "Invalid JSON body", 400); }
+    const body = await this.parseBody<{ name?: string; count?: number }>(c);
+    if (body instanceof Response) return body;
 
     const { name, count = 1 } = body;
     if (!name) return this.errorResponse(c, "name is required", 400);

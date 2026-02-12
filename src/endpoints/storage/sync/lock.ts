@@ -33,8 +33,8 @@ export class SyncLock extends StorageWriteEndpoint {
 
   async handle(c: AppContext) {
     const tokenType = this.getTokenType(c);
-    let body: { name?: string; ttl?: number };
-    try { body = await c.req.json(); } catch { return this.errorResponse(c, "Invalid JSON body", 400); }
+    const body = await this.parseBody<{ name?: string; ttl?: number }>(c);
+    if (body instanceof Response) return body;
 
     const { name, ttl } = body;
     if (!name) return this.errorResponse(c, "name is required", 400);

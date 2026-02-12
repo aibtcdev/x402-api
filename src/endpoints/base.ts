@@ -82,6 +82,23 @@ export class BaseEndpoint extends OpenAPIRoute {
     return c.env.STORAGE_DO.get(id);
   }
 
+  /**
+   * Parse JSON request body with error handling
+   * Returns parsed body or error response
+   *
+   * Usage:
+   *   const body = await this.parseBody<{ key: string }>(c);
+   *   if (body instanceof Response) return body;
+   *   // body is now typed as { key: string }
+   */
+  protected async parseBody<T>(c: AppContext): Promise<T | Response> {
+    try {
+      return await c.req.json();
+    } catch {
+      return this.errorResponse(c, "Invalid JSON body", 400);
+    }
+  }
+
 }
 
 /**

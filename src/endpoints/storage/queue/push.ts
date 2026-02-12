@@ -42,8 +42,8 @@ export class QueuePush extends StorageWriteEndpoint {
 
   async handle(c: AppContext) {
     const tokenType = this.getTokenType(c);
-    let body: { name?: string; items?: unknown[]; priority?: number };
-    try { body = await c.req.json(); } catch { return this.errorResponse(c, "Invalid JSON body", 400); }
+    const body = await this.parseBody<{ name?: string; items?: unknown[]; priority?: number }>(c);
+    if (body instanceof Response) return body;
 
     const { name, items, priority } = body;
     if (!name || !items || !Array.isArray(items)) {
