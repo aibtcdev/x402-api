@@ -6,7 +6,7 @@ This file provides guidance to Claude Code when working with this repository.
 
 x402 Stacks API Host - A Cloudflare Worker that exposes APIs on a pay-per-use basis using the x402 protocol. Agents pay per request via Stacks blockchain payments (STX, sBTC, USDCx).
 
-**Status**: Multi-category API implemented. Original planning doc archived at `.planning/archive/REQUIREMENTS.md`.
+**Status**: Multi-category API implemented.
 
 ## Commands
 
