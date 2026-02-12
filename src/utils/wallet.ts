@@ -15,7 +15,7 @@ export async function deriveChildAccount(
   index: number
 ) {
   // Create wallet with empty password (wallet isn't persisted)
-  const wallet = await generateWallet({
+  let wallet = await generateWallet({
     secretKey: mnemonic,
     password: "",
   });
