@@ -114,7 +114,7 @@ export async function runQueueLifecycle(verbose = false): Promise<LifecycleTestR
     return { passed: 0, total: totalTests, success: false };
   }
 
-  await new Promise((resolve) => setTimeout(resolve, STEP_DELAY_MS));
+  await sleep(STEP_DELAY_MS);
 
   // Test 2: Check queue status
   logger.info("2. Testing /storage/queue/status (GET)...");
@@ -135,7 +135,7 @@ export async function runQueueLifecycle(verbose = false): Promise<LifecycleTestR
     logger.error(`Status check failed: ${JSON.stringify(statusResult.data)}`);
   }
 
-  await new Promise((resolve) => setTimeout(resolve, STEP_DELAY_MS));
+  await sleep(STEP_DELAY_MS);
 
   // Test 3: Peek at items
   logger.info("3. Testing /storage/queue/peek (GET)...");
@@ -156,7 +156,7 @@ export async function runQueueLifecycle(verbose = false): Promise<LifecycleTestR
     logger.error(`Peek failed: ${JSON.stringify(peekResult.data)}`);
   }
 
-  await new Promise((resolve) => setTimeout(resolve, STEP_DELAY_MS));
+  await sleep(STEP_DELAY_MS);
 
   // Test 4: Pop one item
   logger.info("4. Testing /storage/queue/pop (POST)...");
@@ -177,7 +177,7 @@ export async function runQueueLifecycle(verbose = false): Promise<LifecycleTestR
     logger.error(`Pop failed: ${JSON.stringify(popResult.data)}`);
   }
 
-  await new Promise((resolve) => setTimeout(resolve, STEP_DELAY_MS));
+  await sleep(STEP_DELAY_MS);
 
   // Test 5: Clear remaining items
   logger.info("5. Testing /storage/queue/clear (POST)...");
@@ -198,7 +198,7 @@ export async function runQueueLifecycle(verbose = false): Promise<LifecycleTestR
     logger.error(`Clear failed: ${JSON.stringify(clearResult.data)}`);
   }
 
-  await new Promise((resolve) => setTimeout(resolve, STEP_DELAY_MS));
+  await sleep(STEP_DELAY_MS);
 
   // Test 6: Verify queue is empty
   logger.info("6. Verifying queue is empty...");

@@ -111,7 +111,7 @@ export async function runSyncLifecycle(verbose = false): Promise<LifecycleTestRe
     return { passed: 0, total: totalTests, success: false };
   }
 
-  await new Promise((resolve) => setTimeout(resolve, STEP_DELAY_MS));
+  await sleep(STEP_DELAY_MS);
 
   // Test 2: Check status
   logger.info("2. Testing /storage/sync/status/:name (GET)...");
@@ -132,7 +132,7 @@ export async function runSyncLifecycle(verbose = false): Promise<LifecycleTestRe
     logger.error(`Status check failed: ${JSON.stringify(statusResult.data)}`);
   }
 
-  await new Promise((resolve) => setTimeout(resolve, STEP_DELAY_MS));
+  await sleep(STEP_DELAY_MS);
 
   // Test 3: List locks
   logger.info("3. Testing /storage/sync/list (GET)...");
@@ -158,7 +158,7 @@ export async function runSyncLifecycle(verbose = false): Promise<LifecycleTestRe
     logger.error(`List failed: ${JSON.stringify(listResult.data)}`);
   }
 
-  await new Promise((resolve) => setTimeout(resolve, STEP_DELAY_MS));
+  await sleep(STEP_DELAY_MS);
 
   // Test 4: Extend lock
   logger.info("4. Testing /storage/sync/extend (POST)...");
@@ -179,7 +179,7 @@ export async function runSyncLifecycle(verbose = false): Promise<LifecycleTestRe
     logger.error(`Extend failed: ${JSON.stringify(extendResult.data)}`);
   }
 
-  await new Promise((resolve) => setTimeout(resolve, STEP_DELAY_MS));
+  await sleep(STEP_DELAY_MS);
 
   // Test 5: Release lock
   logger.info("5. Testing /storage/sync/unlock (POST)...");
@@ -200,7 +200,7 @@ export async function runSyncLifecycle(verbose = false): Promise<LifecycleTestRe
     logger.error(`Unlock failed: ${JSON.stringify(unlockResult.data)}`);
   }
 
-  await new Promise((resolve) => setTimeout(resolve, STEP_DELAY_MS));
+  await sleep(STEP_DELAY_MS);
 
   // Test 6: Verify unlock via status
   logger.info("6. Verifying unlock via status...");

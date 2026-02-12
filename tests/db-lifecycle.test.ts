@@ -109,7 +109,7 @@ export async function runDbLifecycle(verbose = false): Promise<LifecycleTestResu
     return { passed: 0, total: totalTests, success: false };
   }
 
-  await new Promise((resolve) => setTimeout(resolve, STEP_DELAY_MS));
+  await sleep(STEP_DELAY_MS);
 
   // Test 2: Insert data
   logger.info("2. Testing /storage/db/execute (POST - insert)...");
@@ -130,7 +130,7 @@ export async function runDbLifecycle(verbose = false): Promise<LifecycleTestResu
     logger.error(`Insert failed: ${JSON.stringify(insertResult.data)}`);
   }
 
-  await new Promise((resolve) => setTimeout(resolve, STEP_DELAY_MS));
+  await sleep(STEP_DELAY_MS);
 
   // Test 3: Query data
   logger.info("3. Testing /storage/db/query (POST - select)...");
@@ -156,7 +156,7 @@ export async function runDbLifecycle(verbose = false): Promise<LifecycleTestResu
     logger.error(`Query failed: ${JSON.stringify(queryResult.data)}`);
   }
 
-  await new Promise((resolve) => setTimeout(resolve, STEP_DELAY_MS));
+  await sleep(STEP_DELAY_MS);
 
   // Test 4: Get schema
   logger.info("4. Testing /storage/db/schema (GET)...");
@@ -182,7 +182,7 @@ export async function runDbLifecycle(verbose = false): Promise<LifecycleTestResu
     logger.error(`Schema failed: ${JSON.stringify(schemaResult.data)}`);
   }
 
-  await new Promise((resolve) => setTimeout(resolve, STEP_DELAY_MS));
+  await sleep(STEP_DELAY_MS);
 
   // Test 5: Drop table (cleanup)
   logger.info("5. Testing /storage/db/execute (POST - drop table)...");

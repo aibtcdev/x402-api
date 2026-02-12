@@ -110,7 +110,7 @@ export async function runKvLifecycle(verbose = false): Promise<LifecycleTestResu
     return { passed: 0, total: totalTests, success: false };
   }
 
-  await new Promise((resolve) => setTimeout(resolve, STEP_DELAY_MS));
+  await sleep(STEP_DELAY_MS);
 
   // Test 2: Get the value back
   logger.info("2. Testing /storage/kv/:key (GET)...");
@@ -131,7 +131,7 @@ export async function runKvLifecycle(verbose = false): Promise<LifecycleTestResu
     logger.error(`Get failed: ${JSON.stringify(getResult.data)}`);
   }
 
-  await new Promise((resolve) => setTimeout(resolve, STEP_DELAY_MS));
+  await sleep(STEP_DELAY_MS);
 
   // Test 3: List keys
   logger.info("3. Testing /storage/kv (GET - list)...");
@@ -157,7 +157,7 @@ export async function runKvLifecycle(verbose = false): Promise<LifecycleTestResu
     logger.error(`List failed: ${JSON.stringify(listResult.data)}`);
   }
 
-  await new Promise((resolve) => setTimeout(resolve, STEP_DELAY_MS));
+  await sleep(STEP_DELAY_MS);
 
   // Test 4: Delete the key
   logger.info("4. Testing /storage/kv/:key (DELETE)...");
@@ -178,7 +178,7 @@ export async function runKvLifecycle(verbose = false): Promise<LifecycleTestResu
     logger.error(`Delete failed: ${JSON.stringify(deleteResult.data)}`);
   }
 
-  await new Promise((resolve) => setTimeout(resolve, STEP_DELAY_MS));
+  await sleep(STEP_DELAY_MS);
 
   // Test 5: Verify deletion
   logger.info("5. Verifying deletion...");
