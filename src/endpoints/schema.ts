@@ -17,6 +17,7 @@ export const tokenTypeParam = {
   in: "query" as const,
   required: false,
   schema: { type: "string" as const, enum: ["STX", "sBTC", "USDCx"], default: "STX" },
+  description: "Payment token type",
 };
 
 // =============================================================================
