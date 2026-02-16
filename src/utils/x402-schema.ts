@@ -34,10 +34,19 @@ export interface V2PaymentRequirements {
 }
 
 /**
+ * Resource information (V2 protocol compatible)
+ */
+export interface ResourceInfo {
+  url: string;
+  description?: string;
+  mimeType?: string;
+}
+
+/**
  * V2 manifest entry (per-endpoint grouping)
  */
 export interface V2ManifestEntry {
-  resource: string; // Full URL: "https://api.example.com/path"
+  resource: ResourceInfo; // V2 protocol requires object with url field
   type: "http";
   x402Version: 2;
   accepts: V2PaymentRequirements[];
@@ -50,7 +59,7 @@ export interface V2ManifestEntry {
     category?: string;
   };
   extensions?: {
-    bazaar?: BazaarExtension;
+    bazaar?: BazaarExtension["bazaar"]; // Use inner structure, not full wrapper
   };
 }
 
@@ -269,7 +278,11 @@ export function generateX402Manifest(config: GeneratorConfig): V2Manifest {
 
     // Build manifest entry
     items.push({
-      resource: resourceUrl,
+      resource: {
+        url: resourceUrl,
+        description: info.description,
+        mimeType: "application/json",
+      },
       type: "http",
       x402Version: 2,
       accepts,
@@ -281,7 +294,7 @@ export function generateX402Manifest(config: GeneratorConfig): V2Manifest {
         },
         ...(metadata?.category && { category: metadata.category }),
       },
-      ...(metadata && { extensions: { bazaar: buildBazaarExtension(metadata) } }),
+      ...(metadata && { extensions: { bazaar: buildBazaarExtension(metadata).bazaar } }),
     });
   }
 
