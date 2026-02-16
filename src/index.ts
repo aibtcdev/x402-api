@@ -366,6 +366,7 @@ const openapi = fromHono(app, {
   schema: {
     info: {
       title: "x402 Stacks API",
+      // x402 protocol version (not package version)
       version: "2.0.0",
       description: `
 Pay-per-use API powered by x402 v2 protocol on Stacks blockchain.
@@ -412,6 +413,7 @@ All paid endpoints use the Coinbase-compatible x402 v2 protocol:
 app.get("/", (c) => {
   return c.json({
     service: "x402-stacks-api",
+    // x402 protocol version (not package version)
     version: "2.0.0",
     description: "Pay-per-use API powered by x402 v2 protocol on Stacks blockchain",
     docs: "/docs",
