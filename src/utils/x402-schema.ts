@@ -1,66 +1,91 @@
 /**
- * X402 Schema Generator
+ * X402 Manifest Generator (V2 Protocol)
  *
- * Generates x402.json format for StacksX402 scanner discovery.
+ * Generates x402.json discovery manifest for Bazaar/scanner registration.
  * Static generation without network calls (Cloudflare Workers can't self-fetch).
  *
- * V2 format includes Bazaar-compatible metadata with:
- * - Full input/output examples
- * - JSON schemas per endpoint
- * - Rich discovery metadata from the registry
+ * V2 manifest format (per x402-specification-v2.md section 8):
+ * - CAIP-2 network identifiers (e.g., "stacks:1", "stacks:2147483648")
+ * - Per-endpoint grouping with resource objects
+ * - Bazaar extensions for rich metadata
+ * - Service metadata wrapper
  */
 
 import { TIER_PRICING, stxToTokenAmount } from "../services/pricing";
 import type { PricingTier, TokenType } from "../types";
-import { getEndpointMetadata } from "../bazaar";
-import type { EndpointMetadata } from "../bazaar";
+import { getEndpointMetadata, buildBazaarExtension } from "../bazaar";
+import type { EndpointMetadata, BazaarExtension } from "../bazaar";
 
 // =============================================================================
-// Types
+// V2 Manifest Types
 // =============================================================================
 
-export interface X402Entry {
+/**
+ * V2 payment requirements (per-token accept entry)
+ */
+export interface V2PaymentRequirements {
   scheme: "exact";
-  network: "stacks";
+  network: string; // CAIP-2 format: "stacks:1" or "stacks:2147483648"
+  amount: string; // Required payment amount in atomic units
   asset: TokenType;
   payTo: string;
-  maxAmountRequired: string;
   maxTimeoutSeconds: number;
-  resource: string;
-  description: string;
-  mimeType: "application/json";
-  outputSchema: {
-    input: X402InputSchema;
-    output: X402OutputSchema;
+  extra?: Record<string, unknown>;
+}
+
+/**
+ * V2 manifest entry (per-endpoint grouping)
+ */
+export interface V2ManifestEntry {
+  resource: string; // Full URL: "https://api.example.com/path"
+  type: "http";
+  x402Version: 2;
+  accepts: V2PaymentRequirements[];
+  lastUpdated: number; // Unix timestamp
+  metadata: {
+    service?: {
+      name: string;
+      url: string;
+    };
+    category?: string;
+  };
+  extensions?: {
+    bazaar?: BazaarExtension;
   };
 }
 
+/**
+ * V2 manifest (discovery response)
+ */
+export interface V2Manifest {
+  x402Version: 2;
+  items: V2ManifestEntry[];
+}
+
+/**
+ * Generator configuration
+ */
+export interface GeneratorConfig {
+  network: "mainnet" | "testnet";
+  payTo: string;
+  baseUrl: string; // e.g., "https://x402.aibtc.dev"
+  serviceName?: string;
+  serviceUrl?: string;
+}
+
+// Legacy types retained for Bazaar extension compatibility
 export interface X402InputSchema {
   type: "http";
   method: "GET" | "POST" | "DELETE";
   bodyType?: "json" | "form" | "text" | "binary";
-  bodySchema?: Record<string, unknown>; // Full JSON Schema
-  queryParams?: Record<string, unknown>; // Query parameter schema
+  bodySchema?: Record<string, unknown>;
+  queryParams?: Record<string, unknown>;
 }
 
 export interface X402OutputSchema {
   type: "json";
-  example: Record<string, unknown>; // Realistic output example
-  schema?: Record<string, unknown>; // Full JSON Schema (optional)
-}
-
-export interface X402Schema {
-  x402Version: 2; // V2 includes Bazaar metadata
-  name: string;
-  image: string;
-  accepts: X402Entry[];
-}
-
-export interface GeneratorConfig {
-  network: "mainnet" | "testnet";
-  payTo: string;
-  name?: string;
-  image?: string;
+  example: Record<string, unknown>;
+  schema?: Record<string, unknown>;
 }
 
 // =============================================================================
@@ -180,43 +205,11 @@ function getAmountForTier(tier: PricingTier, token: TokenType): string {
 // =============================================================================
 
 /**
- * Build rich input/output schema from Bazaar metadata
+ * Convert network to CAIP-2 format
+ * @see https://github.com/ChainAgnostic/CAIPs/blob/main/CAIPs/caip-2.md
  */
-function buildOutputSchema(
-  basicInfo: EndpointInfo,
-  metadata?: EndpointMetadata
-): { input: X402InputSchema; output: X402OutputSchema } {
-  // Build input schema
-  const input: X402InputSchema = {
-    type: "http",
-    method: basicInfo.method,
-  };
-
-  // Add rich metadata if available
-  if (metadata) {
-    if (metadata.bodyType) {
-      input.bodyType = metadata.bodyType;
-    }
-    if (metadata.bodySchema) {
-      input.bodySchema = metadata.bodySchema;
-    }
-    if (metadata.queryParams) {
-      input.queryParams = metadata.queryParams;
-    }
-  }
-
-  // Build output schema
-  const output: X402OutputSchema = {
-    type: "json",
-    example: metadata?.outputExample || {},
-  };
-
-  // Add output schema if available
-  if (metadata?.outputSchema) {
-    output.schema = metadata.outputSchema;
-  }
-
-  return { input, output };
+function getCAIP2Network(network: "mainnet" | "testnet"): string {
+  return network === "mainnet" ? "stacks:1" : "stacks:2147483648";
 }
 
 /**
@@ -228,24 +221,30 @@ function normalizePath(path: string): string {
 }
 
 /**
- * Generate x402.json schema statically (v2 format with Bazaar metadata)
- * Uses hardcoded endpoint registry + Bazaar registry - no network calls needed
+ * Generate V2 x402 discovery manifest
+ *
+ * Produces per-endpoint grouped manifest with CAIP-2 network IDs, resource objects,
+ * service metadata, and Bazaar extensions.
+ *
+ * @param config - Generator configuration including baseUrl, payTo, network
+ * @returns V2Manifest with items array (per-endpoint grouping)
  */
-export function generateX402Schema(config: GeneratorConfig): X402Schema {
-  const accepts: X402Entry[] = [];
+export function generateX402Manifest(config: GeneratorConfig): V2Manifest {
+  const items: V2ManifestEntry[] = [];
+  const caip2Network = getCAIP2Network(config.network);
+  const timestamp = Math.floor(Date.now() / 1000);
 
   // Process each paid endpoint
   for (const info of ENDPOINT_REGISTRY) {
     // Skip free tier
     if (info.tier === "free") continue;
 
+    const accepts: V2PaymentRequirements[] = [];
+    const normalizedPath = normalizePath(info.path);
+    const resourceUrl = `${config.baseUrl}${normalizedPath}`;
     const timeout = getTimeoutForTier(info.tier);
 
-    // Normalize path and lookup in Bazaar registry for rich metadata
-    const normalizedPath = normalizePath(info.path);
-    const metadata = getEndpointMetadata(normalizedPath, info.method);
-
-    // Create entry for each supported token
+    // Create payment requirement for each supported token
     for (const token of TOKENS) {
       const amount = getAmountForTier(info.tier, token);
 
@@ -254,23 +253,40 @@ export function generateX402Schema(config: GeneratorConfig): X402Schema {
 
       accepts.push({
         scheme: "exact",
-        network: "stacks",
+        network: caip2Network,
+        amount,
         asset: token,
         payTo: config.payTo,
-        maxAmountRequired: amount,
         maxTimeoutSeconds: timeout,
-        resource: normalizedPath,
-        description: info.description,
-        mimeType: "application/json",
-        outputSchema: buildOutputSchema(info, metadata),
       });
     }
+
+    // Skip endpoint if no valid payment options
+    if (accepts.length === 0) continue;
+
+    // Lookup Bazaar metadata for rich discovery
+    const metadata = getEndpointMetadata(normalizedPath, info.method);
+
+    // Build manifest entry
+    items.push({
+      resource: resourceUrl,
+      type: "http",
+      x402Version: 2,
+      accepts,
+      lastUpdated: timestamp,
+      metadata: {
+        service: {
+          name: config.serviceName || "x402 Stacks API",
+          url: config.serviceUrl || config.baseUrl,
+        },
+        ...(metadata?.category && { category: metadata.category }),
+      },
+      ...(metadata && { extensions: { bazaar: buildBazaarExtension(metadata) } }),
+    });
   }
 
   return {
     x402Version: 2,
-    name: config.name || "x402 Stacks API",
-    image: config.image || "https://aibtc.dev/logos/aibtcdev-avatar-1000px.png",
-    accepts,
+    items,
   };
 }
