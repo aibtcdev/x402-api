@@ -68,7 +68,7 @@ export interface ModelPricing {
 
 /**
  * Model pricing in USD per 1K tokens
- * Based on OpenRouter pricing - updated periodically
+ * Based on OpenRouter pricing - updated 2026-02-16
  * https://openrouter.ai/docs/models
  */
 const MODEL_PRICING: Record<string, ModelPricing> = {
@@ -76,13 +76,11 @@ const MODEL_PRICING: Record<string, ModelPricing> = {
   "openai/gpt-4o": { promptPer1k: 0.0025, completionPer1k: 0.01 },
   "openai/gpt-4o-mini": { promptPer1k: 0.00015, completionPer1k: 0.0006 },
   "openai/gpt-4-turbo": { promptPer1k: 0.01, completionPer1k: 0.03 },
-  "openai/gpt-3.5-turbo": { promptPer1k: 0.0005, completionPer1k: 0.0015 },
 
   // Anthropic models
   "anthropic/claude-3.5-sonnet": { promptPer1k: 0.003, completionPer1k: 0.015 },
   "anthropic/claude-3-opus": { promptPer1k: 0.015, completionPer1k: 0.075 },
   "anthropic/claude-3-haiku": { promptPer1k: 0.00025, completionPer1k: 0.00125 },
-  "anthropic/claude-instant-1.2": { promptPer1k: 0.0008, completionPer1k: 0.0024 },
 
   // Google models
   "google/gemini-pro": { promptPer1k: 0.000125, completionPer1k: 0.000375 },

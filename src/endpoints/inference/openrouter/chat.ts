@@ -8,11 +8,12 @@
 import { BaseEndpoint } from "../../base";
 import { OpenRouterClient, OpenRouterError } from "../../../services/openrouter";
 import { logPnL } from "../../../services/pricing";
+import { tokenTypeParam } from "../../schema";
 import type { AppContext, ChatCompletionRequest, UsageRecord } from "../../../types";
 
 export class OpenRouterChat extends BaseEndpoint {
   schema = {
-    tags: ["Inference"],
+    tags: ["Inference - OpenRouter"],
     summary: "(paid, dynamic) Create a chat completion via OpenRouter",
     description: "Send messages to an LLM model via OpenRouter. Pricing is dynamic based on model and token usage.",
     requestBody: {
@@ -55,19 +56,7 @@ export class OpenRouterChat extends BaseEndpoint {
         },
       },
     },
-    parameters: [
-      {
-        name: "tokenType",
-        in: "query" as const,
-        required: false,
-        schema: {
-          type: "string" as const,
-          enum: ["STX", "sBTC", "USDCx"],
-          default: "STX",
-        },
-        description: "Payment token type",
-      },
-    ],
+    parameters: [tokenTypeParam],
     responses: {
       "200": {
         description: "Chat completion response",

@@ -20,14 +20,20 @@ Full endpoint documentation available at `/docs`.
 
 ## Payment
 
-All paid endpoints require an `X-PAYMENT` header with a signed Stacks transaction.
+All paid endpoints use the x402 v2 protocol with base64-encoded JSON headers.
 
 **Supported tokens:** STX, sBTC, USDCx (via `X-PAYMENT-TOKEN-TYPE` header)
 
 **Flow:**
-1. Request endpoint without payment → receive HTTP 402 with requirements
-2. Sign transaction and resend with `X-PAYMENT` header
-3. Payment verified, request processed
+1. Request endpoint without payment → receive HTTP 402 with `payment-required` header
+2. Sign transaction and resend with `payment-signature` header
+3. Payment verified, response includes `payment-response` header
+
+**Headers:**
+- `payment-signature` (request): Base64-encoded payment payload
+- `payment-required` (402 response): Base64-encoded payment requirements
+- `payment-response` (success): Base64-encoded settlement result
+- `X-PAYMENT-TOKEN-TYPE` (optional): Token selector (STX, sBTC, USDCx)
 
 ## Development
 

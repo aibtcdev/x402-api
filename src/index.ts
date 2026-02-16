@@ -366,6 +366,7 @@ const openapi = fromHono(app, {
   schema: {
     info: {
       title: "x402 Stacks API",
+      // x402 protocol version (not package version)
       version: "2.0.0",
       description: `
 Pay-per-use API powered by x402 v2 protocol on Stacks blockchain.
@@ -412,6 +413,7 @@ All paid endpoints use the Coinbase-compatible x402 v2 protocol:
 app.get("/", (c) => {
   return c.json({
     service: "x402-stacks-api",
+    // x402 protocol version (not package version)
     version: "2.0.0",
     description: "Pay-per-use API powered by x402 v2 protocol on Stacks blockchain",
     docs: "/docs",
@@ -469,7 +471,7 @@ openapi.get("/inference/cloudflare/models", CloudflareListModels);
 openapi.post("/inference/cloudflare/chat", CloudflareChat);
 
 // =============================================================================
-// Stacks Routes (simple tier)
+// Stacks Routes
 // =============================================================================
 
 openapi.get("/stacks/address/:address", AddressConvert);
@@ -480,7 +482,7 @@ openapi.post("/stacks/verify/message", VerifyMessage);
 openapi.post("/stacks/verify/sip018", VerifySIP018);
 
 // =============================================================================
-// Hashing Routes (simple tier)
+// Hashing Routes
 // =============================================================================
 
 openapi.post("/hashing/sha256", HashSha256);

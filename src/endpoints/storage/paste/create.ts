@@ -9,7 +9,7 @@ import type { AppContext } from "../../../types";
 export class PasteCreate extends StorageWriteLargeEndpoint {
   schema = {
     tags: ["Storage - Paste"],
-    summary: "(paid, storage_write_large) Create a new paste",
+    summary: "(paid, standard) Create a new paste",
     requestBody: {
       required: true,
       content: {

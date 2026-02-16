@@ -9,7 +9,7 @@ import type { AppContext } from "../../../types";
 export class MemoryStore extends StorageWriteLargeEndpoint {
   schema = {
     tags: ["Storage - Memory"],
-    summary: "(paid, storage_write_large) Store text with embeddings",
+    summary: "(paid, standard) Store text with embeddings",
     requestBody: {
       required: true,
       content: {
