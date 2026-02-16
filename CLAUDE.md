@@ -94,11 +94,11 @@ The API uses a simplified three-tier pricing model:
 ## x402 Payment Flow
 
 1. Client requests endpoint without payment
-2. Middleware returns 402 with payment requirements
-3. Client signs transaction and resends with `X-PAYMENT` header
+2. Middleware returns 402 with `payment-required` header (base64 JSON)
+3. Client signs transaction and resends with `payment-signature` header (base64 JSON)
 4. Middleware verifies payment via facilitator
 5. Request processed, usage recorded in Durable Object
-6. Response returned to agent
+6. Response includes `payment-response` header (base64 JSON)
 
 ## Configuration
 
