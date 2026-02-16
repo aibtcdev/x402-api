@@ -469,7 +469,7 @@ openapi.get("/inference/cloudflare/models", CloudflareListModels);
 openapi.post("/inference/cloudflare/chat", CloudflareChat);
 
 // =============================================================================
-// Stacks Routes (simple tier)
+// Stacks Routes
 // =============================================================================
 
 openapi.get("/stacks/address/:address", AddressConvert);
@@ -480,7 +480,7 @@ openapi.post("/stacks/verify/message", VerifyMessage);
 openapi.post("/stacks/verify/sip018", VerifySIP018);
 
 // =============================================================================
-// Hashing Routes (simple tier)
+// Hashing Routes
 // =============================================================================
 
 openapi.post("/hashing/sha256", HashSha256);
