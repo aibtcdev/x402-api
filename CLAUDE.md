@@ -174,11 +174,11 @@ Agents discover this service through a progressive disclosure chain:
 | `GET /.well-known/agent.json`  | JSON      | A2A agent card: skills, pricing, capabilities    |
 | `GET /llms.txt`                | plaintext | Quick-start: what x402 is, tiers, payment flow   |
 | `GET /llms-full.txt`           | plaintext | Full reference: all endpoints, schemas, examples |
-| `GET /docs`                    | plaintext | Topic documentation index                        |
-| `GET /docs/inference`          | plaintext | OpenRouter + Cloudflare AI, dynamic pricing      |
-| `GET /docs/hashing`            | plaintext | All hash endpoints with examples                 |
-| `GET /docs/storage`            | plaintext | KV, paste, db, sync, queue, memory patterns      |
-| `GET /docs/payment-flow`       | plaintext | x402 v2 challenge/response flow in detail        |
+| `GET /topics`                  | plaintext | Topic documentation index                        |
+| `GET /topics/inference`        | plaintext | OpenRouter + Cloudflare AI, dynamic pricing      |
+| `GET /topics/hashing`          | plaintext | All hash endpoints with examples                 |
+| `GET /topics/storage`          | plaintext | KV, paste, db, sync, queue, memory patterns      |
+| `GET /topics/payment-flow`     | plaintext | x402 v2 challenge/response flow in detail        |
 
 **Implementation:** `src/endpoints/ax-discovery.ts` — single Hono sub-router
 mounted at root via `app.route("/", axDiscoveryRouter)` in `src/index.ts`.

@@ -8,8 +8,8 @@
  *   GET /.well-known/agent.json   — A2A agent card (capabilities, skills, pricing)
  *   GET /llms.txt                 — Quick-start guide (what it is, tiers, how to pay)
  *   GET /llms-full.txt            — Full reference (all endpoints, schemas, examples)
- *   GET /docs                     — Topic documentation index (JSON)
- *   GET /docs/:topic              — Topic sub-docs (plaintext)
+ *   GET /topics                   — Topic documentation index (JSON)
+ *   GET /topics/:topic            — Topic sub-docs (plaintext)
  *
  * For the full aibtc agent platform, see https://aibtc.com/llms.txt
  */
@@ -45,7 +45,7 @@ This API supports x402 v2 (Coinbase-compatible) with Stacks blockchain payments.
 
 | Tier     | Cost          | Endpoints                                    |
 |----------|---------------|----------------------------------------------|
-| free     | 0             | GET /inference/*/models, /, /health, /docs   |
+| free     | 0             | GET /inference/*/models, /, /health, /topics |
 | standard | 0.001 STX     | All paid endpoints (hashing, stacks, storage)|
 | dynamic  | varies        | OpenRouter LLM (cost + 20% margin)           |
 
@@ -139,16 +139,16 @@ curl https://x402.aibtc.com/x402.json
 
 - Quick-start (this file): https://x402.aibtc.com/llms.txt
 - Full reference: https://x402.aibtc.com/llms-full.txt
-- Topic docs index: https://x402.aibtc.com/docs
+- Topic docs index: https://x402.aibtc.com/topics
 - OpenAPI spec: https://x402.aibtc.com/openapi.json
 - x402 payment manifest: https://x402.aibtc.com/x402.json
 - Interactive docs: https://x402.aibtc.com/docs (Swagger UI)
 
 Topic deep-dives:
-- Inference: https://x402.aibtc.com/docs/inference
-- Hashing: https://x402.aibtc.com/docs/hashing
-- Storage: https://x402.aibtc.com/docs/storage
-- Payment flow: https://x402.aibtc.com/docs/payment-flow
+- Inference: https://x402.aibtc.com/topics/inference
+- Hashing: https://x402.aibtc.com/topics/hashing
+- Storage: https://x402.aibtc.com/topics/storage
+- Payment flow: https://x402.aibtc.com/topics/payment-flow
 `;
 
 const LLMS_FULL_TXT = `# x402 Stacks API — Full Reference
@@ -244,8 +244,8 @@ GET  /x402.json                     — x402 payment manifest
 GET  /dashboard                     — Usage dashboard (HTML)
 GET  /llms.txt                      — Quick-start guide (this chain)
 GET  /llms-full.txt                 — Full reference (this document)
-GET  /docs                          — Topic documentation index
-GET  /docs/:topic                   — Topic sub-docs
+GET  /topics                        — Topic documentation index
+GET  /topics/:topic                 — Topic sub-docs
 GET  /.well-known/agent.json        — A2A agent card
 GET  /inference/openrouter/models   — List available OpenRouter models
 GET  /inference/cloudflare/models   — List available Cloudflare AI models
@@ -317,7 +317,7 @@ Request: same format as OpenRouter (model must be a @cf/ model id)
 Response: OpenAI-compatible chat completion
 \`\`\`
 
-Topic doc: https://x402.aibtc.com/docs/inference
+Topic doc: https://x402.aibtc.com/topics/inference
 
 ## Stacks Endpoints (Standard Pricing: 0.001 STX each)
 
@@ -437,7 +437,7 @@ Response:
 
 HASH160 = RIPEMD-160(SHA-256(input)) — same as Bitcoin's hash160 used in P2PKH addresses.
 
-Topic doc: https://x402.aibtc.com/docs/hashing
+Topic doc: https://x402.aibtc.com/topics/hashing
 
 ## Storage Endpoints (Standard Pricing: 0.001 STX each)
 
@@ -551,20 +551,20 @@ Response: { "ok": true, "results": [{ "id": "doc-1", "text": "...", "score": 0.9
 \`\`\`
 Uses Cloudflare AI (BAAI/bge-base-en-v1.5) for embeddings. Cosine similarity search.
 
-Topic doc: https://x402.aibtc.com/docs/storage
+Topic doc: https://x402.aibtc.com/topics/storage
 
 ## Payment Flow Deep-Dive
 
-Topic doc: https://x402.aibtc.com/docs/payment-flow
+Topic doc: https://x402.aibtc.com/topics/payment-flow
 
 ## Topic Documentation
 
-| Topic        | URL                                        | Contents                                    |
-|--------------|--------------------------------------------|---------------------------------------------|
-| inference    | https://x402.aibtc.com/docs/inference      | OpenRouter + Cloudflare AI, dynamic pricing |
-| hashing      | https://x402.aibtc.com/docs/hashing        | All hash endpoints with examples            |
-| storage      | https://x402.aibtc.com/docs/storage        | KV, paste, db, sync, queue, memory patterns |
-| payment-flow | https://x402.aibtc.com/docs/payment-flow   | x402 v2 challenge/response flow in detail  |
+| Topic        | URL                                          | Contents                                    |
+|--------------|----------------------------------------------|---------------------------------------------|
+| inference    | https://x402.aibtc.com/topics/inference      | OpenRouter + Cloudflare AI, dynamic pricing |
+| hashing      | https://x402.aibtc.com/topics/hashing        | All hash endpoints with examples            |
+| storage      | https://x402.aibtc.com/topics/storage        | KV, paste, db, sync, queue, memory patterns |
+| payment-flow | https://x402.aibtc.com/topics/payment-flow   | x402 v2 challenge/response flow in detail  |
 
 ## Error Handling
 
@@ -1260,11 +1260,11 @@ const AGENT_CARD = {
     x402Manifest: "https://x402.aibtc.com/x402.json",
     platform: "https://aibtc.com/llms.txt",
     topicDocs: {
-      index: "https://x402.aibtc.com/docs",
-      inference: "https://x402.aibtc.com/docs/inference",
-      hashing: "https://x402.aibtc.com/docs/hashing",
-      storage: "https://x402.aibtc.com/docs/storage",
-      paymentFlow: "https://x402.aibtc.com/docs/payment-flow",
+      index: "https://x402.aibtc.com/topics",
+      inference: "https://x402.aibtc.com/topics/inference",
+      hashing: "https://x402.aibtc.com/topics/hashing",
+      storage: "https://x402.aibtc.com/topics/storage",
+      paymentFlow: "https://x402.aibtc.com/topics/payment-flow",
     },
   },
   capabilities: {
@@ -1298,7 +1298,8 @@ const AGENT_CARD = {
           "GET /dashboard",
           "GET /llms.txt",
           "GET /llms-full.txt",
-          "GET /docs/:topic",
+          "GET /topics",
+          "GET /topics/:topic",
           "GET /.well-known/agent.json",
         ],
       },
@@ -1503,7 +1504,7 @@ axDiscoveryRouter.get("/llms-full.txt", (c) => {
   return new Response(LLMS_FULL_TXT, { headers: PLAIN_TEXT_HEADERS });
 });
 
-axDiscoveryRouter.get("/docs", (c) => {
+axDiscoveryRouter.get("/topics", (c) => {
   const content = `# x402 Stacks API — Topic Documentation
 
 Deep-dive reference docs for specific API topics. Each doc is self-contained
@@ -1513,24 +1514,24 @@ general reference (llms-full.txt).
 ## Available Topics
 
 - inference: OpenRouter + Cloudflare AI models, dynamic pricing, chat completions
-  URL: https://x402.aibtc.com/docs/inference
+  URL: https://x402.aibtc.com/topics/inference
 
 - hashing: All hash endpoints with examples, Clarity compatibility
-  URL: https://x402.aibtc.com/docs/hashing
+  URL: https://x402.aibtc.com/topics/hashing
 
 - storage: KV, paste, db, sync, queue, memory — lifecycle patterns
-  URL: https://x402.aibtc.com/docs/storage
+  URL: https://x402.aibtc.com/topics/storage
 
 - payment-flow: x402 v2 challenge/response flow in detail
-  URL: https://x402.aibtc.com/docs/payment-flow
+  URL: https://x402.aibtc.com/topics/payment-flow
 
 ## Usage
 
 Fetch any topic doc directly:
-  curl https://x402.aibtc.com/docs/inference
-  curl https://x402.aibtc.com/docs/hashing
-  curl https://x402.aibtc.com/docs/storage
-  curl https://x402.aibtc.com/docs/payment-flow
+  curl https://x402.aibtc.com/topics/inference
+  curl https://x402.aibtc.com/topics/hashing
+  curl https://x402.aibtc.com/topics/storage
+  curl https://x402.aibtc.com/topics/payment-flow
 
 ## When to Use These Docs
 
@@ -1553,14 +1554,14 @@ Platform hub: https://aibtc.com/llms.txt
   return new Response(content, { headers: PLAIN_TEXT_HEADERS });
 });
 
-axDiscoveryRouter.get("/docs/:topic", (c) => {
+axDiscoveryRouter.get("/topics/:topic", (c) => {
   const topic = c.req.param("topic");
   const content = TOPIC_DOCS[topic];
 
   if (!content) {
     const available = Object.keys(TOPIC_DOCS).join(", ");
     return new Response(
-      `Topic "${topic}" not found.\n\nAvailable topics: ${available}\n\nSee https://x402.aibtc.com/docs for the topic index.\n`,
+      `Topic "${topic}" not found.\n\nAvailable topics: ${available}\n\nSee https://x402.aibtc.com/topics for the topic index.\n`,
       {
         status: 404,
         headers: PLAIN_TEXT_HEADERS,

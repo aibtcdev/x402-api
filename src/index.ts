@@ -246,6 +246,7 @@ const FREE_ROUTES = new Set([
   // AX discovery chain
   "/llms.txt",
   "/llms-full.txt",
+  "/topics",
   "/.well-known/agent.json",
   // Free endpoints
   "/inference/openrouter/models",
@@ -262,7 +263,7 @@ app.use("*", async (c, next) => {
   }
 
   // Skip free route prefixes (AX discovery topic docs)
-  if (path.startsWith("/docs/")) {
+  if (path.startsWith("/topics/")) {
     return next();
   }
 
