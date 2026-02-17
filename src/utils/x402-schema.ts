@@ -4,17 +4,13 @@
  * Generates x402.json discovery manifest for Bazaar/scanner registration.
  * Static generation without network calls (Cloudflare Workers can't self-fetch).
  *
- * V2 manifest format (per x402-specification-v2.md section 8):
- * - CAIP-2 network identifiers (e.g., "stacks:1", "stacks:2147483648")
- * - Per-endpoint grouping with resource objects
- * - Bazaar extensions for rich metadata
- * - Service metadata wrapper
+ * Uses CAIP-2 network IDs, per-endpoint resource objects, and Bazaar extensions.
  */
 
 import { TIER_PRICING, stxToTokenAmount } from "../services/pricing";
 import type { PricingTier, TokenType } from "../types";
 import { getEndpointMetadata, buildBazaarExtension } from "../bazaar";
-import type { EndpointMetadata, BazaarExtension } from "../bazaar";
+import type { BazaarExtension } from "../bazaar";
 
 // =============================================================================
 // V2 Manifest Types
@@ -78,23 +74,6 @@ export interface GeneratorConfig {
   network: "mainnet" | "testnet";
   payTo: string;
   baseUrl: string; // e.g., "https://x402.aibtc.dev"
-  serviceName?: string;
-  serviceUrl?: string;
-}
-
-// Legacy types retained for Bazaar extension compatibility
-export interface X402InputSchema {
-  type: "http";
-  method: "GET" | "POST" | "DELETE";
-  bodyType?: "json" | "form" | "text" | "binary";
-  bodySchema?: Record<string, unknown>;
-  queryParams?: Record<string, unknown>;
-}
-
-export interface X402OutputSchema {
-  type: "json";
-  example: Record<string, unknown>;
-  schema?: Record<string, unknown>;
 }
 
 // =============================================================================
@@ -175,7 +154,7 @@ const ENDPOINT_REGISTRY: EndpointInfo[] = [
 ];
 
 // =============================================================================
-// Conversion Helpers
+// Pricing Helpers
 // =============================================================================
 
 const TOKENS: TokenType[] = ["STX", "sBTC", "USDCx"];
@@ -193,19 +172,15 @@ function getTimeoutForTier(tier: PricingTier): number {
 }
 
 /**
- * Get amount in smallest unit for a tier and token
+ * Get amount in smallest unit for a tier and token.
+ * Dynamic tier uses standard pricing as a base (actual price varies per request).
  */
 function getAmountForTier(tier: PricingTier, token: TokenType): string {
-  // Skip free tier
   if (tier === "free") return "0";
 
-  // For dynamic pricing, use standard tier as the base (actual price varies)
+  // Dynamic endpoints advertise standard base price in the manifest
   const effectiveTier = tier === "dynamic" ? "standard" : tier;
-  const tierPricing = TIER_PRICING[effectiveTier];
-
-  if (!tierPricing || tierPricing.stx === 0) return "0";
-
-  const amount = stxToTokenAmount(tierPricing.stx, token);
+  const amount = stxToTokenAmount(TIER_PRICING[effectiveTier].stx, token);
   return amount.toString();
 }
 
@@ -289,8 +264,8 @@ export function generateX402Manifest(config: GeneratorConfig): V2Manifest {
       lastUpdated: timestamp,
       metadata: {
         service: {
-          name: config.serviceName || "x402 Stacks API",
-          url: config.serviceUrl || config.baseUrl,
+          name: "x402 Stacks API",
+          url: config.baseUrl,
         },
         ...(metadata?.category && { category: metadata.category }),
       },

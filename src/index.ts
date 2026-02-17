@@ -446,13 +446,10 @@ app.get("/health", (c) => {
 
 // x402 discovery manifest (V2 protocol)
 app.get("/x402.json", (c) => {
-  const baseUrl = new URL(c.req.url).origin;
   const manifest = generateX402Manifest({
     network: c.env.X402_NETWORK === "mainnet" ? "mainnet" : "testnet",
     payTo: c.env.X402_SERVER_ADDRESS || "",
-    baseUrl,
-    serviceName: "x402 Stacks API",
-    serviceUrl: baseUrl,
+    baseUrl: new URL(c.req.url).origin,
   });
   return c.json(manifest);
 });
