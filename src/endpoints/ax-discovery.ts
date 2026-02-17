@@ -8,7 +8,7 @@
  *   GET /.well-known/agent.json   — A2A agent card (capabilities, skills, pricing)
  *   GET /llms.txt                 — Quick-start guide (what it is, tiers, how to pay)
  *   GET /llms-full.txt            — Full reference (all endpoints, schemas, examples)
- *   GET /topics                   — Topic documentation index (JSON)
+ *   GET /topics                   — Topic documentation index (plaintext)
  *   GET /topics/:topic            — Topic sub-docs (plaintext)
  *
  * For the full aibtc agent platform, see https://aibtc.com/llms.txt
