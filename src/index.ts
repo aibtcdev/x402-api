@@ -76,6 +76,9 @@ import {
 // Dashboard endpoint
 import { Dashboard } from "./endpoints/dashboard";
 
+// AX discovery routes
+import { axDiscoveryRouter } from "./endpoints/ax-discovery";
+
 // x402 manifest generator
 import { generateX402Manifest } from "./utils/x402-schema";
 
@@ -240,6 +243,11 @@ const FREE_ROUTES = new Set([
   "/openapi.json",
   "/x402.json",
   "/dashboard",
+  // AX discovery chain
+  "/llms.txt",
+  "/llms-full.txt",
+  "/topics",
+  "/.well-known/agent.json",
   // Free endpoints
   "/inference/openrouter/models",
   "/inference/cloudflare/models",
@@ -251,6 +259,11 @@ app.use("*", async (c, next) => {
 
   // Skip free routes
   if (FREE_ROUTES.has(path)) {
+    return next();
+  }
+
+  // Skip free route prefixes (AX discovery topic docs)
+  if (path.startsWith("/topics/")) {
     return next();
   }
 
@@ -456,6 +469,12 @@ app.get("/x402.json", (c) => {
 
 // Dashboard (free, HTML)
 openapi.get("/dashboard", Dashboard);
+
+// =============================================================================
+// AX Discovery Routes (free, plaintext/JSON)
+// =============================================================================
+
+app.route("/", axDiscoveryRouter);
 
 // =============================================================================
 // Inference Routes

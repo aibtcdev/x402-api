@@ -163,6 +163,32 @@ export async function runKvLifecycle(verbose = false) {
 }
 ```
 
+## AX Discovery Chain
+
+Agent Experience (AX) discovery routes — all free, no payment required.
+
+Agents discover this service through a progressive disclosure chain:
+
+| Route                          | Format    | Purpose                                          |
+|--------------------------------|-----------|--------------------------------------------------|
+| `GET /.well-known/agent.json`  | JSON      | A2A agent card: skills, pricing, capabilities    |
+| `GET /llms.txt`                | plaintext | Quick-start: what x402 is, tiers, payment flow   |
+| `GET /llms-full.txt`           | plaintext | Full reference: all endpoints, schemas, examples |
+| `GET /topics`                  | plaintext | Topic documentation index                        |
+| `GET /topics/inference`        | plaintext | OpenRouter + Cloudflare AI, dynamic pricing      |
+| `GET /topics/hashing`          | plaintext | All hash endpoints with examples                 |
+| `GET /topics/storage`          | plaintext | KV, paste, db, sync, queue, memory patterns      |
+| `GET /topics/payment-flow`     | plaintext | x402 v2 challenge/response flow in detail        |
+
+**Implementation:** `src/endpoints/ax-discovery.ts` — single Hono sub-router
+mounted at root via `app.route("/", axDiscoveryRouter)` in `src/index.ts`.
+
+**Update together:** When adding endpoints, update `llms.txt`, `llms-full.txt`,
+and the relevant topic doc. Content reflects REAL endpoints and behavior.
+
+**References aibtc.com:** All docs point agents to `https://aibtc.com/llms.txt`
+as the upstream platform hub for registration, messaging, and identity.
+
 ## Reference Documentation
 
 - [Cloudflare Durable Objects](https://developers.cloudflare.com/durable-objects/best-practices/rules-of-durable-objects/) | [SQLite in DOs](https://developers.cloudflare.com/durable-objects/api/sqlite-storage-api/) | [Workers AI](https://developers.cloudflare.com/workers-ai/)
