@@ -1,5 +1,18 @@
 # Changelog
 
+## [1.1.0](https://github.com/aibtcdev/x402-api/compare/v1.0.0...v1.1.0) (2026-02-17)
+
+
+### Features
+
+* **x402:** implement V2 discovery manifest ([#43](https://github.com/aibtcdev/x402-api/issues/43)) ([6012668](https://github.com/aibtcdev/x402-api/commit/6012668bc040d6a81768b2b14bed022aa9e6e46e))
+
+
+### Bug Fixes
+
+* code hardening - dead code, error safety, deps, and minification ([#46](https://github.com/aibtcdev/x402-api/issues/46)) ([a93c600](https://github.com/aibtcdev/x402-api/commit/a93c6002dc3fcee670d32701fe6ba734d4dcaff5))
+* increase x402-stacks verifier timeout to 2 minutes ([#45](https://github.com/aibtcdev/x402-api/issues/45)) ([4a9c1d4](https://github.com/aibtcdev/x402-api/commit/4a9c1d49936cd30b178f187426b5a679fac44819))
+
 ## 1.0.0 (2026-02-12)
 
 
