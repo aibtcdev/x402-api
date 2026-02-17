@@ -21,8 +21,8 @@
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20260109.0",
-    "patch-package": "^8.0.1",
     "@types/bun": "^1.2.0",
+    "patch-package": "^8.0.1",
     "typescript": "^5.9.3",
     "wrangler": "^4.58.0"
   },
