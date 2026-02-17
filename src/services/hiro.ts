@@ -65,14 +65,6 @@ export interface BnsName {
   owner: string;
 }
 
-export interface ContractInfo {
-  contract_id: string;
-  source_code: string;
-  abi: unknown;
-  block_height: number;
-  clarity_version: number;
-}
-
 export interface Transaction {
   tx_id: string;
   nonce: number;
@@ -227,26 +219,6 @@ export class HiroClient {
 
     const data = (await response.json()) as BnsName;
     return { address: data.owner };
-  }
-
-  /**
-   * Get contract info
-   */
-  async getContractInfo(contractId: string): Promise<ContractInfo> {
-    this.log.debug("Fetching contract info", { contractId });
-
-    const response = await fetch(
-      `${this.baseUrl}/v2/contracts/source/${contractId}`,
-      { headers: this.getHeaders() }
-    );
-
-    if (!response.ok) {
-      const error = await response.text();
-      this.log.error("Failed to fetch contract info", { contractId, error });
-      throw new HiroError(`Failed to fetch contract: ${response.status}`, response.status);
-    }
-
-    return response.json() as Promise<ContractInfo>;
   }
 
   /**

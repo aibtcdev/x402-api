@@ -72,7 +72,7 @@ export class MemoryStore extends StorageWriteLargeEndpoint {
       const result = await env.AI.run("@cf/baai/bge-base-en-v1.5", { text: texts }) as { data: number[][] };
       embeddings = result.data;
     } catch (err) {
-      return this.errorResponse(c, `Embedding generation failed: ${err}`, 500);
+      return this.errorResponse(c, `Embedding generation failed: ${String(err)}`, 500);
     }
 
     // Store items with embeddings

@@ -51,7 +51,7 @@ export class MemorySearch extends StorageReadEndpoint {
       const result = await env.AI.run("@cf/baai/bge-base-en-v1.5", { text: [query] }) as { data: number[][] };
       queryEmbedding = result.data[0];
     } catch (err) {
-      return this.errorResponse(c, `Embedding generation failed: ${err}`, 500);
+      return this.errorResponse(c, `Embedding generation failed: ${String(err)}`, 500);
     }
 
     const result = await storageDO.memorySearch(queryEmbedding, { limit, threshold }) as {
