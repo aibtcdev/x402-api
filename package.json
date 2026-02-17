@@ -16,10 +16,12 @@
     "test:full": "bun run tests/_run_all_tests.ts --mode=full",
     "test:category": "bun run tests/_run_all_tests.ts --category",
     "test:kv": "bun run tests/kv-lifecycle.test.ts",
-    "test:verbose": "VERBOSE=1 bun run tests/_run_all_tests.ts"
+    "test:verbose": "VERBOSE=1 bun run tests/_run_all_tests.ts",
+    "postinstall": "patch-package"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20260109.0",
+    "patch-package": "^8.0.1",
     "@types/bun": "^1.2.0",
     "typescript": "^5.9.3",
     "wrangler": "^4.58.0"
