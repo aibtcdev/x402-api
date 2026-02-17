@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.2.0](https://github.com/aibtcdev/x402-api/compare/v1.1.0...v1.2.0) (2026-02-17)
+
+
+### Features
+
+* **ax:** add AX discovery chain for agent-first navigation ([#47](https://github.com/aibtcdev/x402-api/issues/47)) ([f6e917d](https://github.com/aibtcdev/x402-api/commit/f6e917d040ec86a0057e208ab47e0eaaa4588aae))
+
 ## [1.1.0](https://github.com/aibtcdev/x402-api/compare/v1.0.0...v1.1.0) (2026-02-17)
 
 
