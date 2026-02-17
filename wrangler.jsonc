@@ -2,6 +2,7 @@
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "x402-api",
   "main": "src/index.ts",
+  "minify": true,
   "compatibility_date": "2025-01-08",
   "compatibility_flags": ["nodejs_compat_v2"],
   // Local development settings
