@@ -76,8 +76,8 @@ import {
 // Dashboard endpoint
 import { Dashboard } from "./endpoints/dashboard";
 
-// x402 schema generator
-import { generateX402Schema } from "./utils/x402-schema";
+// x402 manifest generator
+import { generateX402Manifest } from "./utils/x402-schema";
 
 // Durable Objects
 export { UsageDO } from "./durable-objects/UsageDO";
@@ -444,15 +444,14 @@ app.get("/health", (c) => {
   });
 });
 
-// x402 discovery schema (for scan.stacksx402.com registration)
+// x402 discovery manifest (V2 protocol)
 app.get("/x402.json", (c) => {
-  const schema = generateX402Schema({
+  const manifest = generateX402Manifest({
     network: c.env.X402_NETWORK === "mainnet" ? "mainnet" : "testnet",
     payTo: c.env.X402_SERVER_ADDRESS || "",
-    name: "x402 Stacks API",
-    image: "https://aibtc.dev/logos/aibtcdev-avatar-1000px.png",
+    baseUrl: new URL(c.req.url).origin,
   });
-  return c.json(schema);
+  return c.json(manifest);
 });
 
 // Dashboard (free, HTML)
