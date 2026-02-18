@@ -138,24 +138,17 @@ function classifyPaymentError(error: unknown, settleResult?: Partial<SettlementR
     return { code: X402_ERROR_CODES.AMOUNT_INSUFFICIENT, message: "Payment amount below minimum required", httpStatus: 402 };
   }
 
-  if (combined.includes("invalid") || combined.includes("signature")) {
-    return { code: X402_ERROR_CODES.INVALID_PAYLOAD, message: "Invalid payment signature", httpStatus: 400 };
-  }
-
-  if (combined.includes("recipient")) {
-    return { code: X402_ERROR_CODES.RECIPIENT_MISMATCH, message: "Payment recipient mismatch", httpStatus: 400 };
-  }
-
+  // Relay-specific errors — check before broad "invalid"/"signature" to avoid misclassification
   if (combined.includes("broadcast_failed") || combined.includes("broadcast failed")) {
-    return { code: X402_ERROR_CODES.UNEXPECTED_SETTLE_ERROR, message: "Settlement relay broadcast failed, please retry", httpStatus: 502, retryAfter: 5 };
+    return { code: X402_ERROR_CODES.BROADCAST_FAILED, message: "Settlement relay broadcast failed, please retry", httpStatus: 502, retryAfter: 5 };
   }
 
   if (combined.includes("transaction_failed") || combined.includes("transaction failed")) {
-    return { code: X402_ERROR_CODES.INVALID_TRANSACTION_STATE, message: "Transaction failed in settlement relay", httpStatus: 402 };
+    return { code: X402_ERROR_CODES.TRANSACTION_FAILED, message: "Transaction failed in settlement relay", httpStatus: 402 };
   }
 
   if (combined.includes("transaction_pending") || combined.includes("transaction pending")) {
-    return { code: X402_ERROR_CODES.INVALID_TRANSACTION_STATE, message: "Transaction pending in settlement relay, please retry", httpStatus: 402, retryAfter: 10 };
+    return { code: X402_ERROR_CODES.TRANSACTION_PENDING, message: "Transaction pending in settlement relay, please retry", httpStatus: 402, retryAfter: 10 };
   }
 
   if (combined.includes("sender_mismatch") || combined.includes("sender mismatch")) {
@@ -163,7 +156,16 @@ function classifyPaymentError(error: unknown, settleResult?: Partial<SettlementR
   }
 
   if (combined.includes("unsupported_scheme") || combined.includes("unsupported scheme")) {
-    return { code: X402_ERROR_CODES.INVALID_PAYLOAD, message: "Unsupported payment scheme", httpStatus: 400 };
+    return { code: X402_ERROR_CODES.UNSUPPORTED_SCHEME, message: "Unsupported payment scheme", httpStatus: 400 };
+  }
+
+  // Broad matches last — catch generic "invalid"/"signature" errors not matched above
+  if (combined.includes("invalid") || combined.includes("signature")) {
+    return { code: X402_ERROR_CODES.INVALID_PAYLOAD, message: "Invalid payment signature", httpStatus: 400 };
+  }
+
+  if (combined.includes("recipient")) {
+    return { code: X402_ERROR_CODES.RECIPIENT_MISMATCH, message: "Payment recipient mismatch", httpStatus: 400 };
   }
 
   return { code: X402_ERROR_CODES.UNEXPECTED_SETTLE_ERROR, message: "Payment processing error", httpStatus: 500, retryAfter: 5 };
