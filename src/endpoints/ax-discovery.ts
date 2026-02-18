@@ -1079,8 +1079,7 @@ The \`payment-required\` header is a base64-encoded JSON object:
   "network": "stacks:1",
   "extra": {
     "tier": "standard",
-    "description": "0.001 STX per request",
-    "relay": "https://x402-relay.aibtc.com"
+    "description": "0.001 STX per request"
   }
 }
 \`\`\`
@@ -1090,7 +1089,7 @@ Fields:
 - \`amount\`: Amount in base units (microSTX for STX, satoshis for sBTC, microUSDCx for USDCx)
 - \`asset\`: null for STX, contract principal for sBTC/USDCx
 - \`network\`: "stacks:1" (mainnet), "stacks:2147483648" (testnet)
-- \`extra.relay\`: URL of the settlement relay that verifies and broadcasts the transaction
+- \`extra.tier\`: Pricing tier (standard, dynamic, free)
 
 ## Step 3: Build Payment Payload
 
@@ -1218,7 +1217,6 @@ Machine-readable payment configuration. Use this to auto-configure x402-stacks:
   "network": "mainnet",
   "payTo": "SP...",
   "tokens": ["STX", "sBTC", "USDCx"],
-  "relay": "https://x402-relay.aibtc.com",
   "endpoints": [...]
 }
 \`\`\`
