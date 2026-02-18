@@ -96,7 +96,7 @@ The API uses a simplified three-tier pricing model:
 1. Client requests endpoint without payment
 2. Middleware returns 402 with `payment-required` header (base64 JSON)
 3. Client signs transaction and resends with `payment-signature` header (base64 JSON)
-4. Middleware verifies payment via facilitator
+4. Middleware settles payment via relay
 5. Request processed, usage recorded in Durable Object
 6. Response includes `payment-response` header (base64 JSON)
 
@@ -109,7 +109,7 @@ The API uses a simplified three-tier pricing model:
 **Environment Variables:**
 - `X402_SERVER_ADDRESS` - Stacks address to receive payments
 - `X402_NETWORK` - `mainnet` or `testnet`
-- `X402_FACILITATOR_URL` - x402 facilitator endpoint
+- `X402_FACILITATOR_URL` - x402 settlement relay endpoint
 
 **Test Environment Variables:**
 - `X402_CLIENT_PK` - Testnet mnemonic for payment signing (required)

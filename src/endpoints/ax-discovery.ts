@@ -202,7 +202,7 @@ Legacy headers (still accepted for backward compatibility):
 GET /x402.json
 \`\`\`
 Returns machine-readable payment manifest with supported tokens, pricing tiers,
-and facilitator URL. Use this to auto-configure x402-stacks clients.
+and relay URL. Use this to auto-configure x402-stacks clients.
 
 ## Pricing
 
@@ -1079,8 +1079,7 @@ The \`payment-required\` header is a base64-encoded JSON object:
   "network": "stacks:1",
   "extra": {
     "tier": "standard",
-    "description": "0.001 STX per request",
-    "facilitator": "https://facilitator.stacksx402.com"
+    "description": "0.001 STX per request"
   }
 }
 \`\`\`
@@ -1090,7 +1089,7 @@ Fields:
 - \`amount\`: Amount in base units (microSTX for STX, satoshis for sBTC, microUSDCx for USDCx)
 - \`asset\`: null for STX, contract principal for sBTC/USDCx
 - \`network\`: "stacks:1" (mainnet), "stacks:2147483648" (testnet)
-- \`extra.facilitator\`: URL to submit payment for settlement
+- \`extra.tier\`: Pricing tier (standard, dynamic, free)
 
 ## Step 3: Build Payment Payload
 
@@ -1131,7 +1130,7 @@ payment-signature: eyJ2ZXJzaW9uIjoyLCJ0cmFuc2FjdGlvbiI6IjB4ODA4MC4uLiJ9...
 The server:
 1. Decodes the \`payment-signature\` header
 2. Validates the transaction (correct payTo, amount, token type)
-3. Submits to the facilitator for on-chain settlement
+3. Submits to the settlement relay for on-chain settlement
 4. Processes the request
 5. Returns result with \`payment-response\` header
 
@@ -1199,11 +1198,11 @@ execute_x402_endpoint({
 })
 \`\`\`
 
-## Facilitator
+## Settlement Relay
 
-The facilitator validates and broadcasts transactions:
-- Mainnet: https://facilitator.stacksx402.com
-- The facilitator confirms the transaction is correctly formed before broadcasting
+The settlement relay validates and broadcasts transactions:
+- Mainnet: https://x402-relay.aibtc.com
+- The relay verifies the transaction locally and broadcasts directly to the Stacks network
 
 ## x402 Discovery Manifest
 
@@ -1218,7 +1217,6 @@ Machine-readable payment configuration. Use this to auto-configure x402-stacks:
   "network": "mainnet",
   "payTo": "SP...",
   "tokens": ["STX", "sBTC", "USDCx"],
-  "facilitator": "https://facilitator.stacksx402.com",
   "endpoints": [...]
 }
 \`\`\`

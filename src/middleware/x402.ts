@@ -119,11 +119,11 @@ function classifyPaymentError(error: unknown, settleResult?: Partial<SettlementR
   const combined = `${errorStr} ${resultError}`;
 
   if (combined.includes("fetch") || combined.includes("network") || combined.includes("timeout")) {
-    return { code: X402_ERROR_CODES.UNEXPECTED_SETTLE_ERROR, message: "Network error with payment facilitator", httpStatus: 502, retryAfter: 5 };
+    return { code: X402_ERROR_CODES.UNEXPECTED_SETTLE_ERROR, message: "Network error with settlement relay", httpStatus: 502, retryAfter: 5 };
   }
 
   if (combined.includes("503") || combined.includes("unavailable")) {
-    return { code: X402_ERROR_CODES.UNEXPECTED_SETTLE_ERROR, message: "Payment facilitator temporarily unavailable", httpStatus: 503, retryAfter: 30 };
+    return { code: X402_ERROR_CODES.UNEXPECTED_SETTLE_ERROR, message: "Settlement relay temporarily unavailable", httpStatus: 503, retryAfter: 30 };
   }
 
   if (combined.includes("insufficient") || combined.includes("balance")) {
@@ -138,6 +138,28 @@ function classifyPaymentError(error: unknown, settleResult?: Partial<SettlementR
     return { code: X402_ERROR_CODES.AMOUNT_INSUFFICIENT, message: "Payment amount below minimum required", httpStatus: 402 };
   }
 
+  // Relay-specific errors — check before broad "invalid"/"signature" to avoid misclassification
+  if (combined.includes("broadcast_failed") || combined.includes("broadcast failed")) {
+    return { code: X402_ERROR_CODES.BROADCAST_FAILED, message: "Settlement relay broadcast failed, please retry", httpStatus: 502, retryAfter: 5 };
+  }
+
+  if (combined.includes("transaction_failed") || combined.includes("transaction failed")) {
+    return { code: X402_ERROR_CODES.TRANSACTION_FAILED, message: "Transaction failed in settlement relay", httpStatus: 402 };
+  }
+
+  if (combined.includes("transaction_pending") || combined.includes("transaction pending")) {
+    return { code: X402_ERROR_CODES.TRANSACTION_PENDING, message: "Transaction pending in settlement relay, please retry", httpStatus: 402, retryAfter: 10 };
+  }
+
+  if (combined.includes("sender_mismatch") || combined.includes("sender mismatch")) {
+    return { code: X402_ERROR_CODES.SENDER_MISMATCH, message: "Payment sender does not match expected address", httpStatus: 400 };
+  }
+
+  if (combined.includes("unsupported_scheme") || combined.includes("unsupported scheme")) {
+    return { code: X402_ERROR_CODES.UNSUPPORTED_SCHEME, message: "Unsupported payment scheme", httpStatus: 400 };
+  }
+
+  // Broad matches last — catch generic "invalid"/"signature" errors not matched above
   if (combined.includes("invalid") || combined.includes("signature")) {
     return { code: X402_ERROR_CODES.INVALID_PAYLOAD, message: "Invalid payment signature", httpStatus: 400 };
   }
@@ -306,11 +328,11 @@ export function x402Middleware(
       }, 400);
     }
 
-    // Verify payment with facilitator using v2 API
+    // Verify payment with settlement relay using v2 API
     const verifier = new X402PaymentVerifier(c.env.X402_FACILITATOR_URL);
 
-    log.debug("Settling payment via v2 API", {
-      facilitatorUrl: c.env.X402_FACILITATOR_URL,
+    log.debug("Settling payment via settlement relay", {
+      relayUrl: c.env.X402_FACILITATOR_URL,
       expectedRecipient: c.env.X402_SERVER_ADDRESS,
       minAmount: paymentRequirements.amount,
       asset,
