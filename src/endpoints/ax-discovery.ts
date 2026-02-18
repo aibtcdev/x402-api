@@ -202,7 +202,7 @@ Legacy headers (still accepted for backward compatibility):
 GET /x402.json
 \`\`\`
 Returns machine-readable payment manifest with supported tokens, pricing tiers,
-and facilitator URL. Use this to auto-configure x402-stacks clients.
+and relay URL. Use this to auto-configure x402-stacks clients.
 
 ## Pricing
 

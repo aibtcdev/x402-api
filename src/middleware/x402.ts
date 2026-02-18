@@ -326,7 +326,7 @@ export function x402Middleware(
       }, 400);
     }
 
-    // Verify payment with facilitator using v2 API
+    // Verify payment with settlement relay using v2 API
     const verifier = new X402PaymentVerifier(c.env.X402_FACILITATOR_URL);
 
     log.debug("Settling payment via settlement relay", {
