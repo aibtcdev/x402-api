@@ -31,7 +31,7 @@
   ],
   "vars": {
     "ENVIRONMENT": "development",
-    "X402_FACILITATOR_URL": "https://facilitator.stacksx402.com",
+    "X402_FACILITATOR_URL": "https://x402-relay.aibtc.dev",
     "X402_NETWORK": "testnet",
     "X402_SERVER_ADDRESS": "ST37NMC4HGFQ1H2JSFP4H3TMNQBF4PY0MVSD1GV7Z"
   },
@@ -53,7 +53,7 @@
       "observability": { "enabled": true },
       "vars": {
         "ENVIRONMENT": "staging",
-        "X402_FACILITATOR_URL": "https://facilitator.stacksx402.com",
+        "X402_FACILITATOR_URL": "https://x402-relay.aibtc.dev",
         "X402_NETWORK": "testnet",
         "X402_SERVER_ADDRESS": "ST37NMC4HGFQ1H2JSFP4H3TMNQBF4PY0MVSD1GV7Z"
       },
@@ -77,7 +77,7 @@
       "observability": { "enabled": true },
       "vars": {
         "ENVIRONMENT": "production",
-        "X402_FACILITATOR_URL": "https://facilitator.stacksx402.com",
+        "X402_FACILITATOR_URL": "https://x402-relay.aibtc.com",
         "X402_NETWORK": "mainnet",
         "X402_SERVER_ADDRESS": "SP37NMC4HGFQ1H2JSFP4H3TMNQBF4PY0MVRHQXGQE"
       },

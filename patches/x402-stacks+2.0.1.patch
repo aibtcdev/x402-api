@@ -7,7 +7,7 @@ index 93b41e0..0ecfa71 100644
          this.facilitatorUrl = facilitatorUrl.replace(/\/$/, ''); // Remove trailing slash
          this.httpClient = axios_1.default.create({
 -            timeout: 30000, // V2 may need longer timeout for settlement
-+            timeout: 120000, // 2 minutes for sBTC contract calls
++            timeout: 120000, // 2 minutes — relay polls up to 60s for confirmation, plus network latency
              headers: {
                  'Content-Type': 'application/json',
              },
@@ -20,7 +20,7 @@ index 4023c74..786f937 100644
          this.network = network;
          this.httpClient = axios_1.default.create({
 -            timeout: 15000,
-+            timeout: 120000, // 2 minutes for sBTC contract calls
++            timeout: 120000, // 2 minutes — relay polls up to 60s for confirmation, plus network latency
              headers: {
                  'Content-Type': 'application/json',
              },
