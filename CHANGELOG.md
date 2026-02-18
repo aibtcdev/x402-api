@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.3.0](https://github.com/aibtcdev/x402-api/compare/v1.2.0...v1.3.0) (2026-02-18)
+
+
+### Features
+
+* route x402 settlement through relay ([#49](https://github.com/aibtcdev/x402-api/issues/49)) ([#50](https://github.com/aibtcdev/x402-api/issues/50)) ([8e17128](https://github.com/aibtcdev/x402-api/commit/8e171286a902e7153496badc9616e5b1ff25b4b2))
+
 ## [1.2.0](https://github.com/aibtcdev/x402-api/compare/v1.1.0...v1.2.0) (2026-02-17)
 
 
