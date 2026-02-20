@@ -68,17 +68,24 @@ export interface ModelPricing {
 
 /**
  * Model pricing in USD per 1K tokens
- * Based on OpenRouter pricing - updated 2026-02-16
+ * Based on OpenRouter pricing - updated 2026-02-20
  * https://openrouter.ai/docs/models
  */
 const MODEL_PRICING: Record<string, ModelPricing> = {
   // OpenAI models
   "openai/gpt-4o": { promptPer1k: 0.0025, completionPer1k: 0.01 },
   "openai/gpt-4o-mini": { promptPer1k: 0.00015, completionPer1k: 0.0006 },
+  "openai/gpt-4o-2024-08-06": { promptPer1k: 0.0025, completionPer1k: 0.01 },
+  "openai/gpt-4o-2024-11-20": { promptPer1k: 0.0025, completionPer1k: 0.01 },
   "openai/gpt-4-turbo": { promptPer1k: 0.01, completionPer1k: 0.03 },
 
-  // Anthropic models
+  // Anthropic models (Claude 4 series — OpenRouter model IDs)
+  "anthropic/claude-opus-4": { promptPer1k: 0.015, completionPer1k: 0.075 },
+  "anthropic/claude-opus-4-5": { promptPer1k: 0.015, completionPer1k: 0.075 },
+  "anthropic/claude-sonnet-4-5": { promptPer1k: 0.003, completionPer1k: 0.015 },
+  // Anthropic models (Claude 3.x series)
   "anthropic/claude-3.5-sonnet": { promptPer1k: 0.003, completionPer1k: 0.015 },
+  "anthropic/claude-3-5-haiku": { promptPer1k: 0.0008, completionPer1k: 0.004 },
   "anthropic/claude-3-opus": { promptPer1k: 0.015, completionPer1k: 0.075 },
   "anthropic/claude-3-haiku": { promptPer1k: 0.00025, completionPer1k: 0.00125 },
 
@@ -108,9 +115,13 @@ const DEFAULT_MODEL_PRICING: ModelPricing = {
 /**
  * Token exchange rates (approximate, for converting USD to tokens)
  * Updated periodically based on market rates
+ *
+ * TODO: Replace STX rate with a dynamic price oracle (e.g., Bitflow STX/USD feed
+ *       or Hiro API market data). The hardcoded rate causes pricing drift as STX
+ *       market price moves. A live feed would ensure accurate USD-equivalent pricing.
  */
 const TOKEN_RATES: Record<TokenType, number> = {
-  STX: 0.50,      // 1 STX ≈ $0.50 USD
+  STX: 0.50,      // 1 STX ≈ $0.50 USD — hardcoded, see TODO above
   sBTC: 100000,   // 1 sBTC ≈ $100,000 USD
   USDCx: 1.0,     // 1 USDCx = $1 USD (Circle USDC via xReserve)
 };
