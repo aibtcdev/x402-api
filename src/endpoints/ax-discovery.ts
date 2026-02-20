@@ -620,8 +620,8 @@ GET /inference/openrouter/models   (free, no payment)
 Returns list of available models with pricing info. Use model IDs like:
 - openai/gpt-4o
 - openai/gpt-4o-mini
-- anthropic/claude-opus-4 (Claude Opus 4.6 family)
-- anthropic/claude-sonnet-4-5 (Claude Sonnet 4.6 family)
+- anthropic/claude-opus-4 (Claude Opus 4 series)
+- anthropic/claude-sonnet-4-5 (Claude Sonnet 4 series)
 - anthropic/claude-3-5-haiku
 - google/gemini-pro
 - meta-llama/llama-3.1-70b-instruct
