@@ -298,8 +298,8 @@ Response (OpenAI-compatible):
 \`\`\`
 
 Pricing is estimated before the request. The 402 response includes the quoted amount.
-Dynamic models include: openai/gpt-4o, anthropic/claude-3-haiku, google/gemini-pro,
-meta-llama/llama-3.1-70b-instruct, mistralai/mistral-7b-instruct, and 100+ more.
+Dynamic models include: openai/gpt-4o, anthropic/claude-opus-4, anthropic/claude-sonnet-4-5,
+google/gemini-pro, meta-llama/llama-3.1-70b-instruct, mistralai/mistral-7b-instruct, and 100+ more.
 See /inference/openrouter/models for the full list.
 
 ### Cloudflare AI (Standard Pricing)
@@ -620,8 +620,9 @@ GET /inference/openrouter/models   (free, no payment)
 Returns list of available models with pricing info. Use model IDs like:
 - openai/gpt-4o
 - openai/gpt-4o-mini
-- anthropic/claude-3-haiku
-- anthropic/claude-3.5-sonnet
+- anthropic/claude-opus-4 (Claude Opus 4.6 family)
+- anthropic/claude-sonnet-4-5 (Claude Sonnet 4.6 family)
+- anthropic/claude-3-5-haiku
 - google/gemini-pro
 - meta-llama/llama-3.1-70b-instruct
 - mistralai/mistral-7b-instruct
@@ -1248,6 +1249,7 @@ const AGENT_CARD = {
     organization: "AIBTC Working Group",
     url: "https://aibtc.com",
   },
+  // x402 protocol version (not the package version, which is in package.json)
   version: "2.0.0",
   documentationUrl: "https://x402.aibtc.com/llms.txt",
   openApiUrl: "https://x402.aibtc.com/openapi.json",
