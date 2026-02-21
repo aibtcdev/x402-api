@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.4.0](https://github.com/aibtcdev/x402-api/compare/v1.3.0...v1.4.0) (2026-02-21)
+
+
+### Features
+
+* update pricing table and AX discovery for Claude 4 models ([#52](https://github.com/aibtcdev/x402-api/issues/52)) ([fb4a5a9](https://github.com/aibtcdev/x402-api/commit/fb4a5a92360943bfb3585aa29698bf562c295d68))
+
 ## [1.3.0](https://github.com/aibtcdev/x402-api/compare/v1.2.0...v1.3.0) (2026-02-18)
 
 
