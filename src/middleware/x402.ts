@@ -233,6 +233,11 @@ export function x402Middleware(
         // Default: assume chat completion request
         const chatRequest = parsedBody as ChatCompletionRequest;
 
+        // Validate model field before any downstream calls that assume a string
+        if (typeof chatRequest.model !== "string" || chatRequest.model.length === 0) {
+          return c.json({ error: "Missing or invalid 'model' field", code: "invalid_request" }, 400);
+        }
+
         // Pre-payment model validation: reject unknown models before issuing 402
         if (c.env.OPENROUTER_API_KEY) {
           const modelResult = await lookupModel(chatRequest.model, c.env.OPENROUTER_API_KEY, log);

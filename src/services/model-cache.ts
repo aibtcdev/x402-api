@@ -39,6 +39,15 @@ const modelRegistry = new Map<string, ModelPricing>();
 /** Timestamp of the last successful fetch */
 let fetchedAt: number | null = null;
 
+/** Timestamp of the last failed fetch attempt (backoff: don't retry every request) */
+let lastFailedAt: number | null = null;
+
+/** Minimum interval between retry attempts after a failure */
+const RETRY_BACKOFF_MS = 30_000;
+
+/** Shared in-flight refresh promise to collapse concurrent callers */
+let inflightRefresh: Promise<void> | null = null;
+
 // =============================================================================
 // Cache Management
 // =============================================================================
@@ -48,6 +57,10 @@ let fetchedAt: number | null = null;
  */
 function isCacheStale(): boolean {
   if (fetchedAt === null || modelRegistry.size === 0) {
+    // If we recently failed, back off instead of retrying every request
+    if (lastFailedAt !== null && Date.now() - lastFailedAt < RETRY_BACKOFF_MS) {
+      return false;
+    }
     return true;
   }
   return Date.now() - fetchedAt > CACHE_TTL_MS;
@@ -59,16 +72,26 @@ function isCacheStale(): boolean {
  * Silently no-ops on error; callers fall back to hardcoded pricing.
  */
 async function refreshCache(apiKey: string, logger: Logger): Promise<void> {
+  // Collapse concurrent callers into a single in-flight fetch
+  if (inflightRefresh) {
+    return inflightRefresh;
+  }
+
+  inflightRefresh = doRefresh(apiKey, logger);
+  try {
+    await inflightRefresh;
+  } finally {
+    inflightRefresh = null;
+  }
+}
+
+async function doRefresh(apiKey: string, logger: Logger): Promise<void> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+
   try {
     const client = new OpenRouterClient(apiKey, logger);
-
-    // Wrap in a race against the fetch timeout
-    const modelsResponse = await Promise.race([
-      client.getModels(),
-      new Promise<never>((_, reject) =>
-        setTimeout(() => reject(new Error("Model fetch timeout")), FETCH_TIMEOUT_MS)
-      ),
-    ]);
+    const modelsResponse = await client.getModels(controller.signal);
 
     modelRegistry.clear();
 
@@ -87,12 +110,16 @@ async function refreshCache(apiKey: string, logger: Logger): Promise<void> {
     }
 
     fetchedAt = Date.now();
+    lastFailedAt = null;
     logger.debug("Model cache refreshed", { count: modelRegistry.size });
   } catch (err) {
+    lastFailedAt = Date.now();
     // Non-fatal: caller falls back to hardcoded pricing
     logger.warn("Model cache refresh failed -- using fallback pricing", {
       error: err instanceof Error ? err.message : String(err),
     });
+  } finally {
+    clearTimeout(timeout);
   }
 }
 

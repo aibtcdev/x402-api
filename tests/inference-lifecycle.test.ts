@@ -51,9 +51,13 @@ const QUESTION_POOL = [
   "How many sides does a triangle have?",
 ];
 
-/** Get N random items from an array */
+/** Get N random items from an array (Fisher-Yates shuffle) */
 function pickRandom<T>(items: T[], count: number): T[] {
-  const shuffled = [...items].sort(() => Math.random() - 0.5);
+  const shuffled = [...items];
+  for (let i = shuffled.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
+  }
   return shuffled.slice(0, count);
 }
 
