@@ -24,13 +24,6 @@ const FETCH_TIMEOUT_MS = 3_000;
 // Types
 // =============================================================================
 
-export interface CachedModel {
-  id: string;
-  name: string;
-  promptPer1k: number;
-  completionPer1k: number;
-}
-
 /** Discriminated union result from lookupModel */
 export type ModelLookupResult =
   | { valid: true; pricing?: ModelPricing }
@@ -41,7 +34,7 @@ export type ModelLookupResult =
 // =============================================================================
 
 /** Module-level model registry -- isolate-scoped, resets on deploy/recycle */
-const modelRegistry = new Map<string, CachedModel>();
+const modelRegistry = new Map<string, ModelPricing>();
 
 /** Timestamp of the last successful fetch */
 let fetchedAt: number | null = null;
@@ -66,11 +59,8 @@ function isCacheStale(): boolean {
  * Silently no-ops on error; callers fall back to hardcoded pricing.
  */
 async function refreshCache(apiKey: string, logger: Logger): Promise<void> {
-  // Build a logger that won't throw if undefined
-  const log = logger;
-
   try {
-    const client = new OpenRouterClient(apiKey, log);
+    const client = new OpenRouterClient(apiKey, logger);
 
     // Wrap in a race against the fetch timeout
     const modelsResponse = await Promise.race([
@@ -93,19 +83,14 @@ async function refreshCache(apiKey: string, logger: Logger): Promise<void> {
         continue;
       }
 
-      modelRegistry.set(model.id, {
-        id: model.id,
-        name: model.name,
-        promptPer1k,
-        completionPer1k,
-      });
+      modelRegistry.set(model.id, { promptPer1k, completionPer1k });
     }
 
     fetchedAt = Date.now();
-    log.debug("Model cache refreshed", { count: modelRegistry.size });
+    logger.debug("Model cache refreshed", { count: modelRegistry.size });
   } catch (err) {
     // Non-fatal: caller falls back to hardcoded pricing
-    log.warn("Model cache refresh failed -- using fallback pricing", {
+    logger.warn("Model cache refresh failed -- using fallback pricing", {
       error: err instanceof Error ? err.message : String(err),
     });
   }
@@ -150,11 +135,5 @@ export async function lookupModel(
     };
   }
 
-  return {
-    valid: true,
-    pricing: {
-      promptPer1k: cached.promptPer1k,
-      completionPer1k: cached.completionPer1k,
-    },
-  };
+  return { valid: true, pricing: cached };
 }
