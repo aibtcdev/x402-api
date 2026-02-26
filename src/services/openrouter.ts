@@ -79,12 +79,13 @@ export class OpenRouterClient {
   /**
    * Fetch available models from OpenRouter
    */
-  async getModels(): Promise<ModelsResponse> {
+  async getModels(signal?: AbortSignal): Promise<ModelsResponse> {
     this.log.debug("Fetching models from OpenRouter");
 
     const response = await fetch(`${OPENROUTER_BASE_URL}/models`, {
       method: "GET",
       headers: this.getHeaders(),
+      signal,
     });
 
     if (!response.ok) {

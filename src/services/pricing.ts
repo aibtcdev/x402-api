@@ -68,8 +68,8 @@ export interface ModelPricing {
 
 /**
  * Model pricing in USD per 1K tokens
- * Based on OpenRouter pricing - updated 2026-02-20
- * https://openrouter.ai/docs/models
+ * Fallback table only -- live pricing comes from OpenRouter via model-cache.ts
+ * Last updated: 2026-02-26 -- https://openrouter.ai/docs/models
  */
 const MODEL_PRICING: Record<string, ModelPricing> = {
   // OpenAI models
@@ -86,12 +86,11 @@ const MODEL_PRICING: Record<string, ModelPricing> = {
   // Anthropic models (Claude 3.x series)
   "anthropic/claude-3.5-sonnet": { promptPer1k: 0.003, completionPer1k: 0.015 },
   "anthropic/claude-3-5-haiku": { promptPer1k: 0.0008, completionPer1k: 0.004 },
-  "anthropic/claude-3-opus": { promptPer1k: 0.015, completionPer1k: 0.075 },
   "anthropic/claude-3-haiku": { promptPer1k: 0.00025, completionPer1k: 0.00125 },
 
   // Google models
-  "google/gemini-pro": { promptPer1k: 0.000125, completionPer1k: 0.000375 },
-  "google/gemini-pro-1.5": { promptPer1k: 0.00125, completionPer1k: 0.005 },
+  "google/gemini-2.0-flash-001": { promptPer1k: 0.0001, completionPer1k: 0.0004 },
+  "google/gemini-2.5-pro": { promptPer1k: 0.00125, completionPer1k: 0.01 },
 
   // Meta models
   "meta-llama/llama-3.1-70b-instruct": { promptPer1k: 0.00035, completionPer1k: 0.0004 },
@@ -266,13 +265,17 @@ export function getFixedTierEstimate(tier: PricingTier, tokenType: TokenType): P
 
 /**
  * Estimate payment amount for a chat completion request (dynamic pricing)
+ *
+ * @param registryPricing - Optional live pricing from model-cache lookupModel().
+ *   When provided, it takes precedence over the hardcoded MODEL_PRICING table.
  */
 export function estimateChatPayment(
   request: ChatCompletionRequest,
   tokenType: TokenType,
-  log?: Logger
+  log?: Logger,
+  registryPricing?: ModelPricing
 ): PriceEstimate {
-  const pricing = getModelPricing(request.model);
+  const pricing = registryPricing ?? getModelPricing(request.model);
   const estimatedInputTokens = estimateInputTokens(request.messages);
 
   // Estimate output tokens (use max_tokens if provided, otherwise estimate)

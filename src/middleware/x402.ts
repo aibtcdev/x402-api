@@ -35,6 +35,7 @@ import {
   getFixedTierEstimate,
   estimateChatPayment,
 } from "../services/pricing";
+import { lookupModel } from "../services/model-cache";
 import { getEndpointMetadata, buildBazaarExtension } from "../bazaar";
 
 // =============================================================================
@@ -230,7 +231,24 @@ export function x402Middleware(
         priceEstimate = estimator(parsedBody, tokenType, log);
       } else {
         // Default: assume chat completion request
-        priceEstimate = estimateChatPayment(parsedBody as ChatCompletionRequest, tokenType, log);
+        const chatRequest = parsedBody as ChatCompletionRequest;
+
+        // Validate model field before any downstream calls that assume a string
+        if (typeof chatRequest.model !== "string" || chatRequest.model.length === 0) {
+          return c.json({ error: "Missing or invalid 'model' field", code: "invalid_request" }, 400);
+        }
+
+        // Pre-payment model validation: reject unknown models before issuing 402
+        if (c.env.OPENROUTER_API_KEY) {
+          const modelResult = await lookupModel(chatRequest.model, c.env.OPENROUTER_API_KEY, log);
+          if (!modelResult.valid) {
+            return c.json({ error: modelResult.error, code: "invalid_model" }, 400);
+          }
+          // Use live registry pricing if available, otherwise fall through to hardcoded table
+          priceEstimate = estimateChatPayment(chatRequest, tokenType, log, modelResult.pricing);
+        } else {
+          priceEstimate = estimateChatPayment(chatRequest, tokenType, log);
+        }
       }
     } else {
       // Fixed tier pricing
