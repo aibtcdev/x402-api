@@ -27,11 +27,14 @@ import {
 // Test Configuration
 // =============================================================================
 
-/** Models to test - using cheap/fast options */
+/** Models to test - using cheap/fast options, picked randomly */
 const TEST_MODELS = {
   openrouter: [
     "meta-llama/llama-3.1-8b-instruct",
-    "mistralai/mistral-7b-instruct",
+    "moonshotai/kimi-k2.5",
+    "minimax/minimax-m2.5",
+    "google/gemini-2.5-flash-preview",
+    "x-ai/grok-4.1-mini",
   ],
   cloudflare: "@cf/meta/llama-3.1-8b-instruct",
 };
@@ -48,9 +51,9 @@ const QUESTION_POOL = [
   "How many sides does a triangle have?",
 ];
 
-/** Get 3 random questions from the pool */
-function getRandomQuestions(count: number = 3): string[] {
-  const shuffled = [...QUESTION_POOL].sort(() => Math.random() - 0.5);
+/** Get N random items from an array */
+function pickRandom<T>(items: T[], count: number): T[] {
+  const shuffled = [...items].sort(() => Math.random() - 0.5);
   return shuffled.slice(0, count);
 }
 
@@ -189,20 +192,20 @@ export async function runInferenceLifecycle(verbose = false): Promise<LifecycleT
   // Use STX only to save on payments
   const tokenType: TokenType = "STX";
 
-  // Get random questions for this test run
-  const questions = getRandomQuestions(3);
+  // Pick 2 random OpenRouter models + 1 Cloudflare = 3 tests per run
+  const selectedModels = pickRandom(TEST_MODELS.openrouter, 2);
+  const questions = pickRandom(QUESTION_POOL, 3);
+  logger.info(`Selected OpenRouter models: ${selectedModels.join(", ")}`);
   logger.info(`Testing with questions: ${questions.map((q) => q.slice(0, 30) + "...").join(", ")}`);
 
   let successCount = 0;
   let testIndex = 0;
 
-  // Total tests: 2 OpenRouter models + 1 Cloudflare = 3 models
-  // Each model gets 1 question (to keep costs low)
-  const totalTests = TEST_MODELS.openrouter.length + 1;
+  const totalTests = selectedModels.length + 1;
 
   // Test OpenRouter models
-  for (let i = 0; i < TEST_MODELS.openrouter.length; i++) {
-    const model = TEST_MODELS.openrouter[i];
+  for (let i = 0; i < selectedModels.length; i++) {
+    const model = selectedModels[i];
     const question = questions[i];
     testIndex++;
 
