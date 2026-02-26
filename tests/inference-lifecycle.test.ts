@@ -30,11 +30,11 @@ import {
 /** Models to test - using cheap/fast options, picked randomly */
 const TEST_MODELS = {
   openrouter: [
-    "meta-llama/llama-3.1-8b-instruct",
-    "moonshotai/kimi-k2.5",
-    "minimax/minimax-m2.5",
-    "google/gemini-2.5-flash-preview",
-    "x-ai/grok-4.1-mini",
+    "meta-llama/llama-3.1-8b-instruct",       // $0.00002/1k
+    "google/gemini-2.0-flash-001",             // $0.0001/1k
+    "openai/gpt-4.1-nano",                    // $0.0001/1k
+    "mistralai/mistral-small-3.2-24b-instruct", // $0.00006/1k
+    "amazon/nova-micro-v1",                    // $0.000035/1k
   ],
   cloudflare: "@cf/meta/llama-3.1-8b-instruct",
 };
