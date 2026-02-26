@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.4.0](https://github.com/aibtcdev/x402-api/compare/v1.3.0...v1.4.0) (2026-02-26)
+
+
+### Features
+
+* add pre-payment model validation and live pricing sync ([#56](https://github.com/aibtcdev/x402-api/issues/56)) ([df098c6](https://github.com/aibtcdev/x402-api/commit/df098c6567f4395cdf6ef6d6b6b1a917aeaf1d72))
+* update pricing table and AX discovery for Claude 4 models ([#52](https://github.com/aibtcdev/x402-api/issues/52)) ([fb4a5a9](https://github.com/aibtcdev/x402-api/commit/fb4a5a92360943bfb3585aa29698bf562c295d68))
+
 ## [1.3.0](https://github.com/aibtcdev/x402-api/compare/v1.2.0...v1.3.0) (2026-02-18)
 
 
