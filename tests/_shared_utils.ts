@@ -538,6 +538,13 @@ export async function makeX402RequestWithRetry(
     const requirements = paymentReqBody.accepts[0];
     log(`Payment required: ${requirements.amount} ${requirements.asset}, network: ${requirements.network}`);
 
+    // Parse tokenContract from v2 asset string (required for sBTC and USDCx)
+    let tokenContract: { address: string; name: string } | undefined;
+    if (requirements.asset !== "STX" && requirements.asset.includes(".")) {
+      const [contractAddress, contractName] = requirements.asset.split(".");
+      tokenContract = { address: contractAddress, name: contractName };
+    }
+
     // Build v1-compatible request for the client's signPayment method
     const v1CompatibleRequest = {
       maxAmountRequired: requirements.amount,
@@ -547,9 +554,19 @@ export async function makeX402RequestWithRetry(
       nonce: crypto.randomUUID(),
       expiresAt: new Date(Date.now() + 5 * 60 * 1000).toISOString(),
       tokenType,
+      tokenContract,
     };
 
     const signResult = await x402Client.signPayment(v1CompatibleRequest);
+    if (!signResult.success || !signResult.signedTransaction) {
+      return {
+        status: 500,
+        data: { error: `Payment signing failed: ${signResult.error || "empty transaction"}` },
+        headers: new Headers(),
+        retryCount,
+        wasNonceConflict,
+      };
+    }
     log("Payment signed");
 
     // Build v2 payment payload
