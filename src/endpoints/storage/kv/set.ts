@@ -5,6 +5,7 @@
 import { StorageWriteEndpoint } from "../../base";
 import { tokenTypeParam, response400, response402, stringProp, boolProp, objectProp, intProp, okProp, tokenTypeProp } from "../../schema";
 import type { AppContext } from "../../../types";
+import { scanContent } from "../../../services/safety-scan";
 
 export class KvSet extends StorageWriteEndpoint {
   schema = {
@@ -64,6 +65,19 @@ export class KvSet extends StorageWriteEndpoint {
     if (storageDO instanceof Response) return storageDO;
 
     const result = await storageDO.kvSet(key, value, { metadata, ttl });
+
+    // Fire-and-forget safety scan — never blocks response
+    const log = c.var.logger;
+    c.executionCtx.waitUntil(
+      (async () => {
+        try {
+          const verdict = await scanContent(c.env.AI, value);
+          await storageDO.scanStore(key, "kv", verdict);
+        } catch (err) {
+          log.error("Safety scan failed for kv", { key, error: String(err) });
+        }
+      })()
+    );
 
     return c.json({
       ok: true,

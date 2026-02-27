@@ -5,6 +5,7 @@
 import { StorageWriteLargeEndpoint } from "../../base";
 import { tokenTypeParam, response400, response402, stringProp, intProp, okProp, tokenTypeProp } from "../../schema";
 import type { AppContext } from "../../../types";
+import { scanContent } from "../../../services/safety-scan";
 
 export class PasteCreate extends StorageWriteLargeEndpoint {
   schema = {
@@ -61,6 +62,19 @@ export class PasteCreate extends StorageWriteLargeEndpoint {
     if (storageDO instanceof Response) return storageDO;
 
     const result = await storageDO.pasteCreate(content, { title, language, ttl });
+
+    // Fire-and-forget safety scan — never blocks response
+    const log = c.var.logger;
+    c.executionCtx.waitUntil(
+      (async () => {
+        try {
+          const verdict = await scanContent(c.env.AI, content);
+          await storageDO.scanStore(result.id, "paste", verdict);
+        } catch (err) {
+          log.error("Safety scan failed for paste", { id: result.id, error: String(err) });
+        }
+      })()
+    );
 
     return c.json({
       ok: true,
