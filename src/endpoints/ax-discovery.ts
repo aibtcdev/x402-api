@@ -109,6 +109,10 @@ The easiest way to handle this flow: use the AIBTC MCP server's \`execute_x402_e
 | hashing     | /hashing/* (sha256, sha512, keccak256, hash160...) | standard |
 | storage     | /storage/kv, paste, db, sync, queue, memory        | standard |
 
+**Safety:** Storage write operations (KV set, paste create, memory store) are
+background-scanned for safety using Cloudflare AI (Llama 3.1 8B). Scanning is
+flag-first and non-blocking — writes succeed regardless of scan result.
+
 ## Quick Examples
 
 **SHA-256 hash (most common starting point):**
@@ -552,6 +556,49 @@ Response: { "ok": true, "results": [{ "id": "doc-1", "text": "...", "score": 0.9
 Uses Cloudflare AI (BAAI/bge-base-en-v1.5) for embeddings. Cosine similarity search.
 
 Topic doc: https://x402.aibtc.com/topics/storage
+
+## Safety Scanning
+
+Storage write operations are background-scanned for safety using Cloudflare Workers AI.
+Scanning does not block writes or affect response time — it runs after the response is sent.
+
+### Scanned Operations
+
+| Endpoint               | Scanned |
+|------------------------|---------|
+| POST /storage/paste    | Yes (content field) |
+| POST /storage/kv       | Yes (value field) |
+| POST /storage/memory/store | Yes (item text fields) |
+| GET, DELETE operations | No |
+| /storage/sync/*        | No (locks, not content) |
+| /storage/queue/*       | No (job metadata) |
+
+### Scan Behavior
+
+- **Fire-and-forget:** scan runs via \`waitUntil()\` after response is returned
+- **Flag-first:** content is stored regardless of scan verdict
+- **Non-blocking:** writes never fail due to safety scan results
+- **Isolated:** verdicts stored in the agent's own Durable Object (\`content_scans\` table)
+
+### Flag Categories
+
+| Flag                  | Description                                      |
+|-----------------------|--------------------------------------------------|
+| harmful_content       | Violence, hate speech, explicit material         |
+| pii_exposure          | Real personal data (names, SSNs, phone numbers)  |
+| spam                  | Repetitive or bulk content patterns              |
+| prompt_injection      | Attempts to override system instructions         |
+| jailbreak_attempt     | Attempts to bypass AI safety controls            |
+
+**Note:** Developer content (code, configs, example API keys, URLs) is handled with
+false-positive reduction rules. Storing code snippets or configuration files will not
+trigger flags for pii_exposure or harmful_content in normal circumstances.
+
+### Verdicts
+
+Scan verdicts are stored internally in the \`content_scans\` table of the agent's
+Durable Object. Verdicts are not currently returned in write operation responses.
+This is a platform safety measure — not a separate endpoint or billable service.
 
 ## Payment Flow Deep-Dive
 
@@ -1014,6 +1061,38 @@ Response: {
 \`\`\`
 
 Score is cosine similarity (0-1, higher = more similar).
+
+## Safety Scanning
+
+Write operations to paste, KV, and memory are background-scanned using
+Cloudflare Workers AI (Llama 3.1 8B). Scanning is non-blocking and flag-first.
+
+### Which Operations Are Scanned
+
+| Operation                  | Scanned | Field          |
+|----------------------------|---------|----------------|
+| POST /storage/paste        | Yes     | content        |
+| POST /storage/kv           | Yes     | value          |
+| POST /storage/memory/store | Yes     | items[].text   |
+| All GET / DELETE ops       | No      | —              |
+| /storage/sync/* (locks)    | No      | —              |
+| /storage/queue/* (jobs)    | No      | —              |
+
+### Behavior
+
+- Scan runs **after** the write response is sent (fire-and-forget via \`waitUntil()\`)
+- Write operations **always succeed** regardless of scan verdict
+- Verdicts are stored in the agent's Durable Object (\`content_scans\` table)
+- Not a billable service — no extra payment or separate endpoint
+
+### Flags
+
+Scans check for: \`harmful_content\`, \`pii_exposure\`, \`spam\`,
+\`prompt_injection\`, \`jailbreak_attempt\`.
+
+Developer content (code, configs, example API keys, URLs) is handled with
+false-positive reduction — storing code snippets or configuration files
+will not trigger spurious flags.
 
 ## Agent Memory Lifecycle Pattern
 
