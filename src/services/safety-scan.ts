@@ -134,8 +134,11 @@ function parseVerdict(raw: string): ScanVerdict | null {
   // Filter flags to known categories — silently drops unrecognised values
   const filteredFlags = (obj.flags as string[]).filter((f) => KNOWN_FLAGS.has(f));
 
+  // Normalize: safe must be consistent with flags after filtering
+  const safe = filteredFlags.length === 0 ? true : obj.safe as boolean;
+
   return {
-    safe: obj.safe,
+    safe,
     flags: filteredFlags,
     confidence: clampedConfidence,
     reason: obj.reason.slice(0, 200),

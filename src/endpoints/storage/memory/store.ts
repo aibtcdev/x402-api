@@ -84,10 +84,12 @@ export class MemoryStore extends StorageWriteLargeEndpoint {
 
     const result = await storageDO.memoryStore(itemsWithEmbeddings);
 
-    // Fire-and-forget safety scan for each item — never blocks response
+    // Fire-and-forget safety scan — cap at 10 concurrent to avoid AI rate limits
     const log = c.var.logger;
+    const SCAN_CONCURRENCY = 10;
+    const toScan = items.slice(0, SCAN_CONCURRENCY);
     c.executionCtx.waitUntil(
-      Promise.all(items.map((item) =>
+      Promise.all(toScan.map((item) =>
         scanAndStore(c.env.AI, storageDO, item.id, "memory", item.text, log)
       ))
     );

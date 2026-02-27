@@ -163,13 +163,14 @@ export class StorageDO extends DurableObject<Env> {
     // Content scans table for safety classification results
     this.sql.exec(`
       CREATE TABLE IF NOT EXISTS content_scans (
-        id TEXT PRIMARY KEY,
+        id TEXT NOT NULL,
         content_type TEXT NOT NULL,
         safe INTEGER NOT NULL,
         flags TEXT NOT NULL,
         confidence REAL NOT NULL,
         reason TEXT NOT NULL,
-        scanned_at TEXT NOT NULL
+        scanned_at TEXT NOT NULL,
+        PRIMARY KEY (content_type, id)
       )
     `);
     this.sql.exec(`CREATE INDEX IF NOT EXISTS idx_scans_type ON content_scans(content_type)`);
@@ -800,8 +801,7 @@ export class StorageDO extends DurableObject<Env> {
     this.sql.exec(
       `INSERT INTO content_scans (id, content_type, safe, flags, confidence, reason, scanned_at)
        VALUES (?, ?, ?, ?, ?, ?, ?)
-       ON CONFLICT(id) DO UPDATE SET
-         content_type = excluded.content_type,
+       ON CONFLICT(content_type, id) DO UPDATE SET
          safe = excluded.safe,
          flags = excluded.flags,
          confidence = excluded.confidence,
@@ -816,12 +816,13 @@ export class StorageDO extends DurableObject<Env> {
    * Returns null if no scan has been recorded for this id.
    */
   async scanGet(
-    id: string
+    id: string,
+    contentType: "paste" | "kv" | "memory"
   ): Promise<(ScanVerdict & { contentType: string; scannedAt: string }) | null> {
     const result = this.sql
       .exec(
-        "SELECT content_type, safe, flags, confidence, reason, scanned_at FROM content_scans WHERE id = ?",
-        id
+        "SELECT content_type, safe, flags, confidence, reason, scanned_at FROM content_scans WHERE content_type = ? AND id = ?",
+        contentType, id
       )
       .toArray();
 
