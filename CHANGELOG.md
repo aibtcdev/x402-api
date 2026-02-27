@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.5.0](https://github.com/aibtcdev/x402-api/compare/v1.4.0...v1.5.0) (2026-02-27)
+
+
+### Features
+
+* add AI safety scanning for storage write endpoints ([#58](https://github.com/aibtcdev/x402-api/issues/58)) ([69494c7](https://github.com/aibtcdev/x402-api/commit/69494c70cbe625b371e7c7672138ec4c55ab8e9d))
+
+
+### Bug Fixes
+
+* **tests:** pass tokenContract to signPayment for sBTC/USDCx ([#57](https://github.com/aibtcdev/x402-api/issues/57)) ([714eace](https://github.com/aibtcdev/x402-api/commit/714eace3727c5570991bf2f09a78ceb5c930c118))
+
 ## [1.4.0](https://github.com/aibtcdev/x402-api/compare/v1.3.0...v1.4.0) (2026-02-26)
 
 
