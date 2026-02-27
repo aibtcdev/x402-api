@@ -584,15 +584,19 @@ Scanning does not block writes or affect response time — it runs after the res
 
 | Flag                  | Description                                      |
 |-----------------------|--------------------------------------------------|
-| harmful_content       | Violence, hate speech, explicit material         |
-| pii_exposure          | Real personal data (names, SSNs, phone numbers)  |
-| spam                  | Repetitive or bulk content patterns              |
-| prompt_injection      | Attempts to override system instructions         |
+| spam                  | Unsolicited bulk content, repetitive patterns    |
+| harassment            | Targeted threats, insults, or intimidation       |
+| hate_speech           | Content targeting protected characteristics      |
+| violence              | Graphic violence or threats of violence          |
+| adult_content         | Explicit sexual content                          |
+| malware               | Code or links that appear malicious              |
+| pii_exposure          | Exposed credentials or real PII (SSNs, keys)    |
+| prompt_injection      | Attempts to override AI system instructions      |
 | jailbreak_attempt     | Attempts to bypass AI safety controls            |
 
 **Note:** Developer content (code, configs, example API keys, URLs) is handled with
 false-positive reduction rules. Storing code snippets or configuration files will not
-trigger flags for pii_exposure or harmful_content in normal circumstances.
+trigger spurious flags in normal circumstances.
 
 ### Verdicts
 
@@ -1087,8 +1091,9 @@ Cloudflare Workers AI (Llama 3.1 8B). Scanning is non-blocking and flag-first.
 
 ### Flags
 
-Scans check for: \`harmful_content\`, \`pii_exposure\`, \`spam\`,
-\`prompt_injection\`, \`jailbreak_attempt\`.
+Scans check for: \`spam\`, \`harassment\`, \`hate_speech\`, \`violence\`,
+\`adult_content\`, \`malware\`, \`pii_exposure\`, \`prompt_injection\`,
+\`jailbreak_attempt\`.
 
 Developer content (code, configs, example API keys, URLs) is handled with
 false-positive reduction — storing code snippets or configuration files

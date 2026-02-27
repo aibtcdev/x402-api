@@ -41,6 +41,20 @@ function parseJsonField(value: unknown): Record<string, unknown> | null {
   }
 }
 
+/**
+ * Parse a JSON string into a string array
+ * Returns empty array if parsing fails or value is falsy
+ */
+function parseStringArray(value: unknown): string[] {
+  if (!value) return [];
+  try {
+    const parsed = JSON.parse(value as string);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
 export class StorageDO extends DurableObject<Env> {
   private sql: SqlStorage;
 
@@ -814,16 +828,9 @@ export class StorageDO extends DurableObject<Env> {
     if (result.length === 0) return null;
 
     const row = result[0];
-    let flags: string[] = [];
-    try {
-      flags = JSON.parse(row.flags as string);
-    } catch {
-      flags = [];
-    }
-
     return {
       safe: (row.safe as number) === 1,
-      flags,
+      flags: parseStringArray(row.flags),
       confidence: row.confidence as number,
       reason: row.reason as string,
       contentType: row.content_type as string,
@@ -867,25 +874,16 @@ export class StorageDO extends DurableObject<Env> {
 
     const results = this.sql.exec(query, ...params).toArray();
 
-    return results.map((row) => {
-      let flags: string[] = [];
-      try {
-        flags = JSON.parse(row.flags as string);
-      } catch {
-        flags = [];
-      }
-
-      return {
-        id: row.id as string,
-        contentType: row.content_type as string,
-        verdict: {
-          safe: (row.safe as number) === 1,
-          flags,
-          confidence: row.confidence as number,
-          reason: row.reason as string,
-        },
-        scannedAt: row.scanned_at as string,
-      };
-    });
+    return results.map((row) => ({
+      id: row.id as string,
+      contentType: row.content_type as string,
+      verdict: {
+        safe: (row.safe as number) === 1,
+        flags: parseStringArray(row.flags),
+        confidence: row.confidence as number,
+        reason: row.reason as string,
+      },
+      scannedAt: row.scanned_at as string,
+    }));
   }
 }

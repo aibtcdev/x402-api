@@ -5,7 +5,7 @@
 import { StorageWriteLargeEndpoint } from "../../base";
 import { tokenTypeParam, response402 } from "../../schema";
 import type { AppContext } from "../../../types";
-import { scanContent } from "../../../services/safety-scan";
+import { scanAndStore } from "../../../services/safety-scan";
 
 export class MemoryStore extends StorageWriteLargeEndpoint {
   schema = {
@@ -87,16 +87,9 @@ export class MemoryStore extends StorageWriteLargeEndpoint {
     // Fire-and-forget safety scan for each item — never blocks response
     const log = c.var.logger;
     c.executionCtx.waitUntil(
-      (async () => {
-        for (const item of items) {
-          try {
-            const verdict = await scanContent(c.env.AI, item.text);
-            await storageDO.scanStore(item.id, "memory", verdict);
-          } catch (err) {
-            log.error("Safety scan failed for memory item", { id: item.id, error: String(err) });
-          }
-        }
-      })()
+      Promise.all(items.map((item) =>
+        scanAndStore(c.env.AI, storageDO, item.id, "memory", item.text, log)
+      ))
     );
 
     return c.json({ ok: true, ...result, tokenType });
