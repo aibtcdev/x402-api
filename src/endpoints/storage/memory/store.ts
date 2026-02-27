@@ -5,6 +5,7 @@
 import { StorageWriteLargeEndpoint } from "../../base";
 import { tokenTypeParam, response402 } from "../../schema";
 import type { AppContext } from "../../../types";
+import { scanAndStore } from "../../../services/safety-scan";
 
 export class MemoryStore extends StorageWriteLargeEndpoint {
   schema = {
@@ -82,6 +83,17 @@ export class MemoryStore extends StorageWriteLargeEndpoint {
     }));
 
     const result = await storageDO.memoryStore(itemsWithEmbeddings);
+
+    // Fire-and-forget safety scan — cap at 10 concurrent to avoid AI rate limits
+    const log = c.var.logger;
+    const SCAN_CONCURRENCY = 10;
+    const toScan = items.slice(0, SCAN_CONCURRENCY);
+    c.executionCtx.waitUntil(
+      Promise.all(toScan.map((item) =>
+        scanAndStore(c.env.AI, storageDO, item.id, "memory", item.text, log)
+      ))
+    );
+
     return c.json({ ok: true, ...result, tokenType });
   }
 }

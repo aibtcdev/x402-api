@@ -12,6 +12,7 @@
 
 import { DurableObject } from "cloudflare:workers";
 import type { Env } from "../types";
+import type { ScanVerdict } from "../services/safety-scan";
 
 // Alphanumeric characters for ID generation
 const ID_CHARS = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
@@ -37,6 +38,20 @@ function parseJsonField(value: unknown): Record<string, unknown> | null {
     return JSON.parse(value as string);
   } catch {
     return null;
+  }
+}
+
+/**
+ * Parse a JSON string into a string array
+ * Returns empty array if parsing fails or value is falsy
+ */
+function parseStringArray(value: unknown): string[] {
+  if (!value) return [];
+  try {
+    const parsed = JSON.parse(value as string);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
   }
 }
 
@@ -144,6 +159,22 @@ export class StorageDO extends DurableObject<Env> {
     `);
     this.sql.exec(`CREATE INDEX IF NOT EXISTS idx_memories_type ON memories(type)`);
     this.sql.exec(`CREATE INDEX IF NOT EXISTS idx_memories_importance ON memories(importance DESC)`);
+
+    // Content scans table for safety classification results
+    this.sql.exec(`
+      CREATE TABLE IF NOT EXISTS content_scans (
+        id TEXT NOT NULL,
+        content_type TEXT NOT NULL,
+        safe INTEGER NOT NULL,
+        flags TEXT NOT NULL,
+        confidence REAL NOT NULL,
+        reason TEXT NOT NULL,
+        scanned_at TEXT NOT NULL,
+        PRIMARY KEY (content_type, id)
+      )
+    `);
+    this.sql.exec(`CREATE INDEX IF NOT EXISTS idx_scans_type ON content_scans(content_type)`);
+    this.sql.exec(`CREATE INDEX IF NOT EXISTS idx_scans_safe ON content_scans(safe)`);
   }
 
   // ===========================================================================
@@ -336,7 +367,7 @@ export class StorageDO extends DurableObject<Env> {
 
     // Security: Prevent modification of system tables
     const normalizedQuery = query.trim().toUpperCase();
-    const systemTables = ["KV", "PASTES", "LOCKS", "JOBS", "MEMORIES"];
+    const systemTables = ["KV", "PASTES", "LOCKS", "JOBS", "MEMORIES", "CONTENT_SCANS"];
 
     for (const table of systemTables) {
       if ((normalizedQuery.includes("DROP") || normalizedQuery.includes("ALTER")) &&
@@ -749,5 +780,111 @@ export class StorageDO extends DurableObject<Env> {
   async memoryClear(): Promise<{ cleared: number }> {
     const result = this.sql.exec("DELETE FROM memories");
     return { cleared: result.rowsWritten };
+  }
+
+  // ===========================================================================
+  // Content Scan Operations
+  // ===========================================================================
+
+  /**
+   * Store or update a safety scan verdict for a content item.
+   * Uses upsert so re-scanning the same id overwrites the previous result.
+   */
+  async scanStore(
+    id: string,
+    contentType: "paste" | "kv" | "memory",
+    verdict: ScanVerdict
+  ): Promise<void> {
+    const now = new Date().toISOString();
+    const flagsJson = JSON.stringify(verdict.flags);
+
+    this.sql.exec(
+      `INSERT INTO content_scans (id, content_type, safe, flags, confidence, reason, scanned_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(content_type, id) DO UPDATE SET
+         safe = excluded.safe,
+         flags = excluded.flags,
+         confidence = excluded.confidence,
+         reason = excluded.reason,
+         scanned_at = excluded.scanned_at`,
+      id, contentType, verdict.safe ? 1 : 0, flagsJson, verdict.confidence, verdict.reason, now
+    );
+  }
+
+  /**
+   * Retrieve a stored scan verdict by content id.
+   * Returns null if no scan has been recorded for this id.
+   */
+  async scanGet(
+    id: string,
+    contentType: "paste" | "kv" | "memory"
+  ): Promise<(ScanVerdict & { contentType: string; scannedAt: string }) | null> {
+    const result = this.sql
+      .exec(
+        "SELECT content_type, safe, flags, confidence, reason, scanned_at FROM content_scans WHERE content_type = ? AND id = ?",
+        contentType, id
+      )
+      .toArray();
+
+    if (result.length === 0) return null;
+
+    const row = result[0];
+    return {
+      safe: (row.safe as number) === 1,
+      flags: parseStringArray(row.flags),
+      confidence: row.confidence as number,
+      reason: row.reason as string,
+      contentType: row.content_type as string,
+      scannedAt: row.scanned_at as string,
+    };
+  }
+
+  /**
+   * List stored scan verdicts with optional filtering.
+   */
+  async scanList(options?: {
+    contentType?: "paste" | "kv" | "memory";
+    safeOnly?: boolean;
+    limit?: number;
+  }): Promise<
+    Array<{
+      id: string;
+      contentType: string;
+      verdict: ScanVerdict;
+      scannedAt: string;
+    }>
+  > {
+    const limit = Math.min(options?.limit ?? 100, 1000);
+    const conditions: string[] = [];
+    const params: unknown[] = [];
+
+    if (options?.contentType) {
+      conditions.push("content_type = ?");
+      params.push(options.contentType);
+    }
+    if (options?.safeOnly) {
+      conditions.push("safe = 1");
+    }
+
+    const where = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
+    const query = `SELECT id, content_type, safe, flags, confidence, reason, scanned_at
+                   FROM content_scans ${where}
+                   ORDER BY scanned_at DESC
+                   LIMIT ?`;
+    params.push(limit);
+
+    const results = this.sql.exec(query, ...params).toArray();
+
+    return results.map((row) => ({
+      id: row.id as string,
+      contentType: row.content_type as string,
+      verdict: {
+        safe: (row.safe as number) === 1,
+        flags: parseStringArray(row.flags),
+        confidence: row.confidence as number,
+        reason: row.reason as string,
+      },
+      scannedAt: row.scanned_at as string,
+    }));
   }
 }
