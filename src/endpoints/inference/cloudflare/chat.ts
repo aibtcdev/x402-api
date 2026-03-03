@@ -6,6 +6,68 @@
 
 import { AIEndpoint } from "../../base";
 import type { AppContext, UsageRecord } from "../../../types";
+import type { ContentfulStatusCode } from "hono/utils/http-status";
+
+interface CloudflareAIErrorClassification {
+  message: string;
+  status: ContentfulStatusCode;
+  error_code: string;
+  retryable: boolean;
+  retry_after_seconds?: number;
+}
+
+/**
+ * Classify a Cloudflare AI error by inspecting its message and name.
+ * Maps error patterns to appropriate HTTP status codes and retry guidance.
+ */
+function classifyCloudflareAIError(error: unknown): CloudflareAIErrorClassification {
+  const errorMessage = error instanceof Error ? error.message : String(error);
+  const errorName = error instanceof Error ? error.name : "";
+
+  // Timeout: AbortError name, "Request timed out" message, or Cloudflare error code 3046
+  if (
+    errorName === "AbortError" ||
+    errorMessage.includes("Request timed out") ||
+    errorMessage.includes("3046")
+  ) {
+    return {
+      message: "Request timed out",
+      status: 504,
+      error_code: "TIMEOUT",
+      retryable: true,
+      retry_after_seconds: 30,
+    };
+  }
+
+  // Rate limit: explicit message or 429 code in message
+  if (errorMessage.includes("Rate limit exceeded") || errorMessage.includes("429")) {
+    return {
+      message: "Rate limit exceeded",
+      status: 429,
+      error_code: "RATE_LIMIT",
+      retryable: true,
+      retry_after_seconds: 60,
+    };
+  }
+
+  // Model not found: explicit message or 404 code in message
+  if (errorMessage.includes("Model not found") || errorMessage.includes("404")) {
+    return {
+      message: "Model not found",
+      status: 404,
+      error_code: "MODEL_NOT_FOUND",
+      retryable: false,
+    };
+  }
+
+  // Default: internal error from upstream Cloudflare AI
+  return {
+    message: "Chat completion failed",
+    status: 502,
+    error_code: "INTERNAL_ERROR",
+    retryable: false,
+  };
+}
 
 interface CloudflareMessage {
   role: "system" | "user" | "assistant";
@@ -95,7 +157,10 @@ export class CloudflareChat extends AIEndpoint {
       },
       "400": { description: "Invalid request" },
       "402": { description: "Payment required" },
-      "500": { description: "Server error" },
+      "404": { description: "Model not found (error_code: MODEL_NOT_FOUND, retryable: false)" },
+      "429": { description: "Rate limit exceeded (error_code: RATE_LIMIT, retryable: true)" },
+      "502": { description: "Upstream AI error (error_code: INTERNAL_ERROR, retryable: false)" },
+      "504": { description: "Request timed out (error_code: TIMEOUT, retryable: true)" },
     },
   };
 
@@ -224,12 +289,24 @@ export class CloudflareChat extends AIEndpoint {
         });
       }
     } catch (error) {
+      const classified = classifyCloudflareAIError(error);
+
       log.error("Cloudflare AI chat error", {
         model,
         error: error instanceof Error ? error.message : String(error),
+        error_code: classified.error_code,
+        status: classified.status,
       });
 
-      return this.errorResponse(c, "Chat completion failed", 500);
+      const extra: Record<string, unknown> = {
+        error_code: classified.error_code,
+        retryable: classified.retryable,
+      };
+      if (classified.retry_after_seconds !== undefined) {
+        extra.retry_after_seconds = classified.retry_after_seconds;
+      }
+
+      return this.errorResponse(c, classified.message, classified.status, extra);
     }
   }
 }
