@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.5.1](https://github.com/aibtcdev/x402-api/compare/v1.5.0...v1.5.1) (2026-03-03)
+
+
+### Bug Fixes
+
+* **inference:** classify Cloudflare AI errors with error codes and retry guidance ([#63](https://github.com/aibtcdev/x402-api/issues/63)) ([fedc407](https://github.com/aibtcdev/x402-api/commit/fedc4072495a62bb109aff50d8d08fbab5af0a91))
+
 ## [1.5.0](https://github.com/aibtcdev/x402-api/compare/v1.4.0...v1.5.0) (2026-02-27)
 
 
