@@ -238,6 +238,11 @@ export function x402Middleware(
           return c.json({ error: "Missing or invalid 'model' field", code: "invalid_request" }, 400);
         }
 
+        // Validate messages field before estimateInputTokens iterates over it
+        if (!Array.isArray(chatRequest.messages)) {
+          return c.json({ error: "Missing or invalid 'messages' field: must be an array", code: "invalid_request" }, 400);
+        }
+
         // Pre-payment model validation: reject unknown models before issuing 402
         if (c.env.OPENROUTER_API_KEY) {
           const modelResult = await lookupModel(chatRequest.model, c.env.OPENROUTER_API_KEY, log);
