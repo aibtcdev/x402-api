@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.5.2](https://github.com/aibtcdev/x402-api/compare/v1.5.1...v1.5.2) (2026-03-04)
+
+
+### Bug Fixes
+
+* guard estimateInputTokens against non-iterable input ([#67](https://github.com/aibtcdev/x402-api/issues/67)) ([79aaf1a](https://github.com/aibtcdev/x402-api/commit/79aaf1a23644c58b6cc3519790375d4c860a74cf)), closes [#66](https://github.com/aibtcdev/x402-api/issues/66)
+
 ## [1.5.1](https://github.com/aibtcdev/x402-api/compare/v1.5.0...v1.5.1) (2026-03-03)
 
 
