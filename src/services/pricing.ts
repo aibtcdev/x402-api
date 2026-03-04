@@ -171,11 +171,26 @@ export function getModelPricing(model: string): ModelPricing {
  * Estimate token count from messages
  */
 export function estimateInputTokens(messages: ChatCompletionRequest["messages"]): number {
+  // Guard: if messages is not a non-empty array, return a conservative fallback
+  if (!Array.isArray(messages) || messages.length === 0) {
+    return 100;
+  }
+
   let totalChars = 0;
 
   for (const msg of messages) {
     if (typeof msg.content === "string") {
       totalChars += msg.content.length;
+    } else if (Array.isArray(msg.content)) {
+      // Handle multimodal messages where content is an array of parts
+      for (const part of msg.content) {
+        if (part && typeof part === "object" && "type" in part) {
+          if (part.type === "text" && typeof (part as { type: string; text?: string }).text === "string") {
+            totalChars += (part as { type: string; text: string }).text.length;
+          }
+          // image_url parts don't contribute character count
+        }
+      }
     }
     // Add overhead for role, formatting
     totalChars += 10;
