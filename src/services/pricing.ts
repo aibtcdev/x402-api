@@ -168,10 +168,15 @@ export function getModelPricing(model: string): ModelPricing {
 }
 
 /**
- * Estimate token count from messages
+ * Estimate token count from messages.
+ *
+ * Defensively handles non-array input: if messages is undefined, null, or
+ * a non-array value (e.g., when request body is cast without runtime validation),
+ * returns a conservative default token estimate instead of throwing "not iterable".
  */
 export function estimateInputTokens(messages: ChatCompletionRequest["messages"]): number {
-  // Guard: if messages is not a non-empty array, return a conservative fallback
+  // Guard: runtime validation in case caller passes non-array (e.g., undefined from bad JSON cast).
+  // Return a conservative default: ~100 tokens covers a short prompt.
   if (!Array.isArray(messages) || messages.length === 0) {
     return 100;
   }
