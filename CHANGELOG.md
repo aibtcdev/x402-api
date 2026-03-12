@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.5.3](https://github.com/aibtcdev/x402-api/compare/v1.5.2...v1.5.3) (2026-03-12)
+
+
+### Bug Fixes
+
+* guard estimateInputTokens crash and add CF AI fallback model ([#69](https://github.com/aibtcdev/x402-api/issues/69)) ([2958f31](https://github.com/aibtcdev/x402-api/commit/2958f3194d535a9d09fdec01d5560adfa5fea914))
+
 ## [1.5.2](https://github.com/aibtcdev/x402-api/compare/v1.5.1...v1.5.2) (2026-03-04)
 
 
