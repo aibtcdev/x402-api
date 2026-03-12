@@ -238,9 +238,9 @@ export function x402Middleware(
           return c.json({ error: "Missing or invalid 'model' field", code: "invalid_request" }, 400);
         }
 
-        // Validate messages field before calling estimateChatPayment which iterates it.
-        // Without this guard, a missing or non-array messages value causes "not iterable" in
-        // estimateInputTokens when the body is cast via `as ChatCompletionRequest`.
+        // Validate messages field before calling estimateChatPayment, which expects a non-empty
+        // array. This is request validation; downstream token estimation now guards non-array/empty
+        // values and returns a safe default instead of throwing.
         if (!Array.isArray(chatRequest.messages) || chatRequest.messages.length === 0) {
           return c.json({ error: "Missing or invalid 'messages' field: must be a non-empty array", code: "invalid_request" }, 400);
         }

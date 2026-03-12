@@ -184,7 +184,7 @@ export function estimateInputTokens(messages: ChatCompletionRequest["messages"])
   let totalChars = 0;
 
   for (const msg of messages) {
-    if (typeof msg.content === "string") {
+    if (typeof msg?.content === "string") {
       totalChars += msg.content.length;
     } else if (Array.isArray(msg.content)) {
       // Handle multimodal messages where content is an array of parts

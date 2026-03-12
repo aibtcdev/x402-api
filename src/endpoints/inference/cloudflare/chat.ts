@@ -283,20 +283,18 @@ export class CloudflareChat extends AIEndpoint {
       }
 
       // Record usage (model known after potential fallback)
-      c.executionCtx.waitUntil(
-        (async () => {
-          const durationMs = Date.now() - startTime;
-          recordUsage(usedModel, durationMs);
-        })()
-      );
+      const durationMs = Date.now() - startTime;
+      recordUsage(usedModel, durationMs);
 
-      return new Response(streamResponse as unknown as ReadableStream, {
-        headers: {
-          "Content-Type": "text/event-stream",
-          "Cache-Control": "no-cache",
-          Connection: "keep-alive",
-        },
-      });
+      const headers: Record<string, string> = {
+        "Content-Type": "text/event-stream",
+        "Cache-Control": "no-cache",
+        Connection: "keep-alive",
+      };
+      if (usedModel !== model) {
+        headers["X-Fallback-Model"] = usedModel;
+      }
+      return new Response(streamResponse as unknown as ReadableStream, { headers });
     } else {
       // Non-streaming path — attempt primary model, fall back on timeout
       let aiResponse: unknown;
@@ -359,12 +357,12 @@ export class CloudflareChat extends AIEndpoint {
 
       const result: Record<string, unknown> = {
         ok: true,
-        model: usedModel,
+        model,
         response: responseText,
         tokenType,
       };
 
-      // Surface fallback info to caller so they know which model was used
+      // Surface fallback info to caller so they know which model actually served the request
       if (usedModel !== model) {
         result.fallback_model = usedModel;
       }
