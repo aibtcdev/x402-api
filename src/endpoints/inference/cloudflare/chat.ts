@@ -69,6 +69,19 @@ function classifyCloudflareAIError(error: unknown): CloudflareAIErrorClassificat
   };
 }
 
+/**
+ * Primary model default. When this times out (error 3046), the handler retries
+ * with FALLBACK_CF_MODEL before returning 504 to the caller.
+ */
+const DEFAULT_CF_MODEL = "@cf/meta/llama-3.1-8b-instruct";
+
+/**
+ * Fallback model used on timeout of the primary model.
+ * The fp8-fast variant is optimised for low-latency and is less likely to hit
+ * the Cloudflare Workers AI 3046 timeout.
+ */
+const FALLBACK_CF_MODEL = "@cf/meta/llama-3.3-70b-instruct-fp8-fast";
+
 interface CloudflareMessage {
   role: "system" | "user" | "assistant";
   content: string;
@@ -176,7 +189,7 @@ export class CloudflareChat extends AIEndpoint {
     const request = await this.parseBody<CloudflareChatRequest>(c);
     if (request instanceof Response) return request;
 
-    const { model = "@cf/meta/llama-3.1-8b-instruct", messages, max_tokens = 1024, temperature = 0.7, stream = false } = request;
+    const { model = DEFAULT_CF_MODEL, messages, max_tokens = 1024, temperature = 0.7, stream = false } = request;
 
     if (!messages || !Array.isArray(messages) || messages.length === 0) {
       return this.errorResponse(c, "messages array is required", 400);
@@ -185,128 +198,176 @@ export class CloudflareChat extends AIEndpoint {
     const tokenType = this.getTokenType(c);
     const x402 = c.var.x402;
 
-    try {
-      if (stream) {
-        // Streaming response
-        const response = await c.env.AI.run(model as Parameters<typeof c.env.AI.run>[0], {
-          messages,
-          max_tokens,
-          temperature,
-          stream: true,
-        });
+    /**
+     * Run a single AI inference call.
+     * Returns the raw AI binding result (streaming or non-streaming).
+     */
+    const runAI = (targetModel: string, isStream: boolean) =>
+      c.env.AI.run(targetModel as Parameters<typeof c.env.AI.run>[0], {
+        messages,
+        max_tokens,
+        temperature,
+        stream: isStream,
+      });
 
-        // Record usage after stream completes
+    /**
+     * Record usage in the Durable Object (fire-and-forget via waitUntil).
+     */
+    const recordUsage = (usedModel: string, durationMs: number) => {
+      if (x402?.payerAddress && c.env.USAGE_DO) {
         c.executionCtx.waitUntil(
           (async () => {
-            const durationMs = Date.now() - startTime;
-            if (x402?.payerAddress && c.env.USAGE_DO) {
-              try {
-                const usageDOId = c.env.USAGE_DO.idFromName(x402.payerAddress);
-                const usageDO = c.env.USAGE_DO.get(usageDOId);
-                const record: UsageRecord = {
-                  requestId: c.var.requestId,
-                  endpoint: "/inference/cloudflare/chat",
-                  category: "inference",
-                  payerAddress: x402.payerAddress,
-                  pricingType: "fixed",
-                  tier: "standard",
-                  amountCharged: Number(x402.priceEstimate?.amountInToken || 0),
-                  token: tokenType,
-                  model,
-                  durationMs,
-                };
-                await usageDO.recordUsage(record);
-              } catch (err) {
-                log.error("Failed to record usage", { error: String(err) });
-              }
+            try {
+              const usageDOId = c.env.USAGE_DO.idFromName(x402.payerAddress);
+              const usageDO = c.env.USAGE_DO.get(usageDOId);
+              const record: UsageRecord = {
+                requestId: c.var.requestId,
+                endpoint: "/inference/cloudflare/chat",
+                category: "inference",
+                payerAddress: x402.payerAddress,
+                pricingType: "fixed",
+                tier: "standard",
+                amountCharged: Number(x402.priceEstimate?.amountInToken || 0),
+                token: tokenType,
+                model: usedModel,
+                durationMs,
+              };
+              await usageDO.recordUsage(record);
+            } catch (err) {
+              log.error("Failed to record usage", { error: String(err) });
             }
           })()
         );
-
-        return new Response(response as unknown as ReadableStream, {
-          headers: {
-            "Content-Type": "text/event-stream",
-            "Cache-Control": "no-cache",
-            Connection: "keep-alive",
-          },
-        });
-      } else {
-        // Non-streaming response
-        const response = await c.env.AI.run(model as Parameters<typeof c.env.AI.run>[0], {
-          messages,
-          max_tokens,
-          temperature,
-          stream: false,
-        });
-
-        const durationMs = Date.now() - startTime;
-
-        // Record usage
-        if (x402?.payerAddress && c.env.USAGE_DO) {
-          c.executionCtx.waitUntil(
-            (async () => {
-              try {
-                const usageDOId = c.env.USAGE_DO.idFromName(x402.payerAddress);
-                const usageDO = c.env.USAGE_DO.get(usageDOId);
-                const record: UsageRecord = {
-                  requestId: c.var.requestId,
-                  endpoint: "/inference/cloudflare/chat",
-                  category: "inference",
-                  payerAddress: x402.payerAddress,
-                  pricingType: "fixed",
-                  tier: "standard",
-                  amountCharged: Number(x402.priceEstimate?.amountInToken || 0),
-                  token: tokenType,
-                  model,
-                  durationMs,
-                };
-                await usageDO.recordUsage(record);
-              } catch (err) {
-                log.error("Failed to record usage", { error: String(err) });
-              }
-            })()
-          );
-        }
-
-        // Extract response text
-        let responseText = "";
-        if (typeof response === "object" && response !== null) {
-          const aiResponse = response as { response?: string };
-          responseText = aiResponse.response || "";
-        }
-
-        log.info("Cloudflare AI chat completed", {
-          model,
-          durationMs,
-          responseLength: responseText.length,
-        });
-
-        return c.json({
-          ok: true,
-          model,
-          response: responseText,
-          tokenType,
-        });
       }
-    } catch (error) {
-      const classified = classifyCloudflareAIError(error);
+    };
 
-      log.error("Cloudflare AI chat error", {
-        model,
-        error: error instanceof Error ? error.message : String(error),
-        error_code: classified.error_code,
-        status: classified.status,
+    if (stream) {
+      // Streaming path — attempt primary model, fall back on timeout
+      let streamResponse: unknown;
+      let usedModel = model;
+
+      try {
+        streamResponse = await runAI(model, true);
+      } catch (primaryError) {
+        const classified = classifyCloudflareAIError(primaryError);
+
+        if (classified.error_code === "TIMEOUT" && model !== FALLBACK_CF_MODEL) {
+          log.warn("CF AI timeout on streaming request, retrying with fallback model", {
+            primaryModel: model,
+            fallbackModel: FALLBACK_CF_MODEL,
+          });
+          try {
+            streamResponse = await runAI(FALLBACK_CF_MODEL, true);
+            usedModel = FALLBACK_CF_MODEL;
+          } catch (fallbackError) {
+            const fbClassified = classifyCloudflareAIError(fallbackError);
+            log.error("CF AI fallback also failed for streaming", {
+              fallbackModel: FALLBACK_CF_MODEL,
+              error: fallbackError instanceof Error ? fallbackError.message : String(fallbackError),
+              error_code: fbClassified.error_code,
+            });
+            const extra: Record<string, unknown> = { error_code: fbClassified.error_code, retryable: fbClassified.retryable };
+            if (fbClassified.retry_after_seconds !== undefined) extra.retry_after_seconds = fbClassified.retry_after_seconds;
+            return this.errorResponse(c, fbClassified.message, fbClassified.status, extra);
+          }
+        } else {
+          log.error("Cloudflare AI streaming error", {
+            model,
+            error: primaryError instanceof Error ? primaryError.message : String(primaryError),
+            error_code: classified.error_code,
+          });
+          const extra: Record<string, unknown> = { error_code: classified.error_code, retryable: classified.retryable };
+          if (classified.retry_after_seconds !== undefined) extra.retry_after_seconds = classified.retry_after_seconds;
+          return this.errorResponse(c, classified.message, classified.status, extra);
+        }
+      }
+
+      // Record usage (model known after potential fallback)
+      const durationMs = Date.now() - startTime;
+      recordUsage(usedModel, durationMs);
+
+      const headers: Record<string, string> = {
+        "Content-Type": "text/event-stream",
+        "Cache-Control": "no-cache",
+        Connection: "keep-alive",
+      };
+      if (usedModel !== model) {
+        headers["X-Fallback-Model"] = usedModel;
+      }
+      return new Response(streamResponse as unknown as ReadableStream, { headers });
+    } else {
+      // Non-streaming path — attempt primary model, fall back on timeout
+      let aiResponse: unknown;
+      let usedModel = model;
+
+      try {
+        aiResponse = await runAI(model, false);
+      } catch (primaryError) {
+        const classified = classifyCloudflareAIError(primaryError);
+
+        if (classified.error_code === "TIMEOUT" && model !== FALLBACK_CF_MODEL) {
+          log.warn("CF AI timeout, retrying with fallback model", {
+            primaryModel: model,
+            fallbackModel: FALLBACK_CF_MODEL,
+          });
+          try {
+            aiResponse = await runAI(FALLBACK_CF_MODEL, false);
+            usedModel = FALLBACK_CF_MODEL;
+          } catch (fallbackError) {
+            const fbClassified = classifyCloudflareAIError(fallbackError);
+            log.error("CF AI fallback also failed", {
+              fallbackModel: FALLBACK_CF_MODEL,
+              error: fallbackError instanceof Error ? fallbackError.message : String(fallbackError),
+              error_code: fbClassified.error_code,
+            });
+            const extra: Record<string, unknown> = { error_code: fbClassified.error_code, retryable: fbClassified.retryable };
+            if (fbClassified.retry_after_seconds !== undefined) extra.retry_after_seconds = fbClassified.retry_after_seconds;
+            return this.errorResponse(c, fbClassified.message, fbClassified.status, extra);
+          }
+        } else {
+          log.error("Cloudflare AI chat error", {
+            model,
+            error: primaryError instanceof Error ? primaryError.message : String(primaryError),
+            error_code: classified.error_code,
+            status: classified.status,
+          });
+          const extra: Record<string, unknown> = { error_code: classified.error_code, retryable: classified.retryable };
+          if (classified.retry_after_seconds !== undefined) extra.retry_after_seconds = classified.retry_after_seconds;
+          return this.errorResponse(c, classified.message, classified.status, extra);
+        }
+      }
+
+      const durationMs = Date.now() - startTime;
+      recordUsage(usedModel, durationMs);
+
+      // Extract response text
+      let responseText = "";
+      if (typeof aiResponse === "object" && aiResponse !== null) {
+        const typed = aiResponse as { response?: string };
+        responseText = typed.response || "";
+      }
+
+      log.info("Cloudflare AI chat completed", {
+        model: usedModel,
+        primaryModel: usedModel !== model ? model : undefined,
+        fallbackUsed: usedModel !== model,
+        durationMs,
+        responseLength: responseText.length,
       });
 
-      const extra: Record<string, unknown> = {
-        error_code: classified.error_code,
-        retryable: classified.retryable,
+      const result: Record<string, unknown> = {
+        ok: true,
+        model,
+        response: responseText,
+        tokenType,
       };
-      if (classified.retry_after_seconds !== undefined) {
-        extra.retry_after_seconds = classified.retry_after_seconds;
+
+      // Surface fallback info to caller so they know which model actually served the request
+      if (usedModel !== model) {
+        result.fallback_model = usedModel;
       }
 
-      return this.errorResponse(c, classified.message, classified.status, extra);
+      return c.json(result);
     }
   }
 }
