@@ -36,7 +36,8 @@ function parseJsonField(value: unknown): Record<string, unknown> | null {
   if (!value) return null;
   try {
     return JSON.parse(value as string);
-  } catch {
+  } catch (e) {
+    console.warn('parseJsonField: failed to parse stored JSON value', e);
     return null;
   }
 }
@@ -50,7 +51,8 @@ function parseStringArray(value: unknown): string[] {
   try {
     const parsed = JSON.parse(value as string);
     return Array.isArray(parsed) ? parsed : [];
-  } catch {
+  } catch (e) {
+    console.warn('parseStringArray: failed to parse stored JSON array value', e);
     return [];
   }
 }
@@ -258,8 +260,9 @@ export class StorageDO extends DurableObject<Env> {
     const params: unknown[] = [];
 
     if (options?.prefix) {
-      query += " WHERE key LIKE ?";
-      params.push(`${options.prefix}%`);
+      query += " WHERE key LIKE ? ESCAPE '\\'";
+      const escapedPrefix = options.prefix.replace(/[%_\\]/g, '\\$&');
+      params.push(`${escapedPrefix}%`);
     }
     query += " ORDER BY key LIMIT ?";
     params.push(limit);
