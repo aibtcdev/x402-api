@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.5.4](https://github.com/aibtcdev/x402-api/compare/v1.5.3...v1.5.4) (2026-03-15)
+
+
+### Bug Fixes
+
+* **storage:** escape SQL wildcards in KV prefix queries, log parse errors ([#73](https://github.com/aibtcdev/x402-api/issues/73)) ([a3fcdb0](https://github.com/aibtcdev/x402-api/commit/a3fcdb0e32e0dfcef00088b24691fd11b5bdba40))
+
 ## [1.5.3](https://github.com/aibtcdev/x402-api/compare/v1.5.2...v1.5.3) (2026-03-12)
 
 
