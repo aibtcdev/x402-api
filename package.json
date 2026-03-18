@@ -25,7 +25,7 @@
     "@types/bun": "^1.2.0",
     "patch-package": "^8.0.1",
     "typescript": "^5.9.3",
-    "wrangler": "^4.58.0"
+    "wrangler": "^4.75.0"
   },
   "dependencies": {
     "@stacks/encryption": "^7.3.1",
