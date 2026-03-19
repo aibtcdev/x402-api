@@ -111,18 +111,56 @@ const DEFAULT_MODEL_PRICING: ModelPricing = {
 // Token Exchange Rates
 // =============================================================================
 
+/** Fallback STX/USD rate used when the live price feed is unavailable */
+const STX_FALLBACK_RATE = 0.50;
+
+/** TTL for the cached STX/USD rate (15 minutes) */
+const STX_PRICE_CACHE_TTL_MS = 15 * 60 * 1000;
+
+interface StxPriceCache {
+  rateUsd: number;
+  fetchedAt: number;
+}
+
+let stxPriceCache: StxPriceCache | null = null;
+
 /**
- * Token exchange rates (approximate, for converting USD to tokens)
- * Updated periodically based on market rates
- *
- * TODO: Replace STX rate with a dynamic price oracle (e.g., Bitflow STX/USD feed
- *       or Hiro API market data). The hardcoded rate causes pricing drift as STX
- *       market price moves. A live feed would ensure accurate USD-equivalent pricing.
+ * Fetch the live STX/USD rate from the Hiro market API and update TOKEN_RATES.
+ * Caches the result for 15 minutes. Falls back to the last cached value or
+ * STX_FALLBACK_RATE on fetch failure — never throws.
+ */
+export async function refreshStxRate(log?: Logger): Promise<void> {
+  const now = Date.now();
+  if (stxPriceCache && now - stxPriceCache.fetchedAt < STX_PRICE_CACHE_TTL_MS) {
+    return; // Cache still fresh
+  }
+
+  try {
+    const response = await fetch('https://api.hiro.so/extended/v1/market/stx/price');
+    if (!response.ok) throw new Error('HTTP ' + response.status);
+
+    const data = await response.json() as { price?: number | string };
+    const rate = typeof data.price === 'string' ? parseFloat(data.price) : Number(data.price);
+    if (!isFinite(rate) || rate <= 0) throw new Error('Invalid price value: ' + data.price);
+
+    stxPriceCache = { rateUsd: rate, fetchedAt: now };
+    TOKEN_RATES.STX = rate;
+    log?.debug?.('STX price updated', { rateUsd: rate });
+  } catch (err) {
+    const fallback = stxPriceCache?.rateUsd ?? STX_FALLBACK_RATE;
+    TOKEN_RATES.STX = fallback;
+    log?.warn?.('STX price fetch failed, using fallback rate', { error: String(err), rateUsd: fallback });
+  }
+}
+
+/**
+ * Token exchange rates (approximate, for converting USD to tokens).
+ * STX rate is kept current by refreshStxRate() — call it before pricing requests.
  */
 const TOKEN_RATES: Record<TokenType, number> = {
-  STX: 0.50,      // 1 STX ≈ $0.50 USD — hardcoded, see TODO above
-  sBTC: 100000,   // 1 sBTC ≈ $100,000 USD
-  USDCx: 1.0,     // 1 USDCx = $1 USD (Circle USDC via xReserve)
+  STX: STX_FALLBACK_RATE,   // Updated by refreshStxRate(); hardcoded fallback until first fetch
+  sBTC: 100000,              // 1 sBTC ≈ $100,000 USD
+  USDCx: 1.0,               // 1 USDCx = $1 USD (Circle USDC via xReserve)
 };
 
 // =============================================================================

@@ -15,6 +15,8 @@
 export interface ScanVerdict {
   /** Whether the content is considered safe */
   safe: boolean;
+  /** Whether the scan was actually performed (false if service was unavailable) */
+  scanned: boolean;
   /** Category flags triggered (empty if safe) */
   flags: string[];
   /** Model confidence in verdict, 0.0 to 1.0 */
@@ -71,6 +73,7 @@ Rules:
  */
 const DEFAULT_VERDICT: ScanVerdict = {
   safe: true,
+  scanned: false,
   flags: [],
   confidence: 0,
   reason: "scan_unavailable",
@@ -139,6 +142,7 @@ function parseVerdict(raw: string): ScanVerdict | null {
 
   return {
     safe,
+    scanned: true,
     flags: filteredFlags,
     confidence: clampedConfidence,
     reason: obj.reason.slice(0, 200),

@@ -34,6 +34,7 @@ import {
   validateTokenType,
   getFixedTierEstimate,
   estimateChatPayment,
+  refreshStxRate,
 } from "../services/pricing";
 import { lookupModel } from "../services/model-cache";
 import { getEndpointMetadata, buildBazaarExtension } from "../bazaar";
@@ -244,6 +245,9 @@ export function x402Middleware(
         if (!Array.isArray(chatRequest.messages) || chatRequest.messages.length === 0) {
           return c.json({ error: "Missing or invalid 'messages' field: must be a non-empty array", code: "invalid_request" }, 400);
         }
+
+        // Refresh STX price before estimation so rate reflects current market
+        await refreshStxRate(log);
 
         // Pre-payment model validation: reject unknown models before issuing 402
         if (c.env.OPENROUTER_API_KEY) {

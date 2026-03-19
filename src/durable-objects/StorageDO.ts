@@ -818,6 +818,12 @@ export class StorageDO extends DurableObject<Env> {
    * Retrieve a stored scan verdict by content id.
    * Returns null if no scan has been recorded for this id.
    */
+
+  /** Derive whether a real scan was performed from the stored reason field */
+  private static scannedFromReason(reason: string): boolean {
+    const unscannedReasons = new Set(['scan_unavailable', 'scan_error', 'parse_error', 'empty_response']);
+    return !unscannedReasons.has(reason);
+  }
   async scanGet(
     id: string,
     contentType: "paste" | "kv" | "memory"
@@ -832,11 +838,13 @@ export class StorageDO extends DurableObject<Env> {
     if (result.length === 0) return null;
 
     const row = result[0];
+    const reason = row.reason as string;
     return {
       safe: (row.safe as number) === 1,
+      scanned: StorageDO.scannedFromReason(reason),
       flags: parseStringArray(row.flags),
       confidence: row.confidence as number,
-      reason: row.reason as string,
+      reason,
       contentType: row.content_type as string,
       scannedAt: row.scanned_at as string,
     };
@@ -883,6 +891,7 @@ export class StorageDO extends DurableObject<Env> {
       contentType: row.content_type as string,
       verdict: {
         safe: (row.safe as number) === 1,
+        scanned: StorageDO.scannedFromReason(row.reason as string),
         flags: parseStringArray(row.flags),
         confidence: row.confidence as number,
         reason: row.reason as string,
