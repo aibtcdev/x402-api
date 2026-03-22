@@ -52,6 +52,163 @@ export interface StreamingResult {
 }
 
 // =============================================================================
+// Error Class
+// =============================================================================
+
+export class OpenRouterError extends Error {
+  public status: number;
+  public details?: string;
+  public retryable: boolean;
+
+  constructor(message: string, status: number, details?: string) {
+    super(message);
+    this.name = "OpenRouterError";
+    this.status = status;
+    this.details = details;
+    this.retryable = status >= 500 || status === 429;
+  }
+}
+
+// =============================================================================
+// Response Validators
+// =============================================================================
+
+/**
+ * Validates a models response from OpenRouter.
+ * Ensures .data is an array where each element has .id (string)
+ * and .pricing with .prompt and .completion strings.
+ */
+export function validateModelsResponse(data: unknown): asserts data is ModelsResponse {
+  if (typeof data !== "object" || data === null) {
+    throw new OpenRouterError(
+      "Invalid models response: expected an object",
+      502,
+      JSON.stringify(data).slice(0, 200)
+    );
+  }
+
+  const obj = data as Record<string, unknown>;
+
+  if (!Array.isArray(obj.data)) {
+    throw new OpenRouterError(
+      "Invalid models response: .data must be an array",
+      502,
+      JSON.stringify(data).slice(0, 200)
+    );
+  }
+
+  for (let i = 0; i < obj.data.length; i++) {
+    const model = obj.data[i] as Record<string, unknown>;
+
+    if (typeof model.id !== "string") {
+      throw new OpenRouterError(
+        `Invalid models response: model[${i}].id must be a string`,
+        502,
+        JSON.stringify(model).slice(0, 200)
+      );
+    }
+
+    if (typeof model.pricing !== "object" || model.pricing === null) {
+      throw new OpenRouterError(
+        `Invalid models response: model[${i}].pricing must be an object`,
+        502,
+        JSON.stringify(model).slice(0, 200)
+      );
+    }
+
+    const pricing = model.pricing as Record<string, unknown>;
+
+    if (typeof pricing.prompt !== "string") {
+      throw new OpenRouterError(
+        `Invalid models response: model[${i}].pricing.prompt must be a string`,
+        502,
+        JSON.stringify(model).slice(0, 200)
+      );
+    }
+
+    if (typeof pricing.completion !== "string") {
+      throw new OpenRouterError(
+        `Invalid models response: model[${i}].pricing.completion must be a string`,
+        502,
+        JSON.stringify(model).slice(0, 200)
+      );
+    }
+  }
+}
+
+/**
+ * Validates a chat completion response from OpenRouter.
+ * Ensures .choices is an array, and .usage (if present) has numeric fields.
+ */
+export function validateChatResponse(data: unknown): asserts data is ChatCompletionResponse {
+  if (typeof data !== "object" || data === null) {
+    throw new OpenRouterError(
+      "Invalid chat response: expected an object",
+      502,
+      JSON.stringify(data).slice(0, 200)
+    );
+  }
+
+  const obj = data as Record<string, unknown>;
+
+  if (!Array.isArray(obj.choices)) {
+    throw new OpenRouterError(
+      "Invalid chat response: .choices must be an array",
+      502,
+      JSON.stringify(data).slice(0, 200)
+    );
+  }
+
+  if (obj.usage !== undefined && obj.usage !== null) {
+    const usage = obj.usage as Record<string, unknown>;
+
+    if (
+      typeof usage.prompt_tokens !== "number" ||
+      typeof usage.completion_tokens !== "number" ||
+      typeof usage.total_tokens !== "number"
+    ) {
+      throw new OpenRouterError(
+        "Invalid chat response: .usage fields must be numbers",
+        502,
+        JSON.stringify(obj.usage).slice(0, 200)
+      );
+    }
+  }
+}
+
+/**
+ * Validates a streaming chunk from OpenRouter.
+ * Ensures .usage (if present) has numeric token fields.
+ */
+export function validateStreamChunk(chunk: unknown): asserts chunk is StreamingChunk {
+  if (typeof chunk !== "object" || chunk === null) {
+    throw new OpenRouterError(
+      "Invalid stream chunk: expected an object",
+      502,
+      JSON.stringify(chunk).slice(0, 200)
+    );
+  }
+
+  const obj = chunk as Record<string, unknown>;
+
+  if (obj.usage !== undefined && obj.usage !== null) {
+    const usage = obj.usage as Record<string, unknown>;
+
+    if (
+      typeof usage.prompt_tokens !== "number" ||
+      typeof usage.completion_tokens !== "number" ||
+      typeof usage.total_tokens !== "number"
+    ) {
+      throw new OpenRouterError(
+        "Invalid stream chunk: .usage fields must be numbers",
+        502,
+        JSON.stringify(obj.usage).slice(0, 200)
+      );
+    }
+  }
+}
+
+// =============================================================================
 // OpenRouter Client
 // =============================================================================
 
@@ -102,6 +259,7 @@ export class OpenRouterClient {
     }
 
     const data = (await response.json()) as ModelsResponse;
+    validateModelsResponse(data);
     this.log.debug("Models fetched successfully", { count: data.data.length });
 
     return data;
@@ -141,6 +299,7 @@ export class OpenRouterClient {
     }
 
     const data = (await response.json()) as ChatCompletionResponse;
+    validateChatResponse(data);
     const usage = this.extractUsage(data, request.model);
 
     this.log.info("Chat completion successful", {
@@ -277,6 +436,7 @@ export class OpenRouterClient {
 
                 try {
                   const chunk = JSON.parse(data) as StreamingChunk;
+                  validateStreamChunk(chunk);
 
                   if (chunk.usage) {
                     const usage: UsageInfo = {
@@ -292,8 +452,11 @@ export class OpenRouterClient {
                     };
                     onUsage(usage);
                   }
-                } catch {
-                  log.debug("Could not parse SSE chunk", { data });
+                } catch (chunkError) {
+                  log.debug("Could not parse or validate SSE chunk", {
+                    data,
+                    error: chunkError instanceof Error ? chunkError.message : String(chunkError),
+                  });
                 }
               }
             }
@@ -337,23 +500,5 @@ export class OpenRouterClient {
       totalTokens: usage.total_tokens,
       estimatedCostUsd,
     };
-  }
-}
-
-// =============================================================================
-// Error Class
-// =============================================================================
-
-export class OpenRouterError extends Error {
-  public status: number;
-  public details?: string;
-  public retryable: boolean;
-
-  constructor(message: string, status: number, details?: string) {
-    super(message);
-    this.name = "OpenRouterError";
-    this.status = status;
-    this.details = details;
-    this.retryable = status >= 500 || status === 429;
   }
 }
