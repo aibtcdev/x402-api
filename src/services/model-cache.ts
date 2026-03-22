@@ -106,15 +106,9 @@ async function doRefresh(apiKey: string, logger: Logger): Promise<void> {
 
   try {
     const client = new OpenRouterClient(apiKey, logger);
+    // getModels() runs validateModelsResponse() which guarantees .data is an
+    // array and every model has .id (string) and .pricing with string fields.
     const modelsResponse = await client.getModels(controller.signal);
-
-    // Belt-and-suspenders guard: Phase 1 validator inside getModels() ensures
-    // .data is an array, but guard locally so cache refresh is resilient to any
-    // future changes in the validator contract.
-    if (!Array.isArray(modelsResponse.data)) {
-      logger.warn("Model cache: modelsResponse.data is not an array — skipping cache update");
-      return;
-    }
 
     modelRegistry.clear();
 

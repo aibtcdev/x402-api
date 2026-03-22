@@ -22,6 +22,31 @@ import {
 // Helpers
 // ---------------------------------------------------------------------------
 
+/**
+ * Calls `fn` and asserts it throws an OpenRouterError with the expected
+ * status and (optionally) a message substring. Returns the caught error
+ * for additional assertions if needed.
+ */
+function expectOpenRouterError(
+  fn: () => void,
+  status: number,
+  messageSubstring?: string
+): OpenRouterError {
+  expect(fn).toThrow(OpenRouterError);
+  try {
+    fn();
+    throw new Error("Expected OpenRouterError but fn did not throw");
+  } catch (err) {
+    expect(err).toBeInstanceOf(OpenRouterError);
+    const orErr = err as OpenRouterError;
+    expect(orErr.status).toBe(status);
+    if (messageSubstring) {
+      expect(orErr.message).toContain(messageSubstring);
+    }
+    return orErr;
+  }
+}
+
 /** Minimal valid model entry satisfying the ModelsResponse shape */
 function makeValidModel(id = "openai/gpt-4o") {
   return {
@@ -105,94 +130,38 @@ describe("validateModelsResponse", () => {
   });
 
   test("non-object input throws OpenRouterError with status 502", () => {
-    expect(() => validateModelsResponse("not an object")).toThrow(OpenRouterError);
-    try {
-      validateModelsResponse("not an object");
-    } catch (err) {
-      expect(err).toBeInstanceOf(OpenRouterError);
-      expect((err as OpenRouterError).status).toBe(502);
-    }
+    expectOpenRouterError(() => validateModelsResponse("not an object"), 502);
   });
 
   test("null input throws OpenRouterError with status 502", () => {
-    expect(() => validateModelsResponse(null)).toThrow(OpenRouterError);
-    try {
-      validateModelsResponse(null);
-    } catch (err) {
-      expect((err as OpenRouterError).status).toBe(502);
-    }
+    expectOpenRouterError(() => validateModelsResponse(null), 502);
   });
 
   test("missing .data field throws OpenRouterError", () => {
-    expect(() => validateModelsResponse({ models: [] })).toThrow(OpenRouterError);
-    try {
-      validateModelsResponse({ models: [] });
-    } catch (err) {
-      expect(err).toBeInstanceOf(OpenRouterError);
-      expect((err as OpenRouterError).message).toContain(".data must be an array");
-      expect((err as OpenRouterError).status).toBe(502);
-    }
+    expectOpenRouterError(() => validateModelsResponse({ models: [] }), 502, ".data must be an array");
   });
 
   test("non-array .data throws OpenRouterError", () => {
-    expect(() => validateModelsResponse({ data: "not-an-array" })).toThrow(OpenRouterError);
-    try {
-      validateModelsResponse({ data: "not-an-array" });
-    } catch (err) {
-      expect(err).toBeInstanceOf(OpenRouterError);
-      expect((err as OpenRouterError).message).toContain(".data must be an array");
-    }
+    expectOpenRouterError(() => validateModelsResponse({ data: "not-an-array" }), 502, ".data must be an array");
   });
 
   test("model with missing .pricing throws OpenRouterError", () => {
-    const data = { data: [{ id: "openai/gpt-4o" }] };
-    expect(() => validateModelsResponse(data)).toThrow(OpenRouterError);
-    try {
-      validateModelsResponse(data);
-    } catch (err) {
-      expect(err).toBeInstanceOf(OpenRouterError);
-      expect((err as OpenRouterError).message).toContain(".pricing must be an object");
-      expect((err as OpenRouterError).status).toBe(502);
-    }
+    expectOpenRouterError(() => validateModelsResponse({ data: [{ id: "openai/gpt-4o" }] }), 502, ".pricing must be an object");
   });
 
   test("model with missing pricing.prompt throws OpenRouterError", () => {
-    const data = {
-      data: [{ id: "openai/gpt-4o", pricing: { completion: "0.000015" } }],
-    };
-    expect(() => validateModelsResponse(data)).toThrow(OpenRouterError);
-    try {
-      validateModelsResponse(data);
-    } catch (err) {
-      expect(err).toBeInstanceOf(OpenRouterError);
-      expect((err as OpenRouterError).message).toContain("pricing.prompt must be a string");
-    }
+    const data = { data: [{ id: "openai/gpt-4o", pricing: { completion: "0.000015" } }] };
+    expectOpenRouterError(() => validateModelsResponse(data), 502, "pricing.prompt must be a string");
   });
 
   test("model with missing pricing.completion throws OpenRouterError", () => {
-    const data = {
-      data: [{ id: "openai/gpt-4o", pricing: { prompt: "0.000005" } }],
-    };
-    expect(() => validateModelsResponse(data)).toThrow(OpenRouterError);
-    try {
-      validateModelsResponse(data);
-    } catch (err) {
-      expect(err).toBeInstanceOf(OpenRouterError);
-      expect((err as OpenRouterError).message).toContain("pricing.completion must be a string");
-    }
+    const data = { data: [{ id: "openai/gpt-4o", pricing: { prompt: "0.000005" } }] };
+    expectOpenRouterError(() => validateModelsResponse(data), 502, "pricing.completion must be a string");
   });
 
   test("model with missing .id throws OpenRouterError", () => {
-    const data = {
-      data: [{ name: "No ID Model", pricing: { prompt: "0.0001", completion: "0.0002" } }],
-    };
-    expect(() => validateModelsResponse(data)).toThrow(OpenRouterError);
-    try {
-      validateModelsResponse(data);
-    } catch (err) {
-      expect(err).toBeInstanceOf(OpenRouterError);
-      expect((err as OpenRouterError).message).toContain(".id must be a string");
-    }
+    const data = { data: [{ name: "No ID Model", pricing: { prompt: "0.0001", completion: "0.0002" } }] };
+    expectOpenRouterError(() => validateModelsResponse(data), 502, ".id must be a string");
   });
 });
 
@@ -218,77 +187,35 @@ describe("validateChatResponse", () => {
   });
 
   test("non-object input throws OpenRouterError with status 502", () => {
-    expect(() => validateChatResponse(42)).toThrow(OpenRouterError);
-    try {
-      validateChatResponse(42);
-    } catch (err) {
-      expect(err).toBeInstanceOf(OpenRouterError);
-      expect((err as OpenRouterError).status).toBe(502);
-    }
+    expectOpenRouterError(() => validateChatResponse(42), 502);
   });
 
   test("null input throws OpenRouterError with status 502", () => {
-    expect(() => validateChatResponse(null)).toThrow(OpenRouterError);
+    expectOpenRouterError(() => validateChatResponse(null), 502);
   });
 
   test("missing .choices field throws OpenRouterError", () => {
     const data = { id: "chatcmpl-abc", usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 } };
-    expect(() => validateChatResponse(data)).toThrow(OpenRouterError);
-    try {
-      validateChatResponse(data);
-    } catch (err) {
-      expect(err).toBeInstanceOf(OpenRouterError);
-      expect((err as OpenRouterError).message).toContain(".choices must be an array");
-      expect((err as OpenRouterError).status).toBe(502);
-    }
+    expectOpenRouterError(() => validateChatResponse(data), 502, ".choices must be an array");
   });
 
   test("non-array .choices throws OpenRouterError", () => {
-    const data = { id: "chatcmpl-abc", choices: "not-an-array" };
-    expect(() => validateChatResponse(data)).toThrow(OpenRouterError);
-    try {
-      validateChatResponse(data);
-    } catch (err) {
-      expect(err).toBeInstanceOf(OpenRouterError);
-      expect((err as OpenRouterError).message).toContain(".choices must be an array");
-    }
+    expectOpenRouterError(() => validateChatResponse({ id: "chatcmpl-abc", choices: "not-an-array" }), 502, ".choices must be an array");
   });
 
   test("non-numeric .usage.prompt_tokens throws OpenRouterError", () => {
-    const data = {
-      choices: [],
-      usage: { prompt_tokens: "ten", completion_tokens: 5, total_tokens: 15 },
-    };
-    expect(() => validateChatResponse(data)).toThrow(OpenRouterError);
-    try {
-      validateChatResponse(data);
-    } catch (err) {
-      expect(err).toBeInstanceOf(OpenRouterError);
-      expect((err as OpenRouterError).message).toContain(".usage fields must be numbers");
-      expect((err as OpenRouterError).status).toBe(502);
-    }
+    const data = { choices: [], usage: { prompt_tokens: "ten", completion_tokens: 5, total_tokens: 15 } };
+    expectOpenRouterError(() => validateChatResponse(data), 502, ".usage fields must be numbers");
   });
 
   test("non-numeric .usage.completion_tokens throws OpenRouterError", () => {
-    const data = {
-      choices: [],
-      usage: { prompt_tokens: 10, completion_tokens: null, total_tokens: 15 },
-    };
-    expect(() => validateChatResponse(data)).toThrow(OpenRouterError);
-    try {
-      validateChatResponse(data);
-    } catch (err) {
-      expect(err).toBeInstanceOf(OpenRouterError);
-      expect((err as OpenRouterError).message).toContain(".usage fields must be numbers");
-    }
+    const data = { choices: [], usage: { prompt_tokens: 10, completion_tokens: null, total_tokens: 15 } };
+    expectOpenRouterError(() => validateChatResponse(data), 502, ".usage fields must be numbers");
   });
 
   test("non-numeric .usage.total_tokens throws OpenRouterError", () => {
-    const data = {
-      choices: [],
-      usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: "fifteen" },
-    };
-    expect(() => validateChatResponse(data)).toThrow(OpenRouterError);
+    const data = { choices: [], usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: "fifteen" } };
+    expectOpenRouterError(() => validateChatResponse(data), 502, ".usage fields must be numbers");
   });
 });
 
@@ -311,48 +238,26 @@ describe("validateStreamChunk", () => {
   });
 
   test("non-object input throws OpenRouterError with status 502", () => {
-    expect(() => validateStreamChunk("not-an-object")).toThrow(OpenRouterError);
-    try {
-      validateStreamChunk("not-an-object");
-    } catch (err) {
-      expect(err).toBeInstanceOf(OpenRouterError);
-      expect((err as OpenRouterError).status).toBe(502);
-    }
+    expectOpenRouterError(() => validateStreamChunk("not-an-object"), 502);
   });
 
   test("null input throws OpenRouterError", () => {
-    expect(() => validateStreamChunk(null)).toThrow(OpenRouterError);
+    expectOpenRouterError(() => validateStreamChunk(null), 502);
   });
 
   test("non-numeric .usage.prompt_tokens throws OpenRouterError", () => {
-    const chunk = {
-      ...makeValidStreamChunk(false),
-      usage: { prompt_tokens: "ten", completion_tokens: 5, total_tokens: 15 },
-    };
-    expect(() => validateStreamChunk(chunk)).toThrow(OpenRouterError);
-    try {
-      validateStreamChunk(chunk);
-    } catch (err) {
-      expect(err).toBeInstanceOf(OpenRouterError);
-      expect((err as OpenRouterError).message).toContain(".usage fields must be numbers");
-      expect((err as OpenRouterError).status).toBe(502);
-    }
+    const chunk = { ...makeValidStreamChunk(false), usage: { prompt_tokens: "ten", completion_tokens: 5, total_tokens: 15 } };
+    expectOpenRouterError(() => validateStreamChunk(chunk), 502, ".usage fields must be numbers");
   });
 
   test("non-numeric .usage.completion_tokens throws OpenRouterError", () => {
-    const chunk = {
-      ...makeValidStreamChunk(false),
-      usage: { prompt_tokens: 10, completion_tokens: false, total_tokens: 15 },
-    };
-    expect(() => validateStreamChunk(chunk)).toThrow(OpenRouterError);
+    const chunk = { ...makeValidStreamChunk(false), usage: { prompt_tokens: 10, completion_tokens: false, total_tokens: 15 } };
+    expectOpenRouterError(() => validateStreamChunk(chunk), 502, ".usage fields must be numbers");
   });
 
   test("non-numeric .usage.total_tokens throws OpenRouterError", () => {
-    const chunk = {
-      ...makeValidStreamChunk(false),
-      usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: undefined },
-    };
-    expect(() => validateStreamChunk(chunk)).toThrow(OpenRouterError);
+    const chunk = { ...makeValidStreamChunk(false), usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: undefined } };
+    expectOpenRouterError(() => validateStreamChunk(chunk), 502, ".usage fields must be numbers");
   });
 
   test("chunk with all numeric usage fields passes", () => {

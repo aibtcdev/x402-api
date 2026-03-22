@@ -137,6 +137,27 @@ export function validateModelsResponse(data: unknown): asserts data is ModelsRes
 }
 
 /**
+ * Validates that a .usage object (if present) has numeric token fields.
+ * Shared by chat response and stream chunk validators.
+ */
+function validateUsageFields(usage: unknown, context: string): void {
+  if (usage === undefined || usage === null) return;
+
+  const u = usage as Record<string, unknown>;
+  if (
+    typeof u.prompt_tokens !== "number" ||
+    typeof u.completion_tokens !== "number" ||
+    typeof u.total_tokens !== "number"
+  ) {
+    throw new OpenRouterError(
+      `Invalid ${context}: .usage fields must be numbers`,
+      502,
+      JSON.stringify(usage).slice(0, 200)
+    );
+  }
+}
+
+/**
  * Validates a chat completion response from OpenRouter.
  * Ensures .choices is an array, and .usage (if present) has numeric fields.
  */
@@ -159,21 +180,7 @@ export function validateChatResponse(data: unknown): asserts data is ChatComplet
     );
   }
 
-  if (obj.usage !== undefined && obj.usage !== null) {
-    const usage = obj.usage as Record<string, unknown>;
-
-    if (
-      typeof usage.prompt_tokens !== "number" ||
-      typeof usage.completion_tokens !== "number" ||
-      typeof usage.total_tokens !== "number"
-    ) {
-      throw new OpenRouterError(
-        "Invalid chat response: .usage fields must be numbers",
-        502,
-        JSON.stringify(obj.usage).slice(0, 200)
-      );
-    }
-  }
+  validateUsageFields(obj.usage, "chat response");
 }
 
 /**
@@ -189,23 +196,7 @@ export function validateStreamChunk(chunk: unknown): asserts chunk is StreamingC
     );
   }
 
-  const obj = chunk as Record<string, unknown>;
-
-  if (obj.usage !== undefined && obj.usage !== null) {
-    const usage = obj.usage as Record<string, unknown>;
-
-    if (
-      typeof usage.prompt_tokens !== "number" ||
-      typeof usage.completion_tokens !== "number" ||
-      typeof usage.total_tokens !== "number"
-    ) {
-      throw new OpenRouterError(
-        "Invalid stream chunk: .usage fields must be numbers",
-        502,
-        JSON.stringify(obj.usage).slice(0, 200)
-      );
-    }
-  }
+  validateUsageFields((chunk as Record<string, unknown>).usage, "stream chunk");
 }
 
 // =============================================================================
