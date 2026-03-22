@@ -8,6 +8,7 @@
 import { BaseEndpoint } from "../../base";
 import { OpenRouterClient, OpenRouterError } from "../../../services/openrouter";
 import { logPnL } from "../../../services/pricing";
+import { lookupModel, getSimilarModels } from "../../../services/model-cache";
 import { tokenTypeParam } from "../../schema";
 import type { AppContext, ChatCompletionRequest, UsageRecord } from "../../../types";
 
@@ -128,6 +129,27 @@ export class OpenRouterChat extends BaseEndpoint {
       return this.errorResponse(c, "model and messages are required", 400);
     }
 
+    // Belt-and-suspenders model validation: middleware handles the primary rejection
+    // pre-payment, but validate again here in case the cache was degraded at that time
+    // and has since been populated, or in case the middleware was bypassed.
+    const modelResult = await lookupModel(request.model, c.env.OPENROUTER_API_KEY, log);
+    if (modelResult.valid && modelResult.degraded) {
+      log.warn("Model cache degraded at chat handler — cannot confirm model validity", {
+        model: request.model,
+      });
+    } else if (!modelResult.valid) {
+      const suggestions = getSimilarModels(request.model, 3);
+      return c.json(
+        {
+          error: modelResult.error,
+          code: "invalid_model",
+          model: request.model,
+          ...(suggestions.length > 0 ? { suggestions } : {}),
+        },
+        400
+      );
+    }
+
     const client = new OpenRouterClient(c.env.OPENROUTER_API_KEY, log);
 
     try {
@@ -188,6 +210,23 @@ export class OpenRouterChat extends BaseEndpoint {
         // Non-streaming response
         const { response, usage } = await client.createChatCompletion(request);
         const durationMs = Date.now() - startTime;
+
+        // validateChatResponse guarantees .choices is an array, but it may be empty.
+        if (response.choices.length === 0) {
+          log.error("OpenRouter returned no choices", {
+            model: response.model || request.model,
+          });
+          return this.errorResponse(c, "OpenRouter returned no choices", 502);
+        }
+
+        // Log a warning if the first choice has empty content (valid but unexpected).
+        const firstChoice = response.choices[0];
+        if (firstChoice?.message?.content === "") {
+          log.warn("OpenRouter returned empty content in first choice", {
+            model: response.model || request.model,
+            finishReason: firstChoice.finish_reason,
+          });
+        }
 
         // Log PnL
         if (x402.priceEstimate) {
