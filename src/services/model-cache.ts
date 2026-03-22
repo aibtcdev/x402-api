@@ -93,9 +93,29 @@ async function doRefresh(apiKey: string, logger: Logger): Promise<void> {
     const client = new OpenRouterClient(apiKey, logger);
     const modelsResponse = await client.getModels(controller.signal);
 
+    // Belt-and-suspenders guard: Phase 1 validator inside getModels() ensures
+    // .data is an array, but guard locally so cache refresh is resilient to any
+    // future changes in the validator contract.
+    if (!Array.isArray(modelsResponse.data)) {
+      logger.warn("Model cache: modelsResponse.data is not an array — skipping cache update");
+      return;
+    }
+
     modelRegistry.clear();
 
     for (const model of modelsResponse.data) {
+      // Guard each model's pricing individually before parseFloat().
+      // A single malformed model should not abort the entire cache refresh.
+      if (
+        typeof model.pricing !== "object" ||
+        model.pricing === null ||
+        typeof model.pricing.prompt !== "string" ||
+        typeof model.pricing.completion !== "string"
+      ) {
+        logger.debug("Model cache: skipping model with invalid pricing", { modelId: model.id });
+        continue;
+      }
+
       // OpenRouter returns per-token prices as strings (e.g., "0.000003")
       // Convert to per-1K numbers
       const promptPer1k = parseFloat(model.pricing.prompt) * 1000;
