@@ -189,6 +189,30 @@ export class OpenRouterChat extends BaseEndpoint {
         const { response, usage } = await client.createChatCompletion(request);
         const durationMs = Date.now() - startTime;
 
+        // Guard: response.choices must be a non-empty array.
+        // An empty choices array means the model returned no completion.
+        if (!Array.isArray(response.choices) || response.choices.length === 0) {
+          log.error("OpenRouter returned no choices", {
+            model: response.model || request.model,
+            hasChoices: Array.isArray(response.choices),
+            choicesLength: Array.isArray(response.choices) ? response.choices.length : 0,
+          });
+          return this.errorResponse(c, "OpenRouter returned no choices", 502);
+        }
+
+        // Log a warning if the first choice has empty content (valid but unexpected).
+        const firstChoice = response.choices[0];
+        if (
+          firstChoice?.message?.content !== undefined &&
+          firstChoice.message.content !== null &&
+          firstChoice.message.content === ""
+        ) {
+          log.warn("OpenRouter returned empty content in first choice", {
+            model: response.model || request.model,
+            finishReason: firstChoice.finish_reason,
+          });
+        }
+
         // Log PnL
         if (x402.priceEstimate) {
           logPnL(
