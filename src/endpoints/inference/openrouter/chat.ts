@@ -8,6 +8,7 @@
 import { BaseEndpoint } from "../../base";
 import { OpenRouterClient, OpenRouterError } from "../../../services/openrouter";
 import { logPnL } from "../../../services/pricing";
+import { lookupModel, getSimilarModels } from "../../../services/model-cache";
 import { tokenTypeParam } from "../../schema";
 import type { AppContext, ChatCompletionRequest, UsageRecord } from "../../../types";
 
@@ -126,6 +127,27 @@ export class OpenRouterChat extends BaseEndpoint {
     const request = x402.parsedBody as ChatCompletionRequest;
     if (!request?.model || !request?.messages) {
       return this.errorResponse(c, "model and messages are required", 400);
+    }
+
+    // Belt-and-suspenders model validation: middleware handles the primary rejection
+    // pre-payment, but validate again here in case the cache was degraded at that time
+    // and has since been populated, or in case the middleware was bypassed.
+    const modelResult = await lookupModel(request.model, c.env.OPENROUTER_API_KEY, log);
+    if (modelResult.valid && modelResult.degraded) {
+      log.warn("Model cache degraded at chat handler — cannot confirm model validity", {
+        model: request.model,
+      });
+    } else if (!modelResult.valid) {
+      const suggestions = getSimilarModels(request.model, 3);
+      return c.json(
+        {
+          error: modelResult.error,
+          code: "invalid_model",
+          model: request.model,
+          ...(suggestions.length > 0 ? { suggestions } : {}),
+        },
+        400
+      );
     }
 
     const client = new OpenRouterClient(c.env.OPENROUTER_API_KEY, log);
