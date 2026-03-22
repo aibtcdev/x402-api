@@ -64,16 +64,39 @@ export class OpenRouterListModels extends FreeEndpoint {
     try {
       const response = await client.getModels();
 
-      const models = response.data.map((model) => ({
-        id: model.id,
-        name: model.name,
-        description: model.description,
-        contextLength: model.context_length,
-        pricing: {
-          prompt: model.pricing.prompt,
-          completion: model.pricing.completion,
-        },
-      }));
+      // Belt-and-suspenders guard: Phase 1 validator ensures .data is an array,
+      // but guard defensively in case the validator contract ever changes.
+      if (!Array.isArray(response.data)) {
+        log.warn("OpenRouter models response missing .data array");
+        return c.json({ ok: true, models: [], count: 0 });
+      }
+
+      const models = response.data
+        .map((model) => {
+          // Guard model.pricing before accessing .prompt/.completion.
+          // Skip models with missing or invalid pricing rather than crashing.
+          if (
+            typeof model.pricing !== "object" ||
+            model.pricing === null ||
+            typeof model.pricing.prompt !== "string" ||
+            typeof model.pricing.completion !== "string"
+          ) {
+            log.debug("Skipping model with invalid pricing", { modelId: model.id });
+            return null;
+          }
+
+          return {
+            id: model.id,
+            name: model.name,
+            description: model.description,
+            contextLength: model.context_length,
+            pricing: {
+              prompt: model.pricing.prompt,
+              completion: model.pricing.completion,
+            },
+          };
+        })
+        .filter((m): m is NonNullable<typeof m> => m !== null);
 
       return c.json({
         ok: true,
