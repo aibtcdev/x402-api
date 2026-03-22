@@ -26,8 +26,23 @@ const FETCH_TIMEOUT_MS = 3_000;
 
 /** Discriminated union result from lookupModel */
 export type ModelLookupResult =
-  | { valid: true; pricing?: ModelPricing }
+  | { valid: true; pricing?: ModelPricing; degraded?: true }
   | { valid: false; error: string };
+
+/** Cache state reported by getCacheStatus() */
+export type CacheState = "warm" | "cold" | "degraded";
+
+/** Cache status returned by getCacheStatus() */
+export interface CacheStatus {
+  /** warm = populated and fresh; cold = never fetched or empty; degraded = last fetch failed */
+  state: CacheState;
+  /** Number of models currently in the registry */
+  modelCount: number;
+  /** Timestamp (ms since epoch) of the last successful fetch, or null if never fetched */
+  lastRefreshed: number | null;
+  /** Timestamp (ms since epoch) of the last failed fetch attempt, or null if no failures */
+  lastFailedAt: number | null;
+}
 
 // =============================================================================
 // Module-level Cache
@@ -148,6 +163,76 @@ async function doRefresh(apiKey: string, logger: Logger): Promise<void> {
 // =============================================================================
 
 /**
+ * Returns the current cache state without triggering a refresh.
+ *
+ * States:
+ *   "warm"     — registry populated and TTL not expired
+ *   "cold"     — never fetched successfully (fetchedAt is null) or registry is empty with no prior failure
+ *   "degraded" — last fetch attempt failed and registry may be empty or stale
+ */
+export function getCacheStatus(): CacheStatus {
+  const modelCount = modelRegistry.size;
+
+  let state: CacheState;
+
+  if (lastFailedAt !== null && (modelCount === 0 || (fetchedAt !== null && Date.now() - fetchedAt > CACHE_TTL_MS))) {
+    state = "degraded";
+  } else if (fetchedAt !== null && modelCount > 0 && Date.now() - fetchedAt <= CACHE_TTL_MS) {
+    state = "warm";
+  } else {
+    state = "cold";
+  }
+
+  return {
+    state,
+    modelCount,
+    lastRefreshed: fetchedAt,
+    lastFailedAt,
+  };
+}
+
+/**
+ * Find model IDs in the registry that are similar to the given model ID.
+ *
+ * Similarity strategy:
+ *   1. If modelId contains "/", try to match other models with the same provider prefix.
+ *   2. If no prefix matches found, fall back to lexicographic prefix match on the full ID.
+ *   3. Returns at most maxResults results.
+ */
+export function getSimilarModels(modelId: string, maxResults = 3): string[] {
+  if (modelRegistry.size === 0) {
+    return [];
+  }
+
+  const allModels = Array.from(modelRegistry.keys()).sort();
+
+  // Try provider prefix match (e.g., "openai/" from "openai/gpt-4o")
+  const slashIdx = modelId.indexOf("/");
+  if (slashIdx !== -1) {
+    const providerPrefix = modelId.slice(0, slashIdx + 1);
+    const providerMatches = allModels.filter(
+      (id) => id.startsWith(providerPrefix) && id !== modelId
+    );
+    if (providerMatches.length > 0) {
+      return providerMatches.slice(0, maxResults);
+    }
+  }
+
+  // Fall back: full-string prefix match (e.g., "gpt" matches "gpt-4")
+  const prefixLen = Math.max(3, Math.floor(modelId.length / 2));
+  const prefix = modelId.slice(0, prefixLen).toLowerCase();
+  const prefixMatches = allModels.filter(
+    (id) => id.toLowerCase().startsWith(prefix) && id !== modelId
+  );
+  if (prefixMatches.length > 0) {
+    return prefixMatches.slice(0, maxResults);
+  }
+
+  // No structural match — return first maxResults models as fallback hints
+  return allModels.filter((id) => id !== modelId).slice(0, maxResults);
+}
+
+/**
  * Look up a model by ID, refreshing the cache if stale.
  *
  * Returns a discriminated union:
@@ -167,10 +252,10 @@ export async function lookupModel(
     await refreshCache(apiKey, logger);
   }
 
-  // If the cache is still empty (e.g., fetch failed), be permissive
+  // If the cache is still empty (e.g., fetch failed), be permissive but signal degraded state
   if (modelRegistry.size === 0) {
-    logger.debug("Model cache empty after refresh attempt -- allowing request", { modelId });
-    return { valid: true };
+    logger.debug("Model cache empty after refresh attempt -- allowing request (degraded)", { modelId });
+    return { valid: true, degraded: true };
   }
 
   const cached = modelRegistry.get(modelId);
