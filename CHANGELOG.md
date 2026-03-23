@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.6.0](https://github.com/aibtcdev/x402-api/compare/v1.5.4...v1.6.0) (2026-03-23)
+
+
+### Features
+
+* **openrouter:** add response validation and harden error handling ([#81](https://github.com/aibtcdev/x402-api/issues/81)) ([06fd2bc](https://github.com/aibtcdev/x402-api/commit/06fd2bca25d33ce33a8d16c587c523535e055e77))
+
 ## [1.5.4](https://github.com/aibtcdev/x402-api/compare/v1.5.3...v1.5.4) (2026-03-15)
 
 
