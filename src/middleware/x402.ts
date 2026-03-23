@@ -248,8 +248,16 @@ export function x402Middleware(
         // Pre-payment model validation: reject unknown models before issuing 402
         if (c.env.OPENROUTER_API_KEY) {
           const modelResult = await lookupModel(chatRequest.model, c.env.OPENROUTER_API_KEY, log);
-          if (!modelResult.valid) {
-            return c.json({ error: modelResult.error, code: "invalid_model" }, 400);
+          if (modelResult.valid && modelResult.degraded) {
+            // Cache was empty after refresh attempt — allow the request but warn operators
+            log.warn("Model cache degraded at middleware — skipping pre-payment model validation", {
+              model: chatRequest.model,
+            });
+          } else if (!modelResult.valid) {
+            return c.json(
+              { error: modelResult.error, code: "invalid_model", model: chatRequest.model },
+              400
+            );
           }
           // Use live registry pricing if available, otherwise fall through to hardcoded table
           priceEstimate = estimateChatPayment(chatRequest, tokenType, log, modelResult.pricing);

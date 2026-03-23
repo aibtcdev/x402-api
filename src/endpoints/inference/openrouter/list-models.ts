@@ -62,6 +62,8 @@ export class OpenRouterListModels extends FreeEndpoint {
     const client = new OpenRouterClient(c.env.OPENROUTER_API_KEY, log);
 
     try {
+      // getModels() runs validateModelsResponse() which guarantees .data is an
+      // array and every model has .id (string) and .pricing with string fields.
       const response = await client.getModels();
 
       const models = response.data.map((model) => ({
