@@ -98,7 +98,17 @@ export function validateModelsResponse(data: unknown): asserts data is ModelsRes
   }
 
   for (let i = 0; i < obj.data.length; i++) {
-    const model = obj.data[i] as Record<string, unknown>;
+    const rawModel = obj.data[i];
+
+    if (typeof rawModel !== "object" || rawModel === null) {
+      throw new OpenRouterError(
+        `Invalid models response: model[${i}] must be a non-null object`,
+        502,
+        JSON.stringify(rawModel).slice(0, 200)
+      );
+    }
+
+    const model = rawModel as Record<string, unknown>;
 
     if (typeof model.id !== "string") {
       throw new OpenRouterError(

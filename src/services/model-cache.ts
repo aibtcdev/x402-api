@@ -113,18 +113,6 @@ async function doRefresh(apiKey: string, logger: Logger): Promise<void> {
     modelRegistry.clear();
 
     for (const model of modelsResponse.data) {
-      // Guard each model's pricing individually before parseFloat().
-      // A single malformed model should not abort the entire cache refresh.
-      if (
-        typeof model.pricing !== "object" ||
-        model.pricing === null ||
-        typeof model.pricing.prompt !== "string" ||
-        typeof model.pricing.completion !== "string"
-      ) {
-        logger.debug("Model cache: skipping model with invalid pricing", { modelId: model.id });
-        continue;
-      }
-
       // OpenRouter returns per-token prices as strings (e.g., "0.000003")
       // Convert to per-1K numbers
       const promptPer1k = parseFloat(model.pricing.prompt) * 1000;
@@ -222,7 +210,9 @@ export function getSimilarModels(modelId: string, maxResults = 3): string[] {
     return prefixMatches.slice(0, maxResults);
   }
 
-  // No structural match — return first maxResults models as fallback hints
+  // No structural match — return first maxResults models as fallback hints.
+  // These may be unrelated; callers should treat them as "here are some valid models"
+  // rather than "here are close matches."
   return allModels.filter((id) => id !== modelId).slice(0, maxResults);
 }
 
@@ -262,4 +252,35 @@ export async function lookupModel(
   }
 
   return { valid: true, pricing: cached };
+}
+
+// =============================================================================
+// Test Helpers (not part of public API)
+// =============================================================================
+
+/**
+ * Seed the model registry with test data and reset internal state.
+ * Exported for unit tests only — not intended for production use.
+ */
+export function _seedCacheForTesting(
+  models: Array<{ id: string; pricing: ModelPricing }>,
+  options?: { simulateFailure?: boolean }
+): void {
+  modelRegistry.clear();
+  for (const m of models) {
+    modelRegistry.set(m.id, m.pricing);
+  }
+  fetchedAt = models.length > 0 ? Date.now() : null;
+  lastFailedAt = options?.simulateFailure ? Date.now() : null;
+}
+
+/**
+ * Reset the cache to its initial empty state.
+ * Exported for unit tests only — not intended for production use.
+ */
+export function _resetCacheForTesting(): void {
+  modelRegistry.clear();
+  fetchedAt = null;
+  lastFailedAt = null;
+  inflightRefresh = null;
 }

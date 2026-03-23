@@ -32,19 +32,19 @@ function expectOpenRouterError(
   status: number,
   messageSubstring?: string
 ): OpenRouterError {
-  expect(fn).toThrow(OpenRouterError);
+  let caught: unknown;
   try {
     fn();
-    throw new Error("Expected OpenRouterError but fn did not throw");
   } catch (err) {
-    expect(err).toBeInstanceOf(OpenRouterError);
-    const orErr = err as OpenRouterError;
-    expect(orErr.status).toBe(status);
-    if (messageSubstring) {
-      expect(orErr.message).toContain(messageSubstring);
-    }
-    return orErr;
+    caught = err;
   }
+  expect(caught).toBeInstanceOf(OpenRouterError);
+  const orErr = caught as OpenRouterError;
+  expect(orErr.status).toBe(status);
+  if (messageSubstring) {
+    expect(orErr.message).toContain(messageSubstring);
+  }
+  return orErr;
 }
 
 /** Minimal valid model entry satisfying the ModelsResponse shape */
@@ -162,6 +162,14 @@ describe("validateModelsResponse", () => {
   test("model with missing .id throws OpenRouterError", () => {
     const data = { data: [{ name: "No ID Model", pricing: { prompt: "0.0001", completion: "0.0002" } }] };
     expectOpenRouterError(() => validateModelsResponse(data), 502, ".id must be a string");
+  });
+
+  test("model list containing null element throws OpenRouterError", () => {
+    expectOpenRouterError(() => validateModelsResponse({ data: [null] }), 502, "must be a non-null object");
+  });
+
+  test("model list containing non-object element throws OpenRouterError", () => {
+    expectOpenRouterError(() => validateModelsResponse({ data: ["not-an-object"] }), 502, "must be a non-null object");
   });
 });
 
