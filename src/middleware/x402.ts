@@ -106,6 +106,9 @@ function getAssetV2(
   return `${contract.address}.${contract.name}`;
 }
 
+/** Error code for relay-side nonce conflicts (retryable, not in x402-stacks X402_ERROR_CODES) */
+const NONCE_CONFLICT_CODE = "NONCE_CONFLICT";
+
 /**
  * Classify payment errors for appropriate response
  */
@@ -135,7 +138,7 @@ function classifyPaymentError(error: unknown, settleResult?: Partial<SettlementR
 
   // Specific nonce conflict case — check before the broad "nonce" match below
   if (combined.includes("conflicting_nonce") || combined.includes("sender_nonce_duplicate")) {
-    return { code: "NONCE_CONFLICT", message: "Relay nonce conflict during settlement", httpStatus: 409, retryable: true, retryAfter: 2, nextSteps: "Retry the same request in 2 seconds — this is a transient relay nonce conflict that resolves automatically" };
+    return { code: NONCE_CONFLICT_CODE, message: "Relay nonce conflict during settlement", httpStatus: 409, retryable: true, retryAfter: 2, nextSteps: "Retry the same request in 2 seconds — this is a transient relay nonce conflict that resolves automatically" };
   }
 
   if (combined.includes("expired") || combined.includes("nonce")) {
@@ -176,7 +179,7 @@ function classifyPaymentError(error: unknown, settleResult?: Partial<SettlementR
     return { code: X402_ERROR_CODES.RECIPIENT_MISMATCH, message: "Payment recipient mismatch", httpStatus: 400, retryable: false, nextSteps: "Verify the recipient address in the payment payload matches this endpoint" };
   }
 
-  return { code: X402_ERROR_CODES.UNEXPECTED_SETTLE_ERROR, message: "Payment processing error", httpStatus: 500, retryable: true, retryAfter: 5, nextSteps: "Retry the request — if the issue persists, the payment may need to be re-signed" };
+  return { code: X402_ERROR_CODES.UNEXPECTED_SETTLE_ERROR, message: "Payment processing error", httpStatus: 500, retryable: true, retryAfter: 5, nextSteps: "Retry the request with the same payment — if the issue persists after 3 retries, sign a new payment" };
 }
 
 // =============================================================================
