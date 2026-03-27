@@ -131,6 +131,11 @@ function classifyPaymentError(error: unknown, settleResult?: Partial<SettlementR
     return { code: X402_ERROR_CODES.INSUFFICIENT_FUNDS, message: "Insufficient funds in wallet", httpStatus: 402 };
   }
 
+  // Detect relay-side nonce conflict specifically (retryable) — before broad "nonce" check
+  if (combined.includes("conflicting_nonce") || combined.includes("sender_nonce_duplicate")) {
+    return { code: X402_ERROR_CODES.UNEXPECTED_SETTLE_ERROR, message: "Relay nonce conflict, please retry", httpStatus: 502, retryAfter: 2 };
+  }
+
   if (combined.includes("expired") || combined.includes("nonce")) {
     return { code: X402_ERROR_CODES.INVALID_TRANSACTION_STATE, message: "Payment expired, please sign a new payment", httpStatus: 402 };
   }
@@ -364,59 +369,79 @@ export function x402Middleware(
       network: networkV2,
     });
 
-    let settleResult: SettlementResponseV2;
-    try {
-      settleResult = await verifier.settle(paymentPayload, {
-        paymentRequirements,
-      });
+    const MAX_SETTLE_RETRIES = 2;
+    const SETTLE_RETRY_BASE_MS = 1000;
 
-      log.debug("Settle result", { ...settleResult });
-    } catch (error) {
-      const errorStr = String(error);
-      log.error("Payment settlement exception", { error: errorStr });
+    let settleResult!: SettlementResponseV2;
 
-      const classified = classifyPaymentError(error);
-      if (classified.retryAfter) {
-        c.header("Retry-After", String(classified.retryAfter));
-      }
+    for (let attempt = 0; attempt <= MAX_SETTLE_RETRIES; attempt++) {
+      try {
+        settleResult = await verifier.settle(paymentPayload, { paymentRequirements });
+        log.debug("Settle result", { ...settleResult, attempt });
 
-      return c.json(
-        {
-          error: classified.message,
-          code: classified.code,
-          asset,
-          network: networkV2,
-          resource: c.req.path,
-          details: {
-            exceptionMessage: errorStr,
+        if (!settleResult.success) {
+          const isNonceConflict =
+            (settleResult.errorReason || "").toLowerCase().includes("conflicting_nonce") ||
+            (settleResult.errorReason || "").toLowerCase().includes("sender_nonce_duplicate");
+
+          if (isNonceConflict && attempt < MAX_SETTLE_RETRIES) {
+            const delay = SETTLE_RETRY_BASE_MS * (attempt + 1);
+            log.warn("Relay nonce conflict, retrying settlement", { attempt: attempt + 1, maxRetries: MAX_SETTLE_RETRIES, delayMs: delay });
+            await new Promise((r) => setTimeout(r, delay));
+            continue;
+          }
+
+          // Non-retryable failure or exhausted retries
+          log.error("Payment settlement failed", { ...settleResult, attempt });
+          const classified = classifyPaymentError(settleResult.errorReason || "settlement_failed", settleResult);
+          if (classified.retryAfter) {
+            c.header("Retry-After", String(classified.retryAfter));
+          }
+          return c.json(
+            {
+              error: classified.message,
+              code: classified.code,
+              asset,
+              network: networkV2,
+              resource: c.req.path,
+              details: { errorReason: settleResult.errorReason, attempts: attempt + 1 },
+            },
+            classified.httpStatus as 400 | 402 | 500 | 502 | 503
+          );
+        }
+
+        // Success — exit loop
+        break;
+      } catch (error) {
+        const errorStr = String(error);
+        const isNonceConflict =
+          errorStr.toLowerCase().includes("conflicting_nonce") ||
+          errorStr.toLowerCase().includes("sender_nonce_duplicate");
+
+        if (isNonceConflict && attempt < MAX_SETTLE_RETRIES) {
+          const delay = SETTLE_RETRY_BASE_MS * (attempt + 1);
+          log.warn("Relay nonce conflict exception, retrying", { attempt: attempt + 1, error: errorStr, delayMs: delay });
+          await new Promise((r) => setTimeout(r, delay));
+          continue;
+        }
+
+        log.error("Payment settlement exception", { error: errorStr, attempt });
+        const classified = classifyPaymentError(error);
+        if (classified.retryAfter) {
+          c.header("Retry-After", String(classified.retryAfter));
+        }
+        return c.json(
+          {
+            error: classified.message,
+            code: classified.code,
+            asset,
+            network: networkV2,
+            resource: c.req.path,
+            details: { exceptionMessage: errorStr, attempts: attempt + 1 },
           },
-        },
-        classified.httpStatus as 400 | 402 | 500 | 502 | 503
-      );
-    }
-
-    if (!settleResult.success) {
-      log.error("Payment settlement failed", { ...settleResult });
-
-      const classified = classifyPaymentError(settleResult.errorReason || "settlement_failed", settleResult);
-
-      if (classified.retryAfter) {
-        c.header("Retry-After", String(classified.retryAfter));
+          classified.httpStatus as 400 | 402 | 500 | 502 | 503
+        );
       }
-
-      return c.json(
-        {
-          error: classified.message,
-          code: classified.code,
-          asset,
-          network: networkV2,
-          resource: c.req.path,
-          details: {
-            errorReason: settleResult.errorReason,
-          },
-        },
-        classified.httpStatus as 400 | 402 | 500 | 502 | 503
-      );
     }
 
     // Extract payer address from settle result
