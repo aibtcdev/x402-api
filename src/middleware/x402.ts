@@ -107,6 +107,14 @@ function getAssetV2(
 }
 
 /**
+ * Check if an error string indicates a relay-side nonce conflict (retryable)
+ */
+function isNonceConflict(str: string): boolean {
+  const lower = str.toLowerCase();
+  return lower.includes("conflicting_nonce") || lower.includes("sender_nonce_duplicate");
+}
+
+/**
  * Classify payment errors for appropriate response
  */
 function classifyPaymentError(error: unknown, settleResult?: Partial<SettlementResponseV2>): {
@@ -132,7 +140,7 @@ function classifyPaymentError(error: unknown, settleResult?: Partial<SettlementR
   }
 
   // Detect relay-side nonce conflict specifically (retryable) — before broad "nonce" check
-  if (combined.includes("conflicting_nonce") || combined.includes("sender_nonce_duplicate")) {
+  if (isNonceConflict(combined)) {
     return { code: X402_ERROR_CODES.UNEXPECTED_SETTLE_ERROR, message: "Relay nonce conflict, please retry", httpStatus: 502, retryAfter: 2 };
   }
 
@@ -372,7 +380,7 @@ export function x402Middleware(
     const MAX_SETTLE_RETRIES = 2;
     const SETTLE_RETRY_BASE_MS = 1000;
 
-    let settleResult!: SettlementResponseV2;
+    let settleResult: SettlementResponseV2 | undefined;
 
     for (let attempt = 0; attempt <= MAX_SETTLE_RETRIES; attempt++) {
       try {
@@ -380,12 +388,8 @@ export function x402Middleware(
         log.debug("Settle result", { ...settleResult, attempt });
 
         if (!settleResult.success) {
-          const isNonceConflict =
-            (settleResult.errorReason || "").toLowerCase().includes("conflicting_nonce") ||
-            (settleResult.errorReason || "").toLowerCase().includes("sender_nonce_duplicate");
-
-          if (isNonceConflict && attempt < MAX_SETTLE_RETRIES) {
-            const delay = SETTLE_RETRY_BASE_MS * (attempt + 1);
+          if (isNonceConflict(settleResult.errorReason || "") && attempt < MAX_SETTLE_RETRIES) {
+            const delay = SETTLE_RETRY_BASE_MS * Math.pow(2, attempt);
             log.warn("Relay nonce conflict, retrying settlement", { attempt: attempt + 1, maxRetries: MAX_SETTLE_RETRIES, delayMs: delay });
             await new Promise((r) => setTimeout(r, delay));
             continue;
@@ -414,12 +418,8 @@ export function x402Middleware(
         break;
       } catch (error) {
         const errorStr = String(error);
-        const isNonceConflict =
-          errorStr.toLowerCase().includes("conflicting_nonce") ||
-          errorStr.toLowerCase().includes("sender_nonce_duplicate");
-
-        if (isNonceConflict && attempt < MAX_SETTLE_RETRIES) {
-          const delay = SETTLE_RETRY_BASE_MS * (attempt + 1);
+        if (isNonceConflict(errorStr) && attempt < MAX_SETTLE_RETRIES) {
+          const delay = SETTLE_RETRY_BASE_MS * Math.pow(2, attempt);
           log.warn("Relay nonce conflict exception, retrying", { attempt: attempt + 1, error: errorStr, delayMs: delay });
           await new Promise((r) => setTimeout(r, delay));
           continue;
@@ -445,9 +445,10 @@ export function x402Middleware(
     }
 
     // Extract payer address from settle result
-    const payerAddress = settleResult.payer;
+    // settleResult is always set when we reach this point (all error paths return early above)
+    const payerAddress = settleResult?.payer;
 
-    if (!payerAddress) {
+    if (!payerAddress || !settleResult) {
       log.error("Could not extract payer address from valid payment");
       return c.json(
         { error: "Could not identify payer from payment", code: X402_ERROR_CODES.SENDER_MISMATCH },
