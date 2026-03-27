@@ -106,6 +106,9 @@ function getAssetV2(
   return `${contract.address}.${contract.name}`;
 }
 
+/** Error code for relay-side nonce conflicts (retryable, not in x402-stacks X402_ERROR_CODES) */
+const NONCE_CONFLICT_CODE = "NONCE_CONFLICT";
+
 /**
  * Classify payment errors for appropriate response
  */
@@ -113,63 +116,70 @@ function classifyPaymentError(error: unknown, settleResult?: Partial<SettlementR
   code: string;
   message: string;
   httpStatus: number;
+  retryable: boolean;
   retryAfter?: number;
+  nextSteps: string;
 } {
   const errorStr = String(error).toLowerCase();
   const resultError = settleResult?.errorReason?.toLowerCase() || "";
   const combined = `${errorStr} ${resultError}`;
 
   if (combined.includes("fetch") || combined.includes("network") || combined.includes("timeout")) {
-    return { code: X402_ERROR_CODES.UNEXPECTED_SETTLE_ERROR, message: "Network error with settlement relay", httpStatus: 502, retryAfter: 5 };
+    return { code: X402_ERROR_CODES.UNEXPECTED_SETTLE_ERROR, message: "Network error with settlement relay", httpStatus: 502, retryable: true, retryAfter: 5, nextSteps: "Retry the request — this is a transient network error with the settlement relay" };
   }
 
   if (combined.includes("503") || combined.includes("unavailable")) {
-    return { code: X402_ERROR_CODES.UNEXPECTED_SETTLE_ERROR, message: "Settlement relay temporarily unavailable", httpStatus: 503, retryAfter: 30 };
+    return { code: X402_ERROR_CODES.UNEXPECTED_SETTLE_ERROR, message: "Settlement relay temporarily unavailable", httpStatus: 503, retryable: true, retryAfter: 30, nextSteps: "Wait 30 seconds and retry — the settlement relay is temporarily unavailable" };
   }
 
   if (combined.includes("insufficient") || combined.includes("balance")) {
-    return { code: X402_ERROR_CODES.INSUFFICIENT_FUNDS, message: "Insufficient funds in wallet", httpStatus: 402 };
+    return { code: X402_ERROR_CODES.INSUFFICIENT_FUNDS, message: "Insufficient funds in wallet", httpStatus: 402, retryable: false, nextSteps: "Check your wallet balance and top up before retrying" };
+  }
+
+  // Specific nonce conflict case — check before the broad "nonce" match below
+  if (combined.includes("conflicting_nonce") || combined.includes("sender_nonce_duplicate")) {
+    return { code: NONCE_CONFLICT_CODE, message: "Relay nonce conflict during settlement", httpStatus: 409, retryable: true, retryAfter: 2, nextSteps: "Retry the same request in 2 seconds — this is a transient relay nonce conflict that resolves automatically" };
   }
 
   if (combined.includes("expired") || combined.includes("nonce")) {
-    return { code: X402_ERROR_CODES.INVALID_TRANSACTION_STATE, message: "Payment expired, please sign a new payment", httpStatus: 402 };
+    return { code: X402_ERROR_CODES.INVALID_TRANSACTION_STATE, message: "Payment expired, please sign a new payment", httpStatus: 402, retryable: false, nextSteps: "Sign a new payment — the transaction nonce or timestamp has expired" };
   }
 
   if (combined.includes("amount") && (combined.includes("low") || combined.includes("minimum"))) {
-    return { code: X402_ERROR_CODES.AMOUNT_INSUFFICIENT, message: "Payment amount below minimum required", httpStatus: 402 };
+    return { code: X402_ERROR_CODES.AMOUNT_INSUFFICIENT, message: "Payment amount below minimum required", httpStatus: 402, retryable: false, nextSteps: "Increase the payment amount to meet the minimum required for this endpoint" };
   }
 
   // Relay-specific errors — check before broad "invalid"/"signature" to avoid misclassification
   if (combined.includes("broadcast_failed") || combined.includes("broadcast failed")) {
-    return { code: X402_ERROR_CODES.BROADCAST_FAILED, message: "Settlement relay broadcast failed, please retry", httpStatus: 502, retryAfter: 5 };
+    return { code: X402_ERROR_CODES.BROADCAST_FAILED, message: "Settlement relay broadcast failed, please retry", httpStatus: 502, retryable: true, retryAfter: 5, nextSteps: "Retry the request — the settlement relay failed to broadcast the transaction" };
   }
 
   if (combined.includes("transaction_failed") || combined.includes("transaction failed")) {
-    return { code: X402_ERROR_CODES.TRANSACTION_FAILED, message: "Transaction failed in settlement relay", httpStatus: 402 };
+    return { code: X402_ERROR_CODES.TRANSACTION_FAILED, message: "Transaction failed in settlement relay", httpStatus: 402, retryable: false, nextSteps: "Sign a new payment — the transaction failed in the settlement relay" };
   }
 
   if (combined.includes("transaction_pending") || combined.includes("transaction pending")) {
-    return { code: X402_ERROR_CODES.TRANSACTION_PENDING, message: "Transaction pending in settlement relay, please retry", httpStatus: 402, retryAfter: 10 };
+    return { code: X402_ERROR_CODES.TRANSACTION_PENDING, message: "Transaction pending in settlement relay, please retry", httpStatus: 402, retryable: true, retryAfter: 10, nextSteps: "Wait 10 seconds and retry — your previous transaction is still pending" };
   }
 
   if (combined.includes("sender_mismatch") || combined.includes("sender mismatch")) {
-    return { code: X402_ERROR_CODES.SENDER_MISMATCH, message: "Payment sender does not match expected address", httpStatus: 400 };
+    return { code: X402_ERROR_CODES.SENDER_MISMATCH, message: "Payment sender does not match expected address", httpStatus: 400, retryable: false, nextSteps: "Ensure you are signing from the correct wallet address" };
   }
 
   if (combined.includes("unsupported_scheme") || combined.includes("unsupported scheme")) {
-    return { code: X402_ERROR_CODES.UNSUPPORTED_SCHEME, message: "Unsupported payment scheme", httpStatus: 400 };
+    return { code: X402_ERROR_CODES.UNSUPPORTED_SCHEME, message: "Unsupported payment scheme", httpStatus: 400, retryable: false, nextSteps: "Use a supported payment scheme (exact) for this endpoint" };
   }
 
   // Broad matches last — catch generic "invalid"/"signature" errors not matched above
   if (combined.includes("invalid") || combined.includes("signature")) {
-    return { code: X402_ERROR_CODES.INVALID_PAYLOAD, message: "Invalid payment signature", httpStatus: 400 };
+    return { code: X402_ERROR_CODES.INVALID_PAYLOAD, message: "Invalid payment signature", httpStatus: 400, retryable: false, nextSteps: "Re-sign the payment with a valid signature" };
   }
 
   if (combined.includes("recipient")) {
-    return { code: X402_ERROR_CODES.RECIPIENT_MISMATCH, message: "Payment recipient mismatch", httpStatus: 400 };
+    return { code: X402_ERROR_CODES.RECIPIENT_MISMATCH, message: "Payment recipient mismatch", httpStatus: 400, retryable: false, nextSteps: "Verify the recipient address in the payment payload matches this endpoint" };
   }
 
-  return { code: X402_ERROR_CODES.UNEXPECTED_SETTLE_ERROR, message: "Payment processing error", httpStatus: 500, retryAfter: 5 };
+  return { code: X402_ERROR_CODES.UNEXPECTED_SETTLE_ERROR, message: "Payment processing error", httpStatus: 500, retryable: true, retryAfter: 5, nextSteps: "Retry the request with the same payment — if the issue persists after 3 retries, sign a new payment" };
 }
 
 // =============================================================================
@@ -358,6 +368,8 @@ export function x402Middleware(
       return c.json({
         error: "Invalid payment-signature header",
         code: X402_ERROR_CODES.INVALID_PAYLOAD,
+        retryable: false,
+        nextSteps: "Decode the payment-signature header as base64 JSON and ensure x402Version is 2",
       }, 400);
     }
 
@@ -392,6 +404,9 @@ export function x402Middleware(
         {
           error: classified.message,
           code: classified.code,
+          retryable: classified.retryable,
+          ...(classified.retryAfter !== undefined && { retryAfter: classified.retryAfter }),
+          nextSteps: classified.nextSteps,
           asset,
           network: networkV2,
           resource: c.req.path,
@@ -399,7 +414,7 @@ export function x402Middleware(
             exceptionMessage: errorStr,
           },
         },
-        classified.httpStatus as 400 | 402 | 500 | 502 | 503
+        classified.httpStatus as 400 | 402 | 409 | 500 | 502 | 503
       );
     }
 
@@ -416,6 +431,9 @@ export function x402Middleware(
         {
           error: classified.message,
           code: classified.code,
+          retryable: classified.retryable,
+          ...(classified.retryAfter !== undefined && { retryAfter: classified.retryAfter }),
+          nextSteps: classified.nextSteps,
           asset,
           network: networkV2,
           resource: c.req.path,
@@ -423,7 +441,7 @@ export function x402Middleware(
             errorReason: settleResult.errorReason,
           },
         },
-        classified.httpStatus as 400 | 402 | 500 | 502 | 503
+        classified.httpStatus as 400 | 402 | 409 | 500 | 502 | 503
       );
     }
 
