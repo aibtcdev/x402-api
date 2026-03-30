@@ -24,6 +24,7 @@
   },
   "services": [
     { "binding": "LOGS", "service": "worker-logs-staging", "entrypoint": "LogsRPC" },
+    // Dev shares staging relay — no separate dev relay; ghost entries are transient
     { "binding": "X402_RELAY", "service": "x402-sponsor-relay-staging", "entrypoint": "RelayRPC" }
   ],
   "migrations": [

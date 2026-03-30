@@ -184,7 +184,8 @@ const RPC_POLL_MAX_ATTEMPTS = 2;
 
 /**
  * Submit payment via X402_RELAY RPC service binding.
- * Returns { txid, payer, pending } on accepted settlement, throws on failure.
+ * Returns { txid, payer } on confirmed settlement, throws on failure or poll exhaustion.
+ * Poll exhaustion throws with code TRANSACTION_PENDING so the caller returns 402 + Retry-After.
  */
 async function settleViaRPC(
   rpc: RelayRPC,
@@ -193,7 +194,7 @@ async function settleViaRPC(
   minAmount: string,
   asset: string,
   log: Logger
-): Promise<{ txid: string; payer: string; pending: boolean }> {
+): Promise<{ txid: string; payer: string }> {
   const settle: RelaySettleOptions = {
     expectedRecipient,
     minAmount,
@@ -214,14 +215,15 @@ async function settleViaRPC(
 
   const { paymentId } = submitResult;
 
-  // Poll for confirmation (up to RPC_POLL_MAX_ATTEMPTS, RPC_POLL_INTERVAL_MS apart)
+  // Poll for confirmation (up to RPC_POLL_MAX_ATTEMPTS, RPC_POLL_INTERVAL_MS apart).
+  // Always wait before each check: tx was just submitted so attempt 0 is a near-certain miss.
   for (let i = 0; i < RPC_POLL_MAX_ATTEMPTS; i++) {
-    if (i > 0) await new Promise(resolve => setTimeout(resolve, RPC_POLL_INTERVAL_MS));
+    await new Promise(resolve => setTimeout(resolve, RPC_POLL_INTERVAL_MS));
 
     const check = await rpc.checkPayment(paymentId);
 
     if (check.status === "confirmed" && check.txid) {
-      return { txid: check.txid, payer: check.payer || "", pending: false };
+      return { txid: check.txid, payer: check.payer || "" };
     }
 
     if (check.status === "failed") {
@@ -233,9 +235,14 @@ async function settleViaRPC(
     // status: pending/mempool → continue polling
   }
 
-  // Poll exhausted — relay accepted and broadcast, tx not yet confirmed
-  log.info("RPC settlement poll exhausted, returning pending", { paymentId });
-  return { txid: paymentId, payer: "", pending: true };
+  // Poll exhausted — relay accepted and broadcast but tx is not yet confirmed.
+  // Throw so the caller returns 402 + Retry-After, letting the client retry.
+  log.info("RPC settlement poll exhausted, returning TRANSACTION_PENDING", { paymentId });
+  throw Object.assign(new Error("Transaction pending in settlement relay"), {
+    code: X402_ERROR_CODES.TRANSACTION_PENDING,
+    retryable: true,
+    retryAfter: 5,
+  });
 }
 
 // =============================================================================
@@ -430,7 +437,6 @@ export function x402Middleware(
     // --- Settlement: prefer RPC binding, fall back to HTTP path ---
     let txId: string;
     let payerAddress: string;
-    let settlePending = false;
     let settleResult: SettlementResponseV2 | undefined;
 
     if (c.env.X402_RELAY) {
@@ -462,7 +468,6 @@ export function x402Middleware(
         );
         txId = rpcResult.txid;
         payerAddress = rpcResult.payer;
-        settlePending = rpcResult.pending;
       } catch (error) {
         const errorStr = String(error);
         const code = (error as { code?: string }).code;
@@ -529,7 +534,8 @@ export function x402Middleware(
 
       txId = settleResult.transaction;
       payerAddress = settleResult.payer || "";
-      // Set payment-response header for HTTP path (RPC path omits this since no SettlementResponseV2)
+      // Set payment-response header for HTTP path. RPC path sets it below after
+      // contextSettleResult is constructed (no native SettlementResponseV2 from RPC).
       c.header(X402_HEADERS.PAYMENT_RESPONSE, encodeBase64Json(settleResult));
     }
 
@@ -548,7 +554,6 @@ export function x402Middleware(
       network: networkV2,
       amount: paymentRequirements.amount,
       tier: dynamic ? "dynamic" : tier,
-      pending: settlePending,
     });
 
     // Build a minimal settleResult for the X402Context (required by the type)
@@ -558,6 +563,12 @@ export function x402Middleware(
       network: networkV2,
       payer: payerAddress,
     };
+
+    // Set payment-response header on the RPC path (HTTP path sets it above via settleResult).
+    // Uses the constructed contextSettleResult so clients on both paths receive the header.
+    if (c.env.X402_RELAY) {
+      c.header(X402_HEADERS.PAYMENT_RESPONSE, encodeBase64Json(contextSettleResult));
+    }
 
     // Store payment context for downstream use
     c.set("x402", {
