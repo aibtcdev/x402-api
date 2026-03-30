@@ -20,6 +20,47 @@ export interface LogsRPC {
   error(appId: string, message: string, context?: Record<string, unknown>): Promise<unknown>;
 }
 
+// =============================================================================
+// Relay RPC Types (matching x402-sponsor-relay RelayRPC entrypoint)
+// =============================================================================
+
+export interface RelaySettleOptions {
+  expectedRecipient: string;
+  minAmount: string;
+  tokenType?: string;
+  expectedSender?: string;
+  maxTimeoutSeconds?: number;
+}
+
+export interface RelaySubmitResult {
+  accepted: boolean;
+  paymentId?: string;
+  status?: string;
+  error?: string;
+  code?: string;
+  retryable?: boolean;
+  help?: string;
+  action?: string;
+}
+
+export interface RelayCheckResult {
+  paymentId: string;
+  status: string;
+  txid?: string;
+  blockHeight?: number;
+  confirmedAt?: string;
+  /** Payer address if relay resolved it from the transaction */
+  payer?: string;
+  error?: string;
+  errorCode?: string;
+  retryable?: boolean;
+}
+
+export interface RelayRPC {
+  submitPayment(txHex: string, settle?: RelaySettleOptions): Promise<RelaySubmitResult>;
+  checkPayment(paymentId: string): Promise<RelayCheckResult>;
+}
+
 export interface Logger {
   debug(message: string, data?: Record<string, unknown>): void;
   info(message: string, data?: Record<string, unknown>): void;
@@ -41,6 +82,7 @@ export interface Env {
   AI: Ai;
   // Service bindings (optional - uncomment in wrangler.jsonc if available)
   LOGS?: LogsRPC;
+  X402_RELAY?: RelayRPC;
   // Secrets (set via wrangler secret put)
   OPENROUTER_API_KEY: string;
   HIRO_API_KEY?: string;

@@ -29,6 +29,8 @@ import type {
   PriceEstimate,
   X402Context,
   ChatCompletionRequest,
+  RelayRPC,
+  RelaySettleOptions,
 } from "../types";
 import {
   validateTokenType,
@@ -170,6 +172,70 @@ function classifyPaymentError(error: unknown, settleResult?: Partial<SettlementR
   }
 
   return { code: X402_ERROR_CODES.UNEXPECTED_SETTLE_ERROR, message: "Payment processing error", httpStatus: 500, retryAfter: 5 };
+}
+
+// =============================================================================
+// RPC Settlement Helper
+// =============================================================================
+
+/** RPC polling constants (mirrors landing-page lib/inbox/constants.ts) */
+const RPC_POLL_INTERVAL_MS = 2_000;
+const RPC_POLL_MAX_ATTEMPTS = 2;
+
+/**
+ * Submit payment via X402_RELAY RPC service binding.
+ * Returns { txid, payer, pending } on accepted settlement, throws on failure.
+ */
+async function settleViaRPC(
+  rpc: RelayRPC,
+  txHex: string,
+  expectedRecipient: string,
+  minAmount: string,
+  asset: string,
+  log: Logger
+): Promise<{ txid: string; payer: string; pending: boolean }> {
+  const settle: RelaySettleOptions = {
+    expectedRecipient,
+    minAmount,
+    tokenType: asset,
+    maxTimeoutSeconds: 10,
+  };
+
+  const submitResult = await rpc.submitPayment(txHex, settle);
+
+  if (!submitResult.accepted || !submitResult.paymentId) {
+    const err = submitResult.error || "RPC submit rejected";
+    log.warn("RPC payment submit rejected", { error: err, code: submitResult.code });
+    throw Object.assign(new Error(err), {
+      code: submitResult.code,
+      retryable: submitResult.retryable,
+    });
+  }
+
+  const { paymentId } = submitResult;
+
+  // Poll for confirmation (up to RPC_POLL_MAX_ATTEMPTS, RPC_POLL_INTERVAL_MS apart)
+  for (let i = 0; i < RPC_POLL_MAX_ATTEMPTS; i++) {
+    if (i > 0) await new Promise(resolve => setTimeout(resolve, RPC_POLL_INTERVAL_MS));
+
+    const check = await rpc.checkPayment(paymentId);
+
+    if (check.status === "confirmed" && check.txid) {
+      return { txid: check.txid, payer: check.payer || "", pending: false };
+    }
+
+    if (check.status === "failed") {
+      throw Object.assign(new Error(check.error || "RPC settlement failed"), {
+        code: check.errorCode,
+        retryable: check.retryable,
+      });
+    }
+    // status: pending/mempool → continue polling
+  }
+
+  // Poll exhausted — relay accepted and broadcast, tx not yet confirmed
+  log.info("RPC settlement poll exhausted, returning pending", { paymentId });
+  return { txid: paymentId, payer: "", pending: true };
 }
 
 // =============================================================================
@@ -361,74 +427,111 @@ export function x402Middleware(
       }, 400);
     }
 
-    // Verify payment with settlement relay using v2 API
-    const verifier = new X402PaymentVerifier(c.env.X402_FACILITATOR_URL);
+    // --- Settlement: prefer RPC binding, fall back to HTTP path ---
+    let txId: string;
+    let payerAddress: string;
+    let settlePending = false;
+    let settleResult: SettlementResponseV2 | undefined;
 
-    log.debug("Settling payment via settlement relay", {
-      relayUrl: c.env.X402_FACILITATOR_URL,
-      expectedRecipient: c.env.X402_SERVER_ADDRESS,
-      minAmount: paymentRequirements.amount,
-      asset,
-      network: networkV2,
-    });
+    if (c.env.X402_RELAY) {
+      // RPC path: queue-backed, retry-aware, avoids direct nonce conflicts
+      const txHex = paymentPayload.payload?.transaction;
+      if (!txHex) {
+        log.error("Missing transaction hex in payment payload");
+        return c.json({
+          error: "Invalid payment payload: missing transaction",
+          code: X402_ERROR_CODES.INVALID_PAYLOAD,
+        }, 400);
+      }
 
-    let settleResult: SettlementResponseV2;
-    try {
-      settleResult = await verifier.settle(paymentPayload, {
-        paymentRequirements,
+      log.debug("Settling payment via X402_RELAY RPC binding", {
+        expectedRecipient: c.env.X402_SERVER_ADDRESS,
+        minAmount: paymentRequirements.amount,
+        asset,
+        network: networkV2,
       });
 
-      log.debug("Settle result", { ...settleResult });
-    } catch (error) {
-      const errorStr = String(error);
-      log.error("Payment settlement exception", { error: errorStr });
-
-      const classified = classifyPaymentError(error);
-      if (classified.retryAfter) {
-        c.header("Retry-After", String(classified.retryAfter));
-      }
-
-      return c.json(
-        {
+      try {
+        const rpcResult = await settleViaRPC(
+          c.env.X402_RELAY,
+          txHex,
+          c.env.X402_SERVER_ADDRESS,
+          paymentRequirements.amount,
+          asset,
+          log
+        );
+        txId = rpcResult.txid;
+        payerAddress = rpcResult.payer;
+        settlePending = rpcResult.pending;
+      } catch (error) {
+        const errorStr = String(error);
+        const code = (error as { code?: string }).code;
+        log.error("RPC payment settlement failed", { error: errorStr, code });
+        const classified = classifyPaymentError(error);
+        if (classified.retryAfter) c.header("Retry-After", String(classified.retryAfter));
+        return c.json({
           error: classified.message,
           code: classified.code,
           asset,
           network: networkV2,
           resource: c.req.path,
-          details: {
-            exceptionMessage: errorStr,
+        }, classified.httpStatus as 400 | 402 | 500 | 502 | 503);
+      }
+    } else {
+      // HTTP fallback path (existing logic)
+      const verifier = new X402PaymentVerifier(c.env.X402_FACILITATOR_URL);
+
+      log.debug("Settling payment via HTTP path (X402_RELAY not bound)", {
+        relayUrl: c.env.X402_FACILITATOR_URL,
+        expectedRecipient: c.env.X402_SERVER_ADDRESS,
+        minAmount: paymentRequirements.amount,
+        asset,
+        network: networkV2,
+      });
+
+      try {
+        settleResult = await verifier.settle(paymentPayload, { paymentRequirements });
+        log.debug("Settle result", { ...settleResult });
+      } catch (error) {
+        const errorStr = String(error);
+        log.error("Payment settlement exception", { error: errorStr });
+        const classified = classifyPaymentError(error);
+        if (classified.retryAfter) c.header("Retry-After", String(classified.retryAfter));
+        return c.json(
+          {
+            error: classified.message,
+            code: classified.code,
+            asset,
+            network: networkV2,
+            resource: c.req.path,
+            details: { exceptionMessage: errorStr },
           },
-        },
-        classified.httpStatus as 400 | 402 | 500 | 502 | 503
-      );
-    }
-
-    if (!settleResult.success) {
-      log.error("Payment settlement failed", { ...settleResult });
-
-      const classified = classifyPaymentError(settleResult.errorReason || "settlement_failed", settleResult);
-
-      if (classified.retryAfter) {
-        c.header("Retry-After", String(classified.retryAfter));
+          classified.httpStatus as 400 | 402 | 500 | 502 | 503
+        );
       }
 
-      return c.json(
-        {
-          error: classified.message,
-          code: classified.code,
-          asset,
-          network: networkV2,
-          resource: c.req.path,
-          details: {
-            errorReason: settleResult.errorReason,
+      if (!settleResult.success) {
+        log.error("Payment settlement failed", { ...settleResult });
+        const classified = classifyPaymentError(settleResult.errorReason || "settlement_failed", settleResult);
+        if (classified.retryAfter) c.header("Retry-After", String(classified.retryAfter));
+        return c.json(
+          {
+            error: classified.message,
+            code: classified.code,
+            asset,
+            network: networkV2,
+            resource: c.req.path,
+            details: { errorReason: settleResult.errorReason },
           },
-        },
-        classified.httpStatus as 400 | 402 | 500 | 502 | 503
-      );
-    }
+          classified.httpStatus as 400 | 402 | 500 | 502 | 503
+        );
+      }
 
-    // Extract payer address from settle result
-    const payerAddress = settleResult.payer;
+      txId = settleResult.transaction;
+      payerAddress = settleResult.payer || "";
+      // Set payment-response header for HTTP path (RPC path omits this since no SettlementResponseV2)
+      c.header(X402_HEADERS.PAYMENT_RESPONSE, encodeBase64Json(settleResult));
+    }
 
     if (!payerAddress) {
       log.error("Could not extract payer address from valid payment");
@@ -439,26 +542,33 @@ export function x402Middleware(
     }
 
     log.info("Payment verified successfully", {
-      txId: settleResult.transaction,
+      txId,
       payerAddress,
       asset,
       network: networkV2,
       amount: paymentRequirements.amount,
       tier: dynamic ? "dynamic" : tier,
+      pending: settlePending,
     });
+
+    // Build a minimal settleResult for the X402Context (required by the type)
+    const contextSettleResult: SettlementResponseV2 = settleResult ?? {
+      success: true,
+      transaction: txId,
+      network: networkV2,
+      payer: payerAddress,
+    };
 
     // Store payment context for downstream use
     c.set("x402", {
       payerAddress,
-      settleResult,
+      settleResult: contextSettleResult,
       paymentPayload,
       paymentRequirements,
       priceEstimate,
       parsedBody,
     } as X402Context);
 
-    // Add v2 response headers (base64 encoded)
-    c.header(X402_HEADERS.PAYMENT_RESPONSE, encodeBase64Json(settleResult));
     c.header("X-PAYER-ADDRESS", payerAddress);
 
     return next();
