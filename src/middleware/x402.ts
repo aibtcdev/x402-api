@@ -152,6 +152,13 @@ function classifyPaymentError(error: unknown, settleResult?: Partial<SettlementR
     return { code: X402_ERROR_CODES.TRANSACTION_PENDING, message: "Transaction pending in settlement relay, please retry", httpStatus: 402, retryAfter: 10 };
   }
 
+  // Relay nonce queue: transaction held due to a sender nonce gap. The relay accepted
+  // the tx but can't dispatch it until the gap is filled. Treat as retryable TRANSACTION_PENDING
+  // with a longer backoff — the gap may take 30+ seconds to resolve.
+  if (combined.includes("transaction_held") || combined.includes("transaction held")) {
+    return { code: X402_ERROR_CODES.TRANSACTION_PENDING, message: "Transaction held in relay nonce queue, please retry", httpStatus: 402, retryAfter: 30 };
+  }
+
   if (combined.includes("sender_mismatch") || combined.includes("sender mismatch")) {
     return { code: X402_ERROR_CODES.SENDER_MISMATCH, message: "Payment sender does not match expected address", httpStatus: 400 };
   }
