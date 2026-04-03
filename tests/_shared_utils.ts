@@ -256,7 +256,7 @@ export interface ParsedErrorInfo {
   terminalReason?: RetryDecisionContext["terminalReason"];
   retryable?: boolean;
   checkStatusUrl?: string;
-  parsedBody?: Record<string, unknown>;
+  parsedBody?: unknown;
   rawText: string;
 }
 
@@ -277,13 +277,24 @@ export function parseErrorResponse(
   const result: ParsedErrorInfo = { rawText: text };
 
   try {
-    const parsed = JSON.parse(text);
+    const parsed: unknown = JSON.parse(text);
     result.parsedBody = parsed;
-    result.errorCode = parsed.code;
-    result.errorMessage = parsed.error;
-    result.retryAfterSecs = parsed.retryAfter;
-    result.details = parsed.details;
-    result.checkStatusUrl = parsed.checkStatusUrl;
+    const parsedRecord =
+      typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)
+        ? parsed as Record<string, unknown>
+        : null;
+
+    if (parsedRecord) {
+      result.errorCode = typeof parsedRecord.code === "string" ? parsedRecord.code : undefined;
+      result.errorMessage = typeof parsedRecord.error === "string" ? parsedRecord.error : undefined;
+      result.retryAfterSecs = typeof parsedRecord.retryAfter === "number" ? parsedRecord.retryAfter : undefined;
+      result.details =
+        typeof parsedRecord.details === "object" && parsedRecord.details !== null && !Array.isArray(parsedRecord.details)
+          ? parsedRecord.details as Record<string, unknown>
+          : undefined;
+      result.checkStatusUrl =
+        typeof parsedRecord.checkStatusUrl === "string" ? parsedRecord.checkStatusUrl : undefined;
+    }
 
     const retryContext = getRetryDecisionContext(parsed);
     if (retryContext) {

@@ -71,6 +71,31 @@ describe("payment-status adapter", () => {
     });
   });
 
+  test("preserves nested canonical retryable from wrapped relay responses", () => {
+    const result = extractCanonicalPaymentDetails({
+      details: {
+        canonical: {
+          paymentId: "pay_nested",
+          status: "queued",
+          retryable: true,
+        },
+      },
+    });
+
+    expect(result).toEqual({
+      paymentId: "pay_nested",
+      status: "queued",
+      retryable: true,
+      error: undefined,
+      errorCode: undefined,
+      checkStatusUrl: undefined,
+      txid: undefined,
+      terminalReason: undefined,
+      compatShimUsed: false,
+      source: "canonical",
+    });
+  });
+
   test("infers terminal state from canonical terminalReason when needed", () => {
     const result = getRetryDecisionContext({
       paymentId: "pay_failed",
@@ -104,7 +129,7 @@ describe("payment-status adapter", () => {
       paymentId: "pay_poll",
       status: "failed",
       terminalReason: "queue_unavailable",
-      retryable: undefined,
+      retryable: true,
       error: undefined,
       errorCode: undefined,
       checkStatusUrl: "https://relay.example/status/pay_poll",

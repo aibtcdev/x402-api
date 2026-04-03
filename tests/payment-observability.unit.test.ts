@@ -37,6 +37,19 @@ describe("payment observability helpers", () => {
     });
   });
 
+  test("uses canonical pre-payment status names in structured logs", () => {
+    expect(
+      buildPaymentLogFields({
+        route: "/hashing/sha256",
+        status: "requires_payment",
+        action: "return_402",
+      })
+    ).toMatchObject({
+      status: "requires_payment",
+      action: "return_402",
+    });
+  });
+
   test("classifies nonce and fee estimation instability explicitly", () => {
     expect(
       derivePaymentInstability({

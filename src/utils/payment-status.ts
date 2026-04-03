@@ -224,6 +224,19 @@ function extractCheckStatusUrl(record: UnknownRecord | null): string | undefined
   return extractCheckStatusUrl(canonical);
 }
 
+function extractRetryable(record: UnknownRecord | null): boolean | undefined {
+  if (!record) return undefined;
+
+  if (typeof record.retryable === "boolean") return record.retryable;
+
+  const details = asRecord(record.details);
+  const nestedDetails = extractRetryable(details);
+  if (nestedDetails !== undefined) return nestedDetails;
+
+  const canonical = asRecord(details?.canonical);
+  return extractRetryable(canonical);
+}
+
 function coerceHttpPaymentStatus(record: UnknownRecord | null): HttpPaymentStatusResponse | null {
   if (!record) return null;
 
@@ -233,7 +246,7 @@ function coerceHttpPaymentStatus(record: UnknownRecord | null): HttpPaymentStatu
   if (!paymentId || !status) return null;
 
   const terminalReason = extractTerminalReason(record).value;
-  const retryable = typeof record.retryable === "boolean" ? record.retryable : undefined;
+  const retryable = extractRetryable(record);
   const error = firstString(record, ["error"]);
   const errorCode = firstString(record, ["errorCode", "code"]);
   const checkStatusUrl = extractCheckStatusUrl(record);
@@ -260,7 +273,7 @@ function inferFromTerminalReason(
 ): CanonicalPaymentDetails {
   const paymentId = extractPaymentId(record);
   const status = TERMINAL_REASON_TO_STATE[terminalReason];
-  const retryable = typeof record?.retryable === "boolean" ? record.retryable : undefined;
+  const retryable = extractRetryable(record);
 
   return {
     paymentId,
@@ -312,7 +325,7 @@ export function extractCanonicalPaymentDetails(input: unknown): CanonicalPayment
   return {
     paymentId,
     status: extractedStatus,
-    retryable: typeof record.retryable === "boolean" ? record.retryable : undefined,
+    retryable: extractRetryable(record),
     error: firstString(record, ["error"]),
     errorCode: firstString(record, ["errorCode", "code"]),
     checkStatusUrl: extractCheckStatusUrl(record),
@@ -344,7 +357,7 @@ export function getRetryDecisionContext(input: unknown): RetryDecisionContext | 
       paymentId: extractPaymentId(record),
       status: TERMINAL_REASON_TO_STATE[terminalReason.value],
       terminalReason: terminalReason.value,
-      retryable: typeof record.retryable === "boolean" ? record.retryable : undefined,
+      retryable: extractRetryable(record),
       compatShimUsed: terminalReason.compatShimUsed,
       source: "inferred",
     };

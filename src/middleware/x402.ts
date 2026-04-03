@@ -119,7 +119,7 @@ function getAssetV2(
 /**
  * Classify payment errors for appropriate response
  */
-function classifyPaymentError(error: unknown, settleResult?: Partial<SettlementResponseV2>): {
+export function classifyPaymentError(error: unknown, settleResult?: Partial<SettlementResponseV2>): {
   code: string;
   message: string;
   httpStatus: number;
@@ -140,53 +140,55 @@ function classifyPaymentError(error: unknown, settleResult?: Partial<SettlementR
       };
     }
 
-    if (canonical.terminalReason) {
-      if (isSenderRebuildTerminalReason(canonical.terminalReason)) {
-        return {
-          code: X402_ERROR_CODES.INVALID_TRANSACTION_STATE,
-          message: "Sender nonce changed, rebuild and sign a new payment",
-          httpStatus: 402,
-        };
-      }
+    if (canonical.terminalReason && isSenderRebuildTerminalReason(canonical.terminalReason)) {
+      return {
+        code: X402_ERROR_CODES.INVALID_TRANSACTION_STATE,
+        message: "Sender nonce changed, rebuild and sign a new payment",
+        httpStatus: 402,
+      };
+    }
 
-      if (canonical.status === "failed" && isRelayRetryableTerminalReason(canonical.terminalReason)) {
-        const unavailable = canonical.terminalReason === "queue_unavailable";
+    if (
+      canonical.status === "failed" &&
+      canonical.terminalReason &&
+      isRelayRetryableTerminalReason(canonical.terminalReason)
+    ) {
+      const unavailable = canonical.terminalReason === "queue_unavailable";
 
-        return {
-          code: canonical.terminalReason === "broadcast_failure"
-            ? X402_ERROR_CODES.BROADCAST_FAILED
-            : X402_ERROR_CODES.UNEXPECTED_SETTLE_ERROR,
-          message: unavailable
-            ? "Settlement relay temporarily unavailable"
-            : "Settlement relay failed before confirmation, please retry",
-          httpStatus: unavailable ? 503 : 502,
-          retryAfter: unavailable ? 30 : 5,
-        };
-      }
+      return {
+        code: canonical.terminalReason === "broadcast_failure"
+          ? X402_ERROR_CODES.BROADCAST_FAILED
+          : X402_ERROR_CODES.UNEXPECTED_SETTLE_ERROR,
+        message: unavailable
+          ? "Settlement relay temporarily unavailable"
+          : "Settlement relay failed before confirmation, please retry",
+        httpStatus: unavailable ? 503 : 502,
+        retryAfter: unavailable ? 30 : 5,
+      };
+    }
 
-      if (canonical.status === "failed") {
-        return {
-          code: X402_ERROR_CODES.TRANSACTION_FAILED,
-          message: "Payment failed in settlement relay",
-          httpStatus: 402,
-        };
-      }
+    if (canonical.status === "failed") {
+      return {
+        code: X402_ERROR_CODES.TRANSACTION_FAILED,
+        message: "Payment failed in settlement relay",
+        httpStatus: 402,
+      };
+    }
 
-      if (canonical.status === "replaced") {
-        return {
-          code: X402_ERROR_CODES.TRANSACTION_FAILED,
-          message: "Payment was replaced, start a new payment flow",
-          httpStatus: 402,
-        };
-      }
+    if (canonical.status === "replaced") {
+      return {
+        code: X402_ERROR_CODES.TRANSACTION_FAILED,
+        message: "Payment was replaced, start a new payment flow",
+        httpStatus: 402,
+      };
+    }
 
-      if (canonical.status === "not_found") {
-        return {
-          code: X402_ERROR_CODES.INVALID_TRANSACTION_STATE,
-          message: "Payment identity expired or was not found, start a new payment flow",
-          httpStatus: 402,
-        };
-      }
+    if (canonical.status === "not_found") {
+      return {
+        code: X402_ERROR_CODES.INVALID_TRANSACTION_STATE,
+        message: "Payment identity expired or was not found, start a new payment flow",
+        httpStatus: 402,
+      };
     }
   }
 
@@ -357,7 +359,7 @@ export function x402Middleware(
             });
             logPaymentEvent(log, "warn", "payment.fallback_used", {
               route: c.req.path,
-              status: "required",
+              status: "requires_payment",
               action: "fallback_pricing_estimate",
             }, {
               instability: "fee_estimation_issue",
@@ -437,7 +439,7 @@ export function x402Middleware(
       });
       logPaymentEvent(log, "info", "payment.required", {
         route: c.req.path,
-        status: "required",
+        status: "requires_payment",
         action: "return_402",
       }, {
         tier: dynamic ? "dynamic" : tier,

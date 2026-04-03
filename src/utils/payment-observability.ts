@@ -1,9 +1,10 @@
+import packageJson from "../../package.json";
 import type { Logger } from "../types";
 import type { CanonicalPaymentDetails } from "./payment-status";
 
 export const PAYMENT_LOG_SERVICE = "x402-api";
 export const PAYMENT_LOG_MIDDLEWARE = "x402";
-export const PAYMENT_REPO_VERSION = "1.5.4";
+export const PAYMENT_REPO_VERSION = packageJson.version;
 
 type PaymentLogLevel = "debug" | "info" | "warn" | "error";
 
