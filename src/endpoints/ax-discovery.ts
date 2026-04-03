@@ -16,6 +16,7 @@
 
 import { Hono } from "hono";
 import type { Env, AppVariables } from "../types";
+import { PAYMENT_PUBLIC_LIFECYCLE } from "../utils/payment-contract";
 
 // =============================================================================
 // Content Definitions
@@ -40,6 +41,12 @@ lacks payment, the server returns HTTP 402 with payment requirements. The client
 signs a Stacks transaction and retries with the payment signature.
 
 This API supports x402 v2 (Coinbase-compatible) with Stacks blockchain payments.
+
+Canonical public payment lifecycle:
+- \`${PAYMENT_PUBLIC_LIFECYCLE}\`
+- \`submitted\` is never caller-facing
+- relay-owned \`paymentId\` is the stable in-flight identity
+- this service keeps immediate pay-per-call behavior during rollout, but any surfaced payment status follows the canonical lifecycle and may include \`checkStatusUrl\`
 
 ## Pricing Tiers
 
@@ -184,19 +191,43 @@ Legacy headers (still accepted for backward compatibility):
 - \`X-PAYMENT\` (replaces payment-signature)
 - \`X-PAYMENT-RESPONSE\` (replaces payment-response)
 
+### Canonical Payment Lifecycle
+
+\`\`\`
+${PAYMENT_PUBLIC_LIFECYCLE}
+\`\`\`
+
+- \`submitted\` is internal relay observability only and is never caller-facing
+- \`paymentId\` is relay-owned and stays stable while a payment is in-flight
+- x402-api still uses immediate pay-per-call delivery during this phase, so in-flight payments return retryable payment errors instead of switching to a receipt-only API
+- \`checkStatusUrl\` is an additive canonical polling hint when the relay provides it
+
 ### PaymentRequiredV2 Structure (base64-decoded)
 
 \`\`\`json
 {
-  "version": 2,
-  "payTo": "SP1XXXXXXXXX",
-  "amount": "1000",
-  "asset": null,
-  "network": "stacks:1",
-  "extra": {
-    "tier": "standard",
-    "description": "0.001 STX per request"
-  }
+  "x402Version": 2,
+  "resource": {
+    "url": "/hashing/sha256",
+    "description": "x402 API - /hashing/sha256",
+    "mimeType": "application/json"
+  },
+  "accepts": [
+    {
+      "scheme": "exact",
+      "network": "stacks:1",
+      "amount": "1000",
+      "asset": "STX",
+      "payTo": "SP1XXXXXXXXX",
+      "maxTimeoutSeconds": 300,
+      "extra": {
+        "pricing": {
+          "type": "fixed",
+          "tier": "standard"
+        }
+      }
+    }
+  ]
 }
 \`\`\`
 
@@ -206,7 +237,7 @@ Legacy headers (still accepted for backward compatibility):
 GET /x402.json
 \`\`\`
 Returns machine-readable payment manifest with supported tokens, pricing tiers,
-and relay URL. Use this to auto-configure x402-stacks clients.
+relay URL, and payment lifecycle metadata. Use this to auto-configure x402-stacks clients.
 
 ## Pricing
 
@@ -1130,7 +1161,7 @@ The flow is:
 1. Client sends request WITHOUT payment → server returns 402
 2. Server response includes payment requirements (amount, recipient, token)
 3. Client creates and signs a Stacks transaction
-4. Client retries request WITH signed transaction → server verifies and processes
+4. Client retries request WITH signed transaction → server verifies, settles, and either serves the resource or returns canonical payment status
 
 ## Step 1: Initial Request (No Payment)
 
@@ -1157,24 +1188,38 @@ The \`payment-required\` header is a base64-encoded JSON object:
 
 \`\`\`json
 {
-  "version": 2,
-  "payTo": "SP1XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX",
-  "amount": "1000",
-  "asset": null,
-  "network": "stacks:1",
-  "extra": {
-    "tier": "standard",
-    "description": "0.001 STX per request"
-  }
+  "x402Version": 2,
+  "resource": {
+    "url": "/hashing/sha256",
+    "description": "x402 API - /hashing/sha256",
+    "mimeType": "application/json"
+  },
+  "accepts": [
+    {
+      "scheme": "exact",
+      "network": "stacks:1",
+      "amount": "1000",
+      "asset": "STX",
+      "payTo": "SP1XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX",
+      "maxTimeoutSeconds": 300,
+      "extra": {
+        "pricing": {
+          "type": "fixed",
+          "tier": "standard"
+        }
+      }
+    }
+  ]
 }
 \`\`\`
 
 Fields:
-- \`payTo\`: Stacks address to pay (SP... for mainnet, ST... for testnet)
-- \`amount\`: Amount in base units (microSTX for STX, satoshis for sBTC, microUSDCx for USDCx)
-- \`asset\`: null for STX, contract principal for sBTC/USDCx
-- \`network\`: "stacks:1" (mainnet), "stacks:2147483648" (testnet)
-- \`extra.tier\`: Pricing tier (standard, dynamic, free)
+- \`resource.url\`: Resource being paid for
+- \`accepts[0].payTo\`: Stacks address to pay (SP... for mainnet, ST... for testnet)
+- \`accepts[0].amount\`: Amount in base units (microSTX for STX, satoshis for sBTC, microUSDCx for USDCx)
+- \`accepts[0].asset\`: \`STX\` for the native token, or contract principal for sBTC/USDCx
+- \`accepts[0].network\`: "stacks:1" (mainnet), "stacks:2147483648" (testnet)
+- \`accepts[0].extra.pricing\`: Pricing metadata (fixed or dynamic)
 
 ## Step 3: Build Payment Payload
 
@@ -1191,9 +1236,23 @@ For sBTC payments:
 Wrap in PaymentPayloadV2:
 \`\`\`json
 {
-  "version": 2,
-  "transaction": "0x8080000000040a...",  // hex-encoded signed Stacks tx
-  "network": "stacks:1"
+  "x402Version": 2,
+  "resource": {
+    "url": "/hashing/sha256",
+    "description": "x402 API - /hashing/sha256",
+    "mimeType": "application/json"
+  },
+  "accepted": {
+    "scheme": "exact",
+    "network": "stacks:1",
+    "amount": "1000",
+    "asset": "STX",
+    "payTo": "SP1XXXXXXXXX",
+    "maxTimeoutSeconds": 300
+  },
+  "payload": {
+    "transaction": "0x8080000000040a..."
+  }
 }
 \`\`\`
 
@@ -1231,6 +1290,20 @@ Decode \`payment-response\` to get transaction ID:
 \`\`\`json
 { "version": 2, "txId": "0xabc123..." }
 \`\`\`
+
+If the relay returns canonical in-flight or terminal failure data instead of immediate success, x402-api surfaces the same public fields when available:
+
+\`\`\`json
+{
+  "error": "Payment is still in flight, please retry with the same paymentId",
+  "code": "transaction_pending",
+  "paymentId": "pay_123",
+  "status": "queued",
+  "checkStatusUrl": "https://relay.example/status/pay_123"
+}
+\`\`\`
+
+Terminal outcomes may also include \`terminalReason\`, for example \`sender_nonce_stale\`, \`queue_unavailable\`, \`broadcast_failure\`, \`nonce_replacement\`, or \`unknown_payment_identity\`. When the relay only exposes legacy details, x402-api uses compatibility-only inference after canonical parsing rather than making fallback inference the primary path.
 
 ## Token Types
 
@@ -1298,11 +1371,17 @@ GET /x402.json
 Machine-readable payment configuration. Use this to auto-configure x402-stacks:
 \`\`\`json
 {
-  "version": 2,
-  "network": "mainnet",
-  "payTo": "SP...",
-  "tokens": ["STX", "sBTC", "USDCx"],
-  "endpoints": [...]
+  "x402Version": 2,
+  "items": [...],
+  "metadata": {
+    "paymentLifecycle": {
+      "publicStates": ["requires_payment", "queued", "broadcasting", "mempool", "confirmed", "failed", "replaced", "not_found"],
+      "submittedCallerFacing": false,
+      "inFlightIdentity": "paymentId",
+      "deliverableState": "confirmed",
+      "deliveryMode": "immediate-pay-per-call-compat"
+    }
+  }
 }
 \`\`\`
 

@@ -37,6 +37,16 @@ import {
 } from "../services/pricing";
 import { lookupModel } from "../services/model-cache";
 import { getEndpointMetadata, buildBazaarExtension } from "../bazaar";
+import {
+  extractCanonicalPaymentDetails,
+  isInFlightPaymentState,
+  isRelayRetryableTerminalReason,
+  isSenderRebuildTerminalReason,
+} from "../utils/payment-status";
+import {
+  derivePaymentInstability,
+  logPaymentEvent,
+} from "../utils/payment-observability";
 
 // =============================================================================
 // Types
@@ -109,15 +119,78 @@ function getAssetV2(
 /**
  * Classify payment errors for appropriate response
  */
-function classifyPaymentError(error: unknown, settleResult?: Partial<SettlementResponseV2>): {
+export function classifyPaymentError(error: unknown, settleResult?: Partial<SettlementResponseV2>): {
   code: string;
   message: string;
   httpStatus: number;
   retryAfter?: number;
 } {
+  const canonical = extractCanonicalPaymentDetails(settleResult);
   const errorStr = String(error).toLowerCase();
   const resultError = settleResult?.errorReason?.toLowerCase() || "";
   const combined = `${errorStr} ${resultError}`;
+
+  if (canonical?.status) {
+    if (isInFlightPaymentState(canonical.status)) {
+      return {
+        code: X402_ERROR_CODES.TRANSACTION_PENDING,
+        message: "Payment is still in flight, please retry with the same paymentId",
+        httpStatus: 402,
+        retryAfter: canonical.status === "queued" ? 2 : 5,
+      };
+    }
+
+    if (canonical.terminalReason && isSenderRebuildTerminalReason(canonical.terminalReason)) {
+      return {
+        code: X402_ERROR_CODES.INVALID_TRANSACTION_STATE,
+        message: "Sender nonce changed, rebuild and sign a new payment",
+        httpStatus: 402,
+      };
+    }
+
+    if (
+      canonical.status === "failed" &&
+      canonical.terminalReason &&
+      isRelayRetryableTerminalReason(canonical.terminalReason)
+    ) {
+      const unavailable = canonical.terminalReason === "queue_unavailable";
+
+      return {
+        code: canonical.terminalReason === "broadcast_failure"
+          ? X402_ERROR_CODES.BROADCAST_FAILED
+          : X402_ERROR_CODES.UNEXPECTED_SETTLE_ERROR,
+        message: unavailable
+          ? "Settlement relay temporarily unavailable"
+          : "Settlement relay failed before confirmation, please retry",
+        httpStatus: unavailable ? 503 : 502,
+        retryAfter: unavailable ? 30 : 5,
+      };
+    }
+
+    if (canonical.status === "failed") {
+      return {
+        code: X402_ERROR_CODES.TRANSACTION_FAILED,
+        message: "Payment failed in settlement relay",
+        httpStatus: 402,
+      };
+    }
+
+    if (canonical.status === "replaced") {
+      return {
+        code: X402_ERROR_CODES.TRANSACTION_FAILED,
+        message: "Payment was replaced, start a new payment flow",
+        httpStatus: 402,
+      };
+    }
+
+    if (canonical.status === "not_found") {
+      return {
+        code: X402_ERROR_CODES.INVALID_TRANSACTION_STATE,
+        message: "Payment identity expired or was not found, start a new payment flow",
+        httpStatus: 402,
+      };
+    }
+  }
 
   if (combined.includes("fetch") || combined.includes("network") || combined.includes("timeout")) {
     return { code: X402_ERROR_CODES.UNEXPECTED_SETTLE_ERROR, message: "Network error with settlement relay", httpStatus: 502, retryAfter: 5 };
@@ -131,14 +204,6 @@ function classifyPaymentError(error: unknown, settleResult?: Partial<SettlementR
     return { code: X402_ERROR_CODES.INSUFFICIENT_FUNDS, message: "Insufficient funds in wallet", httpStatus: 402 };
   }
 
-  if (combined.includes("expired") || combined.includes("nonce")) {
-    return { code: X402_ERROR_CODES.INVALID_TRANSACTION_STATE, message: "Payment expired, please sign a new payment", httpStatus: 402 };
-  }
-
-  if (combined.includes("amount") && (combined.includes("low") || combined.includes("minimum"))) {
-    return { code: X402_ERROR_CODES.AMOUNT_INSUFFICIENT, message: "Payment amount below minimum required", httpStatus: 402 };
-  }
-
   // Relay-specific errors — check before broad "invalid"/"signature" to avoid misclassification
   if (combined.includes("broadcast_failed") || combined.includes("broadcast failed")) {
     return { code: X402_ERROR_CODES.BROADCAST_FAILED, message: "Settlement relay broadcast failed, please retry", httpStatus: 502, retryAfter: 5 };
@@ -150,6 +215,14 @@ function classifyPaymentError(error: unknown, settleResult?: Partial<SettlementR
 
   if (combined.includes("transaction_pending") || combined.includes("transaction pending")) {
     return { code: X402_ERROR_CODES.TRANSACTION_PENDING, message: "Transaction pending in settlement relay, please retry", httpStatus: 402, retryAfter: 10 };
+  }
+
+  if (combined.includes("amount") && (combined.includes("low") || combined.includes("minimum"))) {
+    return { code: X402_ERROR_CODES.AMOUNT_INSUFFICIENT, message: "Payment amount below minimum required", httpStatus: 402 };
+  }
+
+  if (combined.includes("expired") || combined.includes("nonce")) {
+    return { code: X402_ERROR_CODES.INVALID_TRANSACTION_STATE, message: "Payment expired, please sign a new payment", httpStatus: 402 };
   }
 
   if (combined.includes("sender_mismatch") || combined.includes("sender mismatch")) {
@@ -170,6 +243,37 @@ function classifyPaymentError(error: unknown, settleResult?: Partial<SettlementR
   }
 
   return { code: X402_ERROR_CODES.UNEXPECTED_SETTLE_ERROR, message: "Payment processing error", httpStatus: 500, retryAfter: 5 };
+}
+
+function getRetryAction(
+  code: string,
+  canonical?: ReturnType<typeof extractCanonicalPaymentDetails> | null
+): string {
+  if (canonical?.status && isInFlightPaymentState(canonical.status)) {
+    return "reuse_same_payment";
+  }
+
+  if (canonical?.terminalReason && isSenderRebuildTerminalReason(canonical.terminalReason)) {
+    return "rebuild_and_resign";
+  }
+
+  if (canonical?.terminalReason && isRelayRetryableTerminalReason(canonical.terminalReason)) {
+    return "retry_later";
+  }
+
+  switch (code) {
+    case X402_ERROR_CODES.TRANSACTION_PENDING:
+      return "reuse_same_payment";
+    case X402_ERROR_CODES.INVALID_TRANSACTION_STATE:
+      return "rebuild_and_resign";
+    case X402_ERROR_CODES.BROADCAST_FAILED:
+    case X402_ERROR_CODES.UNEXPECTED_SETTLE_ERROR:
+      return "retry_later";
+    case X402_ERROR_CODES.TRANSACTION_FAILED:
+      return "start_new_payment";
+    default:
+      return "do_not_retry";
+  }
 }
 
 // =============================================================================
@@ -253,6 +357,15 @@ export function x402Middleware(
             log.warn("Model cache degraded at middleware — skipping pre-payment model validation", {
               model: chatRequest.model,
             });
+            logPaymentEvent(log, "warn", "payment.fallback_used", {
+              route: c.req.path,
+              status: "requires_payment",
+              action: "fallback_pricing_estimate",
+            }, {
+              instability: "fee_estimation_issue",
+              model: chatRequest.model,
+              fallback_source: "model_cache_degraded",
+            });
           } else if (!modelResult.valid) {
             return c.json(
               { error: modelResult.error, code: "invalid_model", model: chatRequest.model },
@@ -324,6 +437,16 @@ export function x402Middleware(
         asset,
         network: networkV2,
       });
+      logPaymentEvent(log, "info", "payment.required", {
+        route: c.req.path,
+        status: "requires_payment",
+        action: "return_402",
+      }, {
+        tier: dynamic ? "dynamic" : tier,
+        amountRequired: paymentRequirements.amount,
+        asset,
+        network: networkV2,
+      });
 
       const paymentRequired: PaymentRequiredV2 = {
         x402Version: 2,
@@ -363,6 +486,15 @@ export function x402Middleware(
 
     // Verify payment with settlement relay using v2 API
     const verifier = new X402PaymentVerifier(c.env.X402_FACILITATOR_URL);
+    logPaymentEvent(log, "info", "payment.accepted", {
+      route: c.req.path,
+      status: "accepted",
+      action: "verify_with_relay",
+    }, {
+      relayUrl: c.env.X402_FACILITATOR_URL,
+      asset,
+      network: networkV2,
+    });
 
     log.debug("Settling payment via settlement relay", {
       relayUrl: c.env.X402_FACILITATOR_URL,
@@ -384,6 +516,21 @@ export function x402Middleware(
       log.error("Payment settlement exception", { error: errorStr });
 
       const classified = classifyPaymentError(error);
+      logPaymentEvent(log, classified.httpStatus >= 500 ? "error" : "warn", "payment.retry_decision", {
+        route: c.req.path,
+        status: "failed",
+        action: getRetryAction(classified.code),
+      }, {
+        classification_code: classified.code,
+        http_status: classified.httpStatus,
+        retry_after: classified.retryAfter ?? null,
+        instability: derivePaymentInstability({
+          classifiedCode: classified.code,
+          error: errorStr,
+        }),
+        relay_failure: true,
+        exceptionMessage: errorStr,
+      });
       if (classified.retryAfter) {
         c.header("Retry-After", String(classified.retryAfter));
       }
@@ -407,6 +554,82 @@ export function x402Middleware(
       log.error("Payment settlement failed", { ...settleResult });
 
       const classified = classifyPaymentError(settleResult.errorReason || "settlement_failed", settleResult);
+      const canonical = extractCanonicalPaymentDetails(settleResult);
+      const instability = derivePaymentInstability({
+        canonical,
+        classifiedCode: classified.code,
+        errorReason: settleResult.errorReason,
+      });
+
+      if (canonical?.compatShimUsed) {
+        logPaymentEvent(log, "warn", "payment.fallback_used", {
+          route: c.req.path,
+          paymentId: canonical.paymentId,
+          status: canonical.status,
+          terminalReason: canonical.terminalReason,
+          checkStatusUrl: canonical.checkStatusUrl,
+          compatShimUsed: canonical.compatShimUsed,
+          action: "compat_payment_status_inference",
+        }, {
+          source: canonical.source,
+          errorReason: settleResult.errorReason,
+          instability,
+        });
+      }
+
+      if (canonical?.status && isInFlightPaymentState(canonical.status)) {
+        logPaymentEvent(log, "info", "payment.poll", {
+          route: c.req.path,
+          paymentId: canonical.paymentId,
+          status: canonical.status,
+          terminalReason: canonical.terminalReason,
+          checkStatusUrl: canonical.checkStatusUrl,
+          compatShimUsed: canonical.compatShimUsed,
+          action: "reuse_same_payment",
+        }, {
+          retry_after: classified.retryAfter ?? null,
+          retryable: canonical.retryable ?? null,
+          errorReason: settleResult.errorReason,
+          instability,
+        });
+      } else {
+        logPaymentEvent(log, classified.httpStatus >= 500 ? "error" : "warn", "payment.finalized", {
+          route: c.req.path,
+          paymentId: canonical?.paymentId,
+          status: canonical?.status ?? "failed",
+          terminalReason: canonical?.terminalReason,
+          checkStatusUrl: canonical?.checkStatusUrl,
+          compatShimUsed: canonical?.compatShimUsed,
+          action: "return_error",
+        }, {
+          classification_code: classified.code,
+          http_status: classified.httpStatus,
+          errorReason: settleResult.errorReason,
+          retryable: canonical?.retryable ?? null,
+          instability,
+        });
+      }
+
+      // Intentional second emission: payment.poll/payment.finalized above captures
+      // the payment lifecycle state for dashboards, while payment.retry_decision below
+      // captures the client-facing retry action for alerting and client SDK telemetry.
+      // Both events share the same failure but serve different consumers.
+      logPaymentEvent(log, classified.httpStatus >= 500 ? "error" : "warn", "payment.retry_decision", {
+        route: c.req.path,
+        paymentId: canonical?.paymentId,
+        status: canonical?.status ?? "failed",
+        terminalReason: canonical?.terminalReason,
+        checkStatusUrl: canonical?.checkStatusUrl,
+        compatShimUsed: canonical?.compatShimUsed,
+        action: getRetryAction(classified.code, canonical),
+      }, {
+        classification_code: classified.code,
+        http_status: classified.httpStatus,
+        retry_after: classified.retryAfter ?? null,
+        errorReason: settleResult.errorReason,
+        retryable: canonical?.retryable ?? null,
+        instability,
+      });
 
       if (classified.retryAfter) {
         c.header("Retry-After", String(classified.retryAfter));
@@ -416,11 +639,17 @@ export function x402Middleware(
         {
           error: classified.message,
           code: classified.code,
+          ...(canonical?.paymentId ? { paymentId: canonical.paymentId } : {}),
+          ...(canonical?.status ? { status: canonical.status } : {}),
+          ...(canonical?.terminalReason ? { terminalReason: canonical.terminalReason } : {}),
+          ...(canonical?.retryable !== undefined ? { retryable: canonical.retryable } : {}),
+          ...(canonical?.checkStatusUrl ? { checkStatusUrl: canonical.checkStatusUrl } : {}),
           asset,
           network: networkV2,
           resource: c.req.path,
           details: {
             errorReason: settleResult.errorReason,
+            ...(canonical ? { canonical } : {}),
           },
         },
         classified.httpStatus as 400 | 402 | 500 | 502 | 503
@@ -440,6 +669,18 @@ export function x402Middleware(
 
     log.info("Payment verified successfully", {
       txId: settleResult.transaction,
+      payerAddress,
+      asset,
+      network: networkV2,
+      amount: paymentRequirements.amount,
+      tier: dynamic ? "dynamic" : tier,
+    });
+    logPaymentEvent(log, "info", "payment.finalized", {
+      route: c.req.path,
+      status: "confirmed",
+      action: "allow_request",
+    }, {
+      txid: settleResult.transaction,
       payerAddress,
       asset,
       network: networkV2,

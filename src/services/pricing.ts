@@ -184,11 +184,16 @@ export function estimateInputTokens(messages: ChatCompletionRequest["messages"])
   let totalChars = 0;
 
   for (const msg of messages) {
-    if (typeof msg?.content === "string") {
-      totalChars += msg.content.length;
-    } else if (Array.isArray(msg.content)) {
+    // Cast needed: OpenRouter message types don't expose a unified `content` shape.
+    // Messages can carry string | array | null depending on role, but the SDK types
+    // them narrowly per-role. Widening to unknown lets us safely branch below.
+    const content = msg?.content as unknown;
+
+    if (typeof content === "string") {
+      totalChars += content.length;
+    } else if (Array.isArray(content)) {
       // Handle multimodal messages where content is an array of parts
-      for (const part of msg.content) {
+      for (const part of content) {
         if (part && typeof part === "object" && "type" in part) {
           if (part.type === "text" && typeof (part as { type: string; text?: string }).text === "string") {
             totalChars += (part as { type: string; text: string }).text.length;

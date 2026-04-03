@@ -7,6 +7,7 @@
 import { AIEndpoint } from "../../base";
 import type { AppContext, UsageRecord } from "../../../types";
 import type { ContentfulStatusCode } from "hono/utils/http-status";
+import { response402, tokenTypeParam } from "../../schema";
 
 interface CloudflareAIErrorClassification {
   message: string;
@@ -132,19 +133,7 @@ export class CloudflareChat extends AIEndpoint {
         },
       },
     },
-    parameters: [
-      {
-        name: "tokenType",
-        in: "query" as const,
-        required: false,
-        schema: {
-          type: "string" as const,
-          enum: ["STX", "sBTC", "USDCx"],
-          default: "STX",
-        },
-        description: "Payment token type",
-      },
-    ],
+    parameters: [tokenTypeParam],
     responses: {
       "200": {
         description: "Chat completion response",
@@ -169,7 +158,7 @@ export class CloudflareChat extends AIEndpoint {
         },
       },
       "400": { description: "Invalid request" },
-      "402": { description: "Payment required" },
+      "402": response402,
       "404": { description: "Model not found (error_code: MODEL_NOT_FOUND, retryable: false)" },
       "429": { description: "Rate limit exceeded (error_code: RATE_LIMIT, retryable: true)" },
       "502": { description: "Upstream AI error (error_code: INTERNAL_ERROR, retryable: false)" },

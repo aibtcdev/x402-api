@@ -11,6 +11,7 @@ import { TIER_PRICING, stxToTokenAmount } from "../services/pricing";
 import type { PricingTier, TokenType } from "../types";
 import { getEndpointMetadata, buildBazaarExtension } from "../bazaar";
 import type { BazaarExtension } from "../bazaar";
+import { PAYMENT_LIFECYCLE_METADATA } from "./payment-contract";
 
 // =============================================================================
 // V2 Manifest Types
@@ -65,6 +66,9 @@ export interface V2ManifestEntry {
 export interface V2Manifest {
   x402Version: 2;
   items: V2ManifestEntry[];
+  metadata?: {
+    paymentLifecycle: typeof PAYMENT_LIFECYCLE_METADATA;
+  };
 }
 
 /**
@@ -276,5 +280,8 @@ export function generateX402Manifest(config: GeneratorConfig): V2Manifest {
   return {
     x402Version: 2,
     items,
+    metadata: {
+      paymentLifecycle: PAYMENT_LIFECYCLE_METADATA,
+    },
   };
 }
