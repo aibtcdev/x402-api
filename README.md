@@ -75,6 +75,21 @@ bun run tests/_run_all_tests.ts --category=hashing
 bun run tests/_run_all_tests.ts --filter=sha256 --all-tokens
 ```
 
+### Rollout Check
+
+For the immediate-pay-per-call stabilization path, run a focused staging or production check against a cheap paid endpoint:
+
+```bash
+export X402_WORKER_URL=https://x402.aibtc.dev
+bun run tests/_run_all_tests.ts --filter=sha256 --token=STX --retries=2 --verbose
+```
+
+On any retryable 402 during this check, confirm the body stays on canonical caller-facing semantics:
+- `status` never returns `submitted`
+- `paymentId` is present before retrying the same payment
+- `terminalReason` is the normalized terminal signal when present
+- `checkStatusUrl` is treated as additive when present
+
 ### Test Modes
 
 | Mode | Description |

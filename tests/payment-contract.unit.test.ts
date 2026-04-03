@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import {
+  CanonicalDomainBoundary,
   IN_FLIGHT_STATES,
   PAYMENT_STATES,
   PAYMENT_STATE_DEFAULT_DELIVERY,
@@ -25,8 +26,12 @@ describe("payment contract parity", () => {
 
   test("keeps immediate-pay-per-call lifecycle metadata aligned with canonical delivery rules", () => {
     expect(PAYMENT_LIFECYCLE_METADATA.submittedCallerFacing).toBe(false);
-    expect(PAYMENT_LIFECYCLE_METADATA.inFlightIdentity).toBe("paymentId");
-    expect(PAYMENT_LIFECYCLE_METADATA.deliverableState).toBe("confirmed");
+    expect(PAYMENT_LIFECYCLE_METADATA.inFlightIdentity).toBe(
+      CanonicalDomainBoundary.paymentIdentity.field
+    );
+    expect(PAYMENT_LIFECYCLE_METADATA.deliverableState).toBe(
+      CanonicalDomainBoundary.defaultProtectedResourceDelivery.deliverableStates[0]
+    );
     expect(PAYMENT_LIFECYCLE_METADATA.deliveryMode).toBe("immediate-pay-per-call-compat");
 
     for (const state of IN_FLIGHT_STATES) {
