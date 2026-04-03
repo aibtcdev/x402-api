@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.6.1](https://github.com/aibtcdev/x402-api/compare/v1.6.0...v1.6.1) (2026-04-03)
+
+
+### Bug Fixes
+
+* align relay payment polling contract with tx-schemas ([#95](https://github.com/aibtcdev/x402-api/issues/95)) ([42bc614](https://github.com/aibtcdev/x402-api/commit/42bc614c9f416b49caf2d3b2bfa72aaba5ec49cb))
+
 ## [1.6.0](https://github.com/aibtcdev/x402-api/compare/v1.5.4...v1.6.0) (2026-03-23)
 
 
