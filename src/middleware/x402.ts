@@ -610,6 +610,10 @@ export function x402Middleware(
         });
       }
 
+      // Intentional second emission: payment.poll/payment.finalized above captures
+      // the payment lifecycle state for dashboards, while payment.retry_decision below
+      // captures the client-facing retry action for alerting and client SDK telemetry.
+      // Both events share the same failure but serve different consumers.
       logPaymentEvent(log, classified.httpStatus >= 500 ? "error" : "warn", "payment.retry_decision", {
         route: c.req.path,
         paymentId: canonical?.paymentId,

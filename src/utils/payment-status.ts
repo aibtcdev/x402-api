@@ -335,6 +335,8 @@ export function extractCanonicalPaymentDetails(input: unknown): CanonicalPayment
   };
 }
 
+// Used by test utilities (_shared_utils.ts) to validate retry behavior in e2e payment flows.
+// Not imported in production middleware — extractCanonicalPaymentDetails is used there instead.
 export function getRetryDecisionContext(input: unknown): RetryDecisionContext | null {
   const canonical = extractCanonicalPaymentDetails(input);
   if (canonical) {
