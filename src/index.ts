@@ -81,6 +81,10 @@ import { axDiscoveryRouter } from "./endpoints/ax-discovery";
 
 // x402 manifest generator
 import { generateX402Manifest } from "./utils/x402-schema";
+import {
+  PAYMENT_LIFECYCLE_METADATA,
+  PAYMENT_PUBLIC_LIFECYCLE,
+} from "./utils/payment-contract";
 
 // Durable Objects
 export { UsageDO } from "./durable-objects/UsageDO";
@@ -390,6 +394,9 @@ All paid endpoints use the Coinbase-compatible x402 v2 protocol:
 - Client signs transaction and sends \`payment-signature\` header (base64 JSON)
 - Successful response includes \`payment-response\` header (base64 JSON)
 - Optionally specify token via \`X-PAYMENT-TOKEN-TYPE\` (STX, sBTC, USDCx)
+- Canonical lifecycle: \`${PAYMENT_PUBLIC_LIFECYCLE}\`
+- \`submitted\` is internal relay telemetry only and never caller-facing
+- This service keeps immediate pay-per-call behavior during rollout; if a payment remains in-flight, errors surface canonical \`status\`, \`terminalReason\`, relay-owned \`paymentId\`, and \`checkStatusUrl\` when available
 
 ## Pricing
 | Tier | STX | Description |
@@ -445,6 +452,7 @@ app.get("/", (c) => {
         required: "payment-required",
       },
       tokenTypeHeader: "X-PAYMENT-TOKEN-TYPE",
+      lifecycle: PAYMENT_LIFECYCLE_METADATA,
     },
   });
 });

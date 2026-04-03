@@ -6,10 +6,16 @@ import type {
   NetworkType,
   TokenType,
   PaymentRequiredV2,
-  PaymentRequirementsV2,
   PaymentPayloadV2,
 } from "x402-stacks";
 import { encodePaymentPayload, X402_HEADERS } from "x402-stacks";
+import {
+  getRetryDecisionContext,
+  isInFlightPaymentState,
+  isRelayRetryableTerminalReason,
+  isSenderRebuildTerminalReason,
+  type RetryDecisionContext,
+} from "../src/utils/payment-status";
 
 // =============================================================================
 // Test Configuration Types
@@ -167,8 +173,19 @@ export function isNonceConflict(errorText: string): boolean {
 export function isRetryableError(
   status: number,
   errorCode?: string,
-  errorMessage?: string
+  errorMessage?: string,
+  errorBody?: unknown
 ): boolean {
+  const retryContext = getRetryDecisionContext(errorBody);
+
+  if (retryContext?.status && isInFlightPaymentState(retryContext.status)) return true;
+
+  if (retryContext?.terminalReason && isRelayRetryableTerminalReason(retryContext.terminalReason)) {
+    return true;
+  }
+
+  if (retryContext?.retryable === true) return true;
+
   if (RETRYABLE_STATUS_CODES.includes(status)) return true;
 
   if (errorCode && RETRYABLE_ERROR_CODES.includes(errorCode)) return true;
@@ -234,6 +251,12 @@ export interface ParsedErrorInfo {
   errorMessage?: string;
   retryAfterSecs?: number;
   details?: Record<string, unknown>;
+  paymentId?: string;
+  status?: RetryDecisionContext["status"];
+  terminalReason?: RetryDecisionContext["terminalReason"];
+  retryable?: boolean;
+  checkStatusUrl?: string;
+  parsedBody?: Record<string, unknown>;
   rawText: string;
 }
 
@@ -255,10 +278,20 @@ export function parseErrorResponse(
 
   try {
     const parsed = JSON.parse(text);
+    result.parsedBody = parsed;
     result.errorCode = parsed.code;
     result.errorMessage = parsed.error;
     result.retryAfterSecs = parsed.retryAfter;
     result.details = parsed.details;
+    result.checkStatusUrl = parsed.checkStatusUrl;
+
+    const retryContext = getRetryDecisionContext(parsed);
+    if (retryContext) {
+      result.paymentId = retryContext.paymentId;
+      result.status = retryContext.status;
+      result.terminalReason = retryContext.terminalReason;
+      result.retryable = retryContext.retryable;
+    }
 
     // Override with header value if present
     if (retryAfterHeader) {
@@ -280,6 +313,15 @@ export function parseErrorResponse(
 export function formatErrorMessage(parsed: ParsedErrorInfo): string {
   if (parsed.errorCode && parsed.errorMessage) {
     let msg = `[${parsed.errorCode}] ${parsed.errorMessage}`;
+    if (parsed.status) {
+      msg += ` status=${parsed.status}`;
+    }
+    if (parsed.paymentId) {
+      msg += ` paymentId=${parsed.paymentId}`;
+    }
+    if (parsed.terminalReason) {
+      msg += ` terminalReason=${parsed.terminalReason}`;
+    }
     if (parsed.retryAfterSecs) {
       msg += ` (retry after ${parsed.retryAfterSecs}s)`;
     }
@@ -474,110 +516,107 @@ export async function makeX402RequestWithRetry(
 
   let retryCount = 0;
   let wasNonceConflict = false;
+  let paymentReqBody: PaymentRequiredV2 | null = null;
+  let paymentPayload: PaymentPayloadV2 | null = null;
+  let paymentSignature: string | null = null;
 
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
-    // Step 1: Get 402 payment requirements (fresh on each attempt for nonce conflicts)
-    log(`Attempt ${attempt + 1}/${maxRetries + 1}: fetching payment requirements...`);
+    if (!paymentReqBody || !paymentPayload || !paymentSignature) {
+      log(`Attempt ${attempt + 1}/${maxRetries + 1}: fetching payment requirements...`);
 
-    let initialRes: Response;
-    try {
-      initialRes = await fetch(urlWithToken, {
-        method,
-        headers: {
-          ...(body ? { "Content-Type": "application/json" } : {}),
-          ...extraHeaders,
-        },
-        body: body ? JSON.stringify(body) : undefined,
-      });
-    } catch (error) {
-      // Network-level fetch error - treat as retryable
-      log(`Network error during initial request: ${error instanceof Error ? error.message : String(error)}`);
-      if (attempt < maxRetries) {
-        retryCount++;
-        const backoffMs = Math.min(baseDelayMs * Math.pow(2, attempt), maxDelayMs);
-        log(`Waiting ${backoffMs}ms before retry...`);
-        await sleep(backoffMs);
-        continue;
+      let initialRes: Response;
+      try {
+        initialRes = await fetch(urlWithToken, {
+          method,
+          headers: {
+            ...(body ? { "Content-Type": "application/json" } : {}),
+            ...extraHeaders,
+          },
+          body: body ? JSON.stringify(body) : undefined,
+        });
+      } catch (error) {
+        log(`Network error during initial request: ${error instanceof Error ? error.message : String(error)}`);
+        if (attempt < maxRetries) {
+          retryCount++;
+          const backoffMs = Math.min(baseDelayMs * Math.pow(2, attempt), maxDelayMs);
+          log(`Waiting ${backoffMs}ms before retry...`);
+          await sleep(backoffMs);
+          continue;
+        }
+        return {
+          status: 0,
+          data: { error: "network_error", message: error instanceof Error ? error.message : String(error) },
+          headers: new Headers(),
+          retryCount,
+          wasNonceConflict,
+        };
       }
-      // Max retries exceeded - return synthetic error response
-      return {
-        status: 0,
-        data: { error: "network_error", message: error instanceof Error ? error.message : String(error) },
-        headers: new Headers(),
-        retryCount,
-        wasNonceConflict,
+
+      if (initialRes.status !== 402) {
+        const text = await initialRes.text();
+        return {
+          status: initialRes.status,
+          data: parseResponseData(text),
+          headers: initialRes.headers,
+          retryCount,
+          wasNonceConflict,
+        };
+      }
+
+      paymentReqBody = await initialRes.json();
+
+      if (paymentReqBody.x402Version !== 2 || !paymentReqBody.accepts?.length) {
+        return {
+          status: 400,
+          data: { error: "Invalid v2 payment requirements" },
+          headers: new Headers(),
+          retryCount,
+          wasNonceConflict,
+        };
+      }
+
+      const requirements = paymentReqBody.accepts[0];
+      log(`Payment required: ${requirements.amount} ${requirements.asset}, network: ${requirements.network}`);
+
+      let tokenContract: { address: string; name: string } | undefined;
+      if (requirements.asset !== "STX" && requirements.asset.includes(".")) {
+        const [contractAddress, contractName] = requirements.asset.split(".");
+        tokenContract = { address: contractAddress, name: contractName };
+      }
+
+      const v1CompatibleRequest = {
+        maxAmountRequired: requirements.amount,
+        resource: paymentReqBody.resource.url,
+        payTo: requirements.payTo,
+        network: (requirements.network.includes("2147483648") ? "testnet" : "mainnet") as "mainnet" | "testnet",
+        nonce: crypto.randomUUID(),
+        expiresAt: new Date(Date.now() + 5 * 60 * 1000).toISOString(),
+        tokenType,
+        tokenContract,
       };
-    }
 
-    // If not 402, return as-is (success or non-payment error)
-    if (initialRes.status !== 402) {
-      const text = await initialRes.text();
-      return {
-        status: initialRes.status,
-        data: parseResponseData(text),
-        headers: initialRes.headers,
-        retryCount,
-        wasNonceConflict,
+      const signResult = await x402Client.signPayment(v1CompatibleRequest);
+      if (!signResult.success || !signResult.signedTransaction) {
+        return {
+          status: 500,
+          data: { error: `Payment signing failed: ${signResult.error || "empty transaction"}` },
+          headers: new Headers(),
+          retryCount,
+          wasNonceConflict,
+        };
+      }
+      log("Payment signed");
+
+      paymentPayload = {
+        x402Version: 2,
+        resource: paymentReqBody.resource,
+        accepted: requirements,
+        payload: {
+          transaction: signResult.signedTransaction,
+        },
       };
+      paymentSignature = encodePaymentPayload(paymentPayload);
     }
-
-    // Step 2: Parse v2 payment requirements and sign payment
-    const paymentReqBody: PaymentRequiredV2 = await initialRes.json();
-
-    // Validate v2 format
-    if (paymentReqBody.x402Version !== 2 || !paymentReqBody.accepts?.length) {
-      return {
-        status: 400,
-        data: { error: "Invalid v2 payment requirements" },
-        headers: new Headers(),
-        retryCount,
-        wasNonceConflict,
-      };
-    }
-
-    const requirements = paymentReqBody.accepts[0];
-    log(`Payment required: ${requirements.amount} ${requirements.asset}, network: ${requirements.network}`);
-
-    // Parse tokenContract from v2 asset string (required for sBTC and USDCx)
-    let tokenContract: { address: string; name: string } | undefined;
-    if (requirements.asset !== "STX" && requirements.asset.includes(".")) {
-      const [contractAddress, contractName] = requirements.asset.split(".");
-      tokenContract = { address: contractAddress, name: contractName };
-    }
-
-    // Build v1-compatible request for the client's signPayment method
-    const v1CompatibleRequest = {
-      maxAmountRequired: requirements.amount,
-      resource: paymentReqBody.resource.url,
-      payTo: requirements.payTo,
-      network: (requirements.network.includes("2147483648") ? "testnet" : "mainnet") as "mainnet" | "testnet",
-      nonce: crypto.randomUUID(),
-      expiresAt: new Date(Date.now() + 5 * 60 * 1000).toISOString(),
-      tokenType,
-      tokenContract,
-    };
-
-    const signResult = await x402Client.signPayment(v1CompatibleRequest);
-    if (!signResult.success || !signResult.signedTransaction) {
-      return {
-        status: 500,
-        data: { error: `Payment signing failed: ${signResult.error || "empty transaction"}` },
-        headers: new Headers(),
-        retryCount,
-        wasNonceConflict,
-      };
-    }
-    log("Payment signed");
-
-    // Build v2 payment payload
-    const paymentPayload: PaymentPayloadV2 = {
-      x402Version: 2,
-      resource: paymentReqBody.resource,
-      accepted: requirements,
-      payload: {
-        transaction: signResult.signedTransaction,
-      },
-    };
 
     // Step 3: Submit with v2 payment-signature header
     let paidRes: Response;
@@ -587,7 +626,7 @@ export async function makeX402RequestWithRetry(
         headers: {
           ...(body ? { "Content-Type": "application/json" } : {}),
           ...extraHeaders,
-          [X402_HEADERS.PAYMENT_SIGNATURE]: encodePaymentPayload(paymentPayload),
+          [X402_HEADERS.PAYMENT_SIGNATURE]: paymentSignature,
           "X-PAYMENT-TOKEN-TYPE": tokenType,
         },
         body: body ? JSON.stringify(body) : undefined,
@@ -600,6 +639,9 @@ export async function makeX402RequestWithRetry(
         const backoffMs = Math.min(baseDelayMs * Math.pow(2, attempt), maxDelayMs);
         log(`Waiting ${backoffMs}ms before retry...`);
         await sleep(backoffMs);
+        paymentReqBody = null;
+        paymentPayload = null;
+        paymentSignature = null;
         continue;
       }
       // Max retries exceeded - return synthetic error response
@@ -626,22 +668,36 @@ export async function makeX402RequestWithRetry(
 
     // Check if we should retry
     const errText = await paidRes.text();
-    let errorCode: string | undefined;
-    let errorMessage: string | undefined;
-    let bodyRetryAfter: number | undefined;
-    let validationError: string | undefined;
+    const parsedError = parseErrorResponse(
+      errText,
+      paidRes.status,
+      paidRes.headers.get("Retry-After")
+    );
+    const fullErrorText = `${parsedError.errorCode || ""} ${parsedError.errorMessage || ""} ${errText}`;
 
-    try {
-      const parsed = JSON.parse(errText);
-      errorCode = parsed.code;
-      errorMessage = parsed.error || parsed.details?.settleError || parsed.details?.exceptionMessage;
-      bodyRetryAfter = parsed.retryAfter;
-      validationError = parsed.details?.validationError;
-    } catch {
-      /* not JSON */
+    if (parsedError.status && isInFlightPaymentState(parsedError.status) && attempt < maxRetries) {
+      retryCount++;
+      const delayMs = Math.min(calculateBackoff(attempt, parsedError.retryAfterSecs), maxDelayMs);
+      log(
+        `Payment ${parsedError.paymentId || "unknown"} still ${parsedError.status}, waiting ${delayMs}ms before reusing the same payment...`
+      );
+      await sleep(delayMs);
+      continue;
     }
 
-    const fullErrorText = `${errorCode || ""} ${errorMessage || ""} ${validationError || ""} ${errText}`;
+    if (parsedError.terminalReason && isSenderRebuildTerminalReason(parsedError.terminalReason) && attempt < maxRetries) {
+      retryCount++;
+      wasNonceConflict = parsedError.terminalReason === "sender_nonce_duplicate" || isNonceConflict(fullErrorText);
+      const delayMs = wasNonceConflict
+        ? nonceConflictDelayMs
+        : Math.min(calculateBackoff(attempt, parsedError.retryAfterSecs), maxDelayMs);
+      log(`Sender-side payment issue (${parsedError.terminalReason}), rebuilding after ${delayMs}ms...`);
+      await sleep(delayMs);
+      paymentReqBody = null;
+      paymentPayload = null;
+      paymentSignature = null;
+      continue;
+    }
 
     // Check for nonce conflict specifically (handled differently from other retryable errors)
     if (isNonceConflict(fullErrorText) && attempt < maxRetries) {
@@ -649,20 +705,32 @@ export async function makeX402RequestWithRetry(
       retryCount++;
       log(`Nonce conflict detected, waiting ${nonceConflictDelayMs}ms for mempool to clear...`);
       await sleep(nonceConflictDelayMs);
+      paymentReqBody = null;
+      paymentPayload = null;
+      paymentSignature = null;
       continue;
     }
 
     // Check for other retryable errors (mutually exclusive with nonce conflict)
-    if (!isNonceConflict(fullErrorText) && isRetryableError(paidRes.status, errorCode, errorMessage || errText) && attempt < maxRetries) {
+    if (
+      !isNonceConflict(fullErrorText) &&
+      isRetryableError(
+        paidRes.status,
+        parsedError.errorCode,
+        parsedError.errorMessage || errText,
+        parsedError.parsedBody
+      ) &&
+      attempt < maxRetries
+    ) {
       retryCount++;
-      const retryAfterSecs = paidRes.headers.get("Retry-After")
-        ? parseInt(paidRes.headers.get("Retry-After")!, 10)
-        : bodyRetryAfter || 0;
-      const backoffMs = Math.min(baseDelayMs * Math.pow(2, attempt), maxDelayMs);
-      const delayMs = retryAfterSecs > 0 ? retryAfterSecs * 1000 : backoffMs;
-
+      const delayMs = Math.min(calculateBackoff(attempt, parsedError.retryAfterSecs), maxDelayMs);
       log(`Retryable error (${paidRes.status}), waiting ${delayMs}ms...`);
       await sleep(delayMs);
+      if (!parsedError.status || !isInFlightPaymentState(parsedError.status)) {
+        paymentReqBody = null;
+        paymentPayload = null;
+        paymentSignature = null;
+      }
       continue;
     }
 

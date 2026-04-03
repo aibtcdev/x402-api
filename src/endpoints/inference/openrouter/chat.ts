@@ -9,7 +9,7 @@ import { BaseEndpoint } from "../../base";
 import { OpenRouterClient, OpenRouterError } from "../../../services/openrouter";
 import { logPnL } from "../../../services/pricing";
 import { lookupModel, getSimilarModels } from "../../../services/model-cache";
-import { tokenTypeParam } from "../../schema";
+import { response402, tokenTypeParam } from "../../schema";
 import type { AppContext, ChatCompletionRequest, UsageRecord } from "../../../types";
 
 export class OpenRouterChat extends BaseEndpoint {
@@ -105,7 +105,7 @@ export class OpenRouterChat extends BaseEndpoint {
         },
       },
       "400": { description: "Invalid request" },
-      "402": { description: "Payment required" },
+      "402": response402,
       "500": { description: "Server error" },
     },
   };
