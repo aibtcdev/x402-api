@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.6.2](https://github.com/aibtcdev/x402-api/compare/v1.6.1...v1.6.2) (2026-04-16)
+
+
+### Bug Fixes
+
+* **deps:** upgrade axios to 1.15.0 to patch CVE-2025-62718 ([#102](https://github.com/aibtcdev/x402-api/issues/102)) ([e6ba205](https://github.com/aibtcdev/x402-api/commit/e6ba205f1fd56ba597402225688f0a8b2899e6f0))
+
 ## [1.6.1](https://github.com/aibtcdev/x402-api/compare/v1.6.0...v1.6.1) (2026-04-03)
 
 
