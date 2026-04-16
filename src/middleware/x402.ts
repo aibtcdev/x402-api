@@ -504,51 +504,81 @@ export function x402Middleware(
       network: networkV2,
     });
 
+    // Exponential backoff retry for conflicting_nonce errors.
+    // When two concurrent settlements race on the relay, one may be rejected with
+    // conflicting_nonce. This is a transient relay-side condition — retrying with
+    // backoff gives the relay time to clear the nonce contention. See issue #84.
+    const CONFLICTING_NONCE_MAX_RETRIES = 3;
+    const CONFLICTING_NONCE_BACKOFF_MS = [5_000, 10_000, 20_000];
+
     let settleResult: SettlementResponseV2;
-    try {
-      settleResult = await verifier.settle(paymentPayload, {
-        paymentRequirements,
-      });
+    let settleAttempt = 0;
+    while (true) {
+      try {
+        settleResult = await verifier.settle(paymentPayload, {
+          paymentRequirements,
+        });
 
-      log.debug("Settle result", { ...settleResult });
-    } catch (error) {
-      const errorStr = String(error);
-      log.error("Payment settlement exception", { error: errorStr });
+        log.debug("Settle result", { ...settleResult });
 
-      const classified = classifyPaymentError(error);
-      logPaymentEvent(log, classified.httpStatus >= 500 ? "error" : "warn", "payment.retry_decision", {
-        route: c.req.path,
-        status: "failed",
-        action: getRetryAction(classified.code),
-      }, {
-        classification_code: classified.code,
-        http_status: classified.httpStatus,
-        retry_after: classified.retryAfter ?? null,
-        instability: derivePaymentInstability({
-          classifiedCode: classified.code,
-          error: errorStr,
-        }),
-        relay_failure: true,
-        exceptionMessage: errorStr,
-      });
-      if (classified.retryAfter) {
-        c.header("Retry-After", String(classified.retryAfter));
-      }
+        // If we got a conflicting_nonce failure and still have retries left, retry.
+        if (
+          !settleResult.success &&
+          settleResult.errorReason === "conflicting_nonce" &&
+          settleAttempt < CONFLICTING_NONCE_MAX_RETRIES
+        ) {
+          const delayMs = CONFLICTING_NONCE_BACKOFF_MS[settleAttempt] ?? 20_000;
+          log.warn("Conflicting nonce on settlement, retrying with backoff", {
+            attempt: settleAttempt + 1,
+            maxRetries: CONFLICTING_NONCE_MAX_RETRIES,
+            delayMs,
+          });
+          await new Promise((resolve) => setTimeout(resolve, delayMs));
+          settleAttempt++;
+          continue;
+        }
 
-      return c.json(
-        {
-          error: classified.message,
-          code: classified.code,
-          asset,
-          network: networkV2,
-          resource: c.req.path,
-          details: {
-            exceptionMessage: errorStr,
+        // Success or a non-retryable failure — exit the loop.
+        break;
+      } catch (error) {
+        const errorStr = String(error);
+        log.error("Payment settlement exception", { error: errorStr });
+
+        const classified = classifyPaymentError(error);
+        logPaymentEvent(log, classified.httpStatus >= 500 ? "error" : "warn", "payment.retry_decision", {
+          route: c.req.path,
+          status: "failed",
+          action: getRetryAction(classified.code),
+        }, {
+          classification_code: classified.code,
+          http_status: classified.httpStatus,
+          retry_after: classified.retryAfter ?? null,
+          instability: derivePaymentInstability({
+            classifiedCode: classified.code,
+            error: errorStr,
+          }),
+          relay_failure: true,
+          exceptionMessage: errorStr,
+        });
+        if (classified.retryAfter) {
+          c.header("Retry-After", String(classified.retryAfter));
+        }
+
+        return c.json(
+          {
+            error: classified.message,
+            code: classified.code,
+            asset,
+            network: networkV2,
+            resource: c.req.path,
+            details: {
+              exceptionMessage: errorStr,
+            },
           },
-        },
-        classified.httpStatus as 400 | 402 | 500 | 502 | 503
-      );
-    }
+          classified.httpStatus as 400 | 402 | 500 | 502 | 503
+        );
+      }
+    } // end while (retry loop)
 
     if (!settleResult.success) {
       log.error("Payment settlement failed", { ...settleResult });
