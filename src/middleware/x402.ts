@@ -45,11 +45,6 @@ import {
 import { lookupModel } from "../services/model-cache";
 import { getEndpointMetadata, buildBazaarExtension } from "../bazaar";
 import {
-  isInFlightPaymentState,
-  isRelayRetryableTerminalReason,
-  isSenderRebuildTerminalReason,
-} from "../utils/payment-status";
-import {
   derivePaymentInstability,
   logPaymentEvent,
 } from "../utils/payment-observability";

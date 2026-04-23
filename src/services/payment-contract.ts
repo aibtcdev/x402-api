@@ -6,7 +6,6 @@
  * middleware, utilities, and Durable Objects in this service.
  *
  * No runtime logic lives here — only re-exports and type aliases.
- * Phase 5 will widen this surface once the compat shim is removed.
  */
 
 // =============================================================================
@@ -67,7 +66,6 @@ export type {
 // HttpSettleResponse is the tx-schemas equivalent of x402-stacks SettlementResponseV2.
 // Both represent the HTTP /settle endpoint response. The tx-schemas version is a
 // discriminated union on `success` which is structurally compatible.
-// Phase 5 removes the x402-stacks dependency entirely.
 // =============================================================================
 
 export type { HttpSettleResponse as SettleResult } from "@aibtc/tx-schemas/http";
