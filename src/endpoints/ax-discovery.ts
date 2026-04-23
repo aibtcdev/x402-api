@@ -662,6 +662,39 @@ All endpoints return structured errors:
 | 404    | Not found (key, paste, job, lock does not exist) |
 | 500    | Server error (upstream API, Durable Object, etc) |
 
+### Payment Error Hints
+
+All non-200 payment error responses include structured retry hints in both JSON body
+and the \`payment-response\` header (base64 JSON, same convention as success path):
+
+\`\`\`json
+{
+  "error": "Payment failed in settlement relay",
+  "code": "transaction_failed",
+  "retryable": true,
+  "nextSteps": "rebuild_and_resign",
+  "retryAfter": 30,
+  "paymentId": "pay_abc123",
+  "checkStatusUrl": "https://relay.example.com/payment/pay_abc123"
+}
+\`\`\`
+
+\`nextSteps\` is a stable token (not free-form prose) clients can branch on:
+
+| Token                  | Meaning                                                       |
+|------------------------|---------------------------------------------------------------|
+| \`rebuild_and_resign\`   | Sender nonce issue — build and sign a fresh transaction       |
+| \`retry_later\`          | Transient relay/settlement error — retry after \`retryAfter\` s |
+| \`start_new_payment\`    | Payment replaced or identity lost — begin a new x402 flow    |
+| \`fix_and_resend\`       | Invalid transaction payload — correct it before retrying      |
+| \`wait_for_confirmation\`| Payment confirmed — resource delivery should proceed         |
+
+The \`payment-response\` header on error paths carries
+\`base64({ retryable, nextSteps, retryAfter? })\` — decode with \`atob()\` + \`JSON.parse()\`.
+\`retryAfter\` is only present when the hint is \`retry_later\`.
+
+Topic doc: https://x402.aibtc.com/topics/payment-flow
+
 ## Related
 
 - AIBTC platform hub: https://aibtc.com/llms.txt
@@ -1304,6 +1337,73 @@ If the relay returns canonical in-flight or terminal failure data instead of imm
 \`\`\`
 
 Terminal outcomes may also include \`terminalReason\`, for example \`sender_nonce_stale\`, \`queue_unavailable\`, \`broadcast_failure\`, \`nonce_replacement\`, or \`unknown_payment_identity\`. When the relay only exposes legacy details, x402-api uses compatibility-only inference after canonical parsing rather than making fallback inference the primary path.
+
+## Payment Error Hints
+
+All non-200 payment error responses include structured retry hints. These appear in two places:
+
+1. **JSON body** — merged into the error object:
+\`\`\`json
+{
+  "error": "Payment failed in settlement relay",
+  "code": "transaction_failed",
+  "retryable": true,
+  "nextSteps": "rebuild_and_resign",
+  "paymentId": "pay_abc123",
+  "checkStatusUrl": "https://relay.example.com/payment/pay_abc123"
+}
+\`\`\`
+
+2. **\`payment-response\` header** — base64 JSON (decode with \`atob()\` + \`JSON.parse()\`):
+\`\`\`json
+{ "retryable": true, "nextSteps": "rebuild_and_resign" }
+\`\`\`
+\`retryAfter\` (seconds) is added when the hint is \`retry_later\`:
+\`\`\`json
+{ "retryable": true, "retryAfter": 30, "nextSteps": "retry_later" }
+\`\`\`
+
+### nextSteps Token Vocabulary
+
+\`nextSteps\` is a stable string token — not free-form prose — for branching logic:
+
+| Token                  | When used                                              | Retryable |
+|------------------------|--------------------------------------------------------|-----------|
+| \`rebuild_and_resign\`   | Sender nonce stale/duplicate — build a fresh signed tx | true      |
+| \`retry_later\`          | Transient relay or settlement error                    | true      |
+| \`start_new_payment\`    | Payment replaced, expired, or identity not found       | false     |
+| \`fix_and_resend\`       | Invalid transaction payload — fix before retrying      | false     |
+| \`wait_for_confirmation\`| Payment confirmed — resource delivery should proceed   | false     |
+
+### Hint Derivation by Terminal Reason Category
+
+| Category     | Example reasons                                              | nextSteps            |
+|--------------|--------------------------------------------------------------|----------------------|
+| sender       | sender_nonce_stale, sender_nonce_gap, origin_chaining_limit  | rebuild_and_resign   |
+| relay        | queue_unavailable, sponsor_failure, internal_error           | retry_later (+30s)   |
+| settlement   | broadcast_failure, chain_abort, broadcast_rate_limited       | retry_later (+30s)   |
+| replacement  | nonce_replacement, superseded                                | start_new_payment    |
+| identity     | expired, unknown_payment_identity                            | start_new_payment    |
+| validation   | invalid_transaction, not_sponsored                           | fix_and_resend       |
+
+### Client Retry Pattern
+
+\`\`\`typescript
+const response = await fetch(endpoint, { headers: { "payment-signature": sig } });
+if (!response.ok) {
+  const body = await response.json();
+  if (!body.retryable) {
+    // terminal — start a new x402 flow or fix the payload
+    return handleTerminal(body.nextSteps);
+  }
+  const delay = (body.retryAfter ?? 5) * 1000;
+  await sleep(delay);
+  if (body.nextSteps === "rebuild_and_resign") {
+    sig = await rebuildAndSign(paymentRequirements);
+  }
+  // retry with same or new sig
+}
+\`\`\`
 
 ## Token Types
 

@@ -53,6 +53,8 @@ import {
   derivePaymentInstability,
   logPaymentEvent,
 } from "../utils/payment-observability";
+import { computeDerivedHints } from "../utils/payment-hints";
+import type { DerivedHints } from "../utils/payment-hints";
 
 // =============================================================================
 // Types
@@ -149,6 +151,23 @@ export function classifyPaymentError(error: unknown, settleResult?: Partial<Sett
   httpStatus: number;
   retryAfter?: number;
 } {
+  // Canonical status check — use tx-schemas status field when present (boring-tx relay).
+  // This takes precedence over string heuristics so the response is accurate.
+  const canonicalStatus = settleResult && "status" in settleResult
+    ? (settleResult as { status?: string }).status
+    : undefined;
+
+  if (canonicalStatus === "failed") {
+    return { code: X402_ERROR_CODES.TRANSACTION_FAILED, message: "Payment failed in settlement relay", httpStatus: 402 };
+  }
+  if (canonicalStatus === "replaced") {
+    return { code: X402_ERROR_CODES.TRANSACTION_FAILED, message: "Payment was replaced, start a new payment flow", httpStatus: 402 };
+  }
+  if (canonicalStatus === "not_found") {
+    return { code: X402_ERROR_CODES.INVALID_TRANSACTION_STATE, message: "Payment identity expired or was not found, start a new payment flow", httpStatus: 402 };
+  }
+
+  // Legacy string-heuristic fallback — used when relay does not return canonical status.
   const errorStr = String(error).toLowerCase();
   // errorReason is only present on the failure branch of the discriminated union
   const errorReason = settleResult && "errorReason" in settleResult
@@ -208,6 +227,26 @@ export function classifyPaymentError(error: unknown, settleResult?: Partial<Sett
   }
 
   return { code: X402_ERROR_CODES.UNEXPECTED_SETTLE_ERROR, message: "Payment processing error", httpStatus: 500, retryAfter: 5 };
+}
+
+/**
+ * Derive DerivedHints for exception-path errors (no canonical status from relay).
+ * Maps classified error code → hints using the same stable token vocabulary.
+ */
+function hintsFromClassifiedCode(classified: { code: string; retryAfter?: number }): DerivedHints {
+  switch (classified.code) {
+    case X402_ERROR_CODES.TRANSACTION_PENDING:
+      return { retryable: true, retryAfter: classified.retryAfter ?? 10, nextSteps: "retry_later" };
+    case X402_ERROR_CODES.BROADCAST_FAILED:
+    case X402_ERROR_CODES.UNEXPECTED_SETTLE_ERROR:
+      return { retryable: true, retryAfter: classified.retryAfter ?? 5, nextSteps: "retry_later" };
+    case X402_ERROR_CODES.TRANSACTION_FAILED:
+      return { retryable: false, nextSteps: "start_new_payment" };
+    case X402_ERROR_CODES.INVALID_TRANSACTION_STATE:
+      return { retryable: true, nextSteps: "rebuild_and_resign" };
+    default:
+      return { retryable: false, nextSteps: "start_new_payment" };
+  }
 }
 
 function getRetryAction(code: string): string {
@@ -499,10 +538,17 @@ export function x402Middleware(
         c.header("Retry-After", String(classified.retryAfter));
       }
 
+      // Derive hints from classified code (no canonical status available on exception path)
+      const exceptionHints = hintsFromClassifiedCode(classified);
+      c.header(X402_HEADERS.PAYMENT_RESPONSE, encodeBase64Json(exceptionHints));
+
       return c.json(
         {
           error: classified.message,
           code: classified.code,
+          retryable: exceptionHints.retryable,
+          nextSteps: exceptionHints.nextSteps,
+          ...(exceptionHints.retryAfter !== undefined ? { retryAfter: exceptionHints.retryAfter } : {}),
           asset,
           network: networkV2,
           resource: c.req.path,
@@ -518,6 +564,8 @@ export function x402Middleware(
       log.error("Payment settlement failed", { ...settleResult });
 
       const errorReason = (settleResult as { errorReason?: string }).errorReason;
+      const canonicalStatus = (settleResult as { status?: string }).status;
+      const terminalReason = (settleResult as { terminalReason?: string }).terminalReason;
       const classified = classifyPaymentError(errorReason || "settlement_failed", settleResult);
       const instability = derivePaymentInstability({
         classifiedCode: classified.code,
@@ -576,10 +624,20 @@ export function x402Middleware(
         c.header("Retry-After", String(classified.retryAfter));
       }
 
+      // Compute hints: prefer canonical status/terminalReason from relay, else fall back
+      // to classified code. computeDerivedHints handles non-terminal status gracefully.
+      const settleHints: DerivedHints =
+        computeDerivedHints(canonicalStatus ?? "failed", terminalReason) ??
+        hintsFromClassifiedCode(classified);
+      c.header(X402_HEADERS.PAYMENT_RESPONSE, encodeBase64Json(settleHints));
+
       return c.json(
         {
           error: classified.message,
           code: classified.code,
+          retryable: settleHints.retryable,
+          nextSteps: settleHints.nextSteps,
+          ...(settleHints.retryAfter !== undefined ? { retryAfter: settleHints.retryAfter } : {}),
           paymentId,
           checkStatusUrl,
           asset,
