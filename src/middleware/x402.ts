@@ -720,6 +720,7 @@ export function x402Middleware(
     // Add v2 response headers (base64 encoded)
     c.header(X402_HEADERS.PAYMENT_RESPONSE, encodeBase64Json(settleResult));
     c.header("X-PAYER-ADDRESS", payerAddress);
+    c.header("X-PAYMENT-ID", paymentId);
 
     return next();
   };

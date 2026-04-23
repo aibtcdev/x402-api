@@ -70,6 +70,7 @@ import { runSyncLifecycle } from "./sync-lifecycle.test";
 import { runQueueLifecycle } from "./queue-lifecycle.test";
 import { runMemoryLifecycle } from "./memory-lifecycle.test";
 import { runInferenceLifecycle } from "./inference-lifecycle.test";
+import { runPaymentPollingLifecycle } from "./payment-polling-lifecycle.test";
 
 // =============================================================================
 // Lifecycle Test Mapping (add as lifecycle tests are created)
@@ -86,6 +87,7 @@ const LIFECYCLE_RUNNERS: Record<
   queue: runQueueLifecycle,
   memory: runMemoryLifecycle,
   inference: runInferenceLifecycle,
+  "payment-polling": runPaymentPollingLifecycle,
 };
 
 // =============================================================================

@@ -16,6 +16,7 @@ import {
   isSenderRebuildTerminalReason,
   type RetryDecisionContext,
 } from "../src/utils/payment-status";
+import { getAddressFromPrivateKey } from "@stacks/transactions";
 
 // =============================================================================
 // Test Configuration Types
@@ -462,6 +463,72 @@ export const validators = {
 };
 
 // =============================================================================
+// Local Nonce Tracking
+// =============================================================================
+
+/**
+ * Tracks sender nonces locally to avoid conflicts when signing rapid sequential payments.
+ * Fetches the initial nonce from Hiro's extended API (accounts for mempool pending txs),
+ * then increments locally for each subsequent payment in the same process.
+ */
+class NonceTracker {
+  private nextNonce: bigint | null = null;
+
+  async getAndIncrement(address: string, network: string): Promise<bigint> {
+    if (this.nextNonce === null) {
+      const baseUrl = network === "mainnet"
+        ? "https://api.hiro.so"
+        : "https://api.testnet.hiro.so";
+      const res = await fetch(`${baseUrl}/extended/v1/address/${address}/nonces`);
+      const data = (await res.json()) as { possible_next_nonce: number };
+      this.nextNonce = BigInt(data.possible_next_nonce);
+    }
+    const nonce = this.nextNonce;
+    this.nextNonce = nonce + BigInt(1);
+    return nonce;
+  }
+
+  reset() {
+    this.nextNonce = null;
+  }
+}
+
+const nonceTracker = new NonceTracker();
+
+/**
+ * Sign a payment using the public sign methods with an explicit nonce.
+ * Bypasses signPayment() which doesn't support passing a tx nonce through.
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+async function signPaymentWithNonce(
+  client: any,
+  request: {
+    payTo: string;
+    maxAmountRequired: string;
+    network: string;
+    nonce: string;
+    tokenType?: string;
+    tokenContract?: { address: string; name: string };
+  },
+  txNonce: bigint
+): Promise<{ signedTransaction: string; success: boolean; senderAddress?: string; error?: string }> {
+  const details = {
+    recipient: request.payTo,
+    amount: BigInt(request.maxAmountRequired),
+    senderKey: client.privateKey,
+    network: request.network,
+    memo: request.nonce.substring(0, 34),
+    nonce: txNonce,
+    tokenType: request.tokenType || "STX",
+    tokenContract: request.tokenContract,
+  };
+
+  if (details.tokenType === "sBTC") return client.signSBTCTransfer(details);
+  if (details.tokenType === "USDCx") return client.signUSDCxTransfer(details);
+  return client.signSTXTransfer(details);
+}
+
+// =============================================================================
 // Nonce Conflict Retry Helper
 // =============================================================================
 
@@ -606,7 +673,14 @@ export async function makeX402RequestWithRetry(
         tokenContract,
       };
 
-      const signResult = await x402Client.signPayment(v1CompatibleRequest);
+      // Use tracked nonce to avoid conflicts on rapid sequential payments
+      const senderAddress = getAddressFromPrivateKey(
+        x402Client.privateKey,
+        v1CompatibleRequest.network
+      );
+      const txNonce = await nonceTracker.getAndIncrement(senderAddress, v1CompatibleRequest.network);
+      log(`Signing with tracked nonce ${txNonce}`);
+      const signResult = await signPaymentWithNonce(x402Client, v1CompatibleRequest, txNonce);
       if (!signResult.success || !signResult.signedTransaction) {
         return {
           status: 500,
@@ -653,6 +727,7 @@ export async function makeX402RequestWithRetry(
         paymentReqBody = null;
         paymentPayload = null;
         paymentSignature = null;
+        nonceTracker.reset();
         continue;
       }
       // Max retries exceeded - return synthetic error response
@@ -707,6 +782,7 @@ export async function makeX402RequestWithRetry(
       paymentReqBody = null;
       paymentPayload = null;
       paymentSignature = null;
+      nonceTracker.reset();
       continue;
     }
 
@@ -719,6 +795,7 @@ export async function makeX402RequestWithRetry(
       paymentReqBody = null;
       paymentPayload = null;
       paymentSignature = null;
+      nonceTracker.reset();
       continue;
     }
 
@@ -741,6 +818,7 @@ export async function makeX402RequestWithRetry(
         paymentReqBody = null;
         paymentPayload = null;
         paymentSignature = null;
+        nonceTracker.reset();
       }
       continue;
     }
