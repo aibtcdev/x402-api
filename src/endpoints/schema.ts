@@ -105,25 +105,6 @@ const paymentStatusErrorSchema = {
       additionalProperties: true,
       properties: {
         errorReason: { type: "string" as const },
-        canonical: {
-          type: "object" as const,
-          additionalProperties: true,
-          properties: {
-            paymentId: { type: "string" as const },
-            status: {
-              type: "string" as const,
-              enum: [...PAYMENT_PUBLIC_STATES],
-            },
-            terminalReason: { type: "string" as const },
-            retryable: { type: "boolean" as const },
-            error: { type: "string" as const },
-            errorCode: { type: "string" as const },
-            checkStatusUrl: { type: "string" as const, format: "uri" },
-            txid: { type: "string" as const },
-            compatShimUsed: { type: "boolean" as const },
-            source: { type: "string" as const, enum: ["canonical", "inferred"] },
-          },
-        },
       },
     },
   },

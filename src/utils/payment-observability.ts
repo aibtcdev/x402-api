@@ -1,6 +1,5 @@
 import packageJson from "../../package.json";
 import type { Logger } from "../types";
-import type { CanonicalPaymentDetails } from "./payment-status";
 
 export const PAYMENT_LOG_SERVICE = "x402-api";
 export const PAYMENT_LOG_MIDDLEWARE = "x402";
@@ -15,11 +14,10 @@ export interface PaymentLogContext {
   terminalReason?: string;
   action: string;
   checkStatusUrl?: string;
-  compatShimUsed?: boolean;
 }
 
 interface PaymentInstabilityInput {
-  canonical?: CanonicalPaymentDetails | null;
+  terminalReason?: string;
   classifiedCode?: string;
   errorReason?: string;
   error?: string;
@@ -38,7 +36,6 @@ export function buildPaymentLogFields(
     terminalReason: context.terminalReason ?? null,
     action: context.action,
     checkStatusUrl_present: Boolean(context.checkStatusUrl),
-    compat_shim_used: Boolean(context.compatShimUsed),
     repo_version: PAYMENT_REPO_VERSION,
     ...extra,
   };
@@ -70,12 +67,12 @@ export function logPaymentEvent(
 }
 
 export function derivePaymentInstability({
-  canonical,
+  terminalReason,
   classifiedCode,
   errorReason,
   error,
 }: PaymentInstabilityInput): string | undefined {
-  const combined = `${canonical?.terminalReason || ""} ${errorReason || ""} ${error || ""} ${classifiedCode || ""}`.toLowerCase();
+  const combined = `${terminalReason || ""} ${errorReason || ""} ${error || ""} ${classifiedCode || ""}`.toLowerCase();
 
   if (
     combined.includes("sender_nonce") ||
