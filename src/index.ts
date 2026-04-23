@@ -90,6 +90,7 @@ import {
 export { UsageDO } from "./durable-objects/UsageDO";
 export { StorageDO } from "./durable-objects/StorageDO";
 export { MetricsDO } from "./durable-objects/MetricsDO";
+export { PaymentPollingDO } from "./durable-objects/PaymentPollingDO";
 
 // =============================================================================
 // Hono App
@@ -257,6 +258,36 @@ const FREE_ROUTES = new Set([
   "/inference/cloudflare/models",
 ]);
 
+// Payment status polling route (free, no payment required)
+// Must be registered before x402 middleware and added to FREE_ROUTES via prefix check.
+app.get("/payment-status/:paymentId", async (c) => {
+  const paymentId = c.req.param("paymentId");
+
+  if (!paymentId?.startsWith("pay_")) {
+    return c.json(
+      { error: "Invalid paymentId — expected a relay payment identifier (pay_ prefix)" },
+      400
+    );
+  }
+
+  if (!c.env.PAYMENT_POLLING_DO) {
+    return c.json(
+      { error: "Payment polling unavailable — PAYMENT_POLLING_DO binding not configured" },
+      503
+    );
+  }
+
+  const id = c.env.PAYMENT_POLLING_DO.idFromName(paymentId);
+  const stub = c.env.PAYMENT_POLLING_DO.get(id);
+  const snapshot = await stub.status();
+
+  if (!snapshot) {
+    return c.json({ error: "Payment not found" }, 404);
+  }
+
+  return c.json(snapshot);
+});
+
 // Unified x402 payment middleware
 app.use("*", async (c, next) => {
   const path = c.req.path;
@@ -266,8 +297,8 @@ app.use("*", async (c, next) => {
     return next();
   }
 
-  // Skip free route prefixes (AX discovery topic docs)
-  if (path.startsWith("/topics/")) {
+  // Skip free route prefixes (AX discovery topic docs, payment status)
+  if (path.startsWith("/topics/") || path.startsWith("/payment-status/")) {
     return next();
   }
 
