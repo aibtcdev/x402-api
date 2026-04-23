@@ -17,8 +17,8 @@ import type {
   PaymentRequiredV2,
   PaymentRequirementsV2,
   PaymentPayloadV2,
-  SettlementResponseV2,
 } from "x402-stacks";
+import type { SettleResult } from "../services/payment-contract";
 import type {
   Env,
   AppVariables,
@@ -119,7 +119,7 @@ function getAssetV2(
 /**
  * Classify payment errors for appropriate response
  */
-export function classifyPaymentError(error: unknown, settleResult?: Partial<SettlementResponseV2>): {
+export function classifyPaymentError(error: unknown, settleResult?: Partial<SettleResult>): {
   code: string;
   message: string;
   httpStatus: number;
@@ -127,7 +127,11 @@ export function classifyPaymentError(error: unknown, settleResult?: Partial<Sett
 } {
   const canonical = extractCanonicalPaymentDetails(settleResult);
   const errorStr = String(error).toLowerCase();
-  const resultError = settleResult?.errorReason?.toLowerCase() || "";
+  // errorReason is only present on the failure branch of the discriminated union
+  const errorReason = settleResult && "errorReason" in settleResult
+    ? (settleResult as { errorReason?: string }).errorReason
+    : undefined;
+  const resultError = errorReason?.toLowerCase() || "";
   const combined = `${errorStr} ${resultError}`;
 
   if (canonical?.status) {
@@ -504,11 +508,14 @@ export function x402Middleware(
       network: networkV2,
     });
 
-    let settleResult: SettlementResponseV2;
+    let settleResult: SettleResult;
     try {
+      // x402-stacks settle() returns SettlementResponseV2; cast to SettleResult
+      // (HttpSettleResponse from tx-schemas). Structurally compatible — Phase 5 removes
+      // the x402-stacks dependency when the RPC path replaces the HTTP settle call.
       settleResult = await verifier.settle(paymentPayload, {
         paymentRequirements,
-      });
+      }) as unknown as SettleResult;
 
       log.debug("Settle result", { ...settleResult });
     } catch (error) {
