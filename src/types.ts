@@ -6,6 +6,7 @@ import type { Context } from "hono";
 import type { UsageDO } from "./durable-objects/UsageDO";
 import type { StorageDO } from "./durable-objects/StorageDO";
 import type { MetricsDO } from "./durable-objects/MetricsDO";
+import type { PaymentPollingDO } from "./durable-objects/PaymentPollingDO";
 
 // Note: x402-stacks types are imported directly where needed
 
@@ -37,6 +38,7 @@ export interface Env {
   USAGE_DO: DurableObjectNamespace<UsageDO>;
   STORAGE_DO: DurableObjectNamespace<StorageDO>;
   METRICS_DO: DurableObjectNamespace<MetricsDO>;
+  PAYMENT_POLLING_DO: DurableObjectNamespace<PaymentPollingDO>;
   // AI Binding
   AI: Ai;
   // Service bindings (optional - uncomment in wrangler.jsonc if available)
@@ -95,7 +97,7 @@ export interface TokenContract {
  */
 export interface X402Context {
   payerAddress: string;
-  settleResult: import("x402-stacks").SettlementResponseV2;
+  settleResult: import("./services/payment-contract").SettleResult;
   paymentPayload?: import("x402-stacks").PaymentPayloadV2;
   paymentRequirements?: import("x402-stacks").PaymentRequirementsV2;
   priceEstimate: PriceEstimate;

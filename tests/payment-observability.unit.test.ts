@@ -18,7 +18,6 @@ describe("payment observability helpers", () => {
           terminalReason: "queue_unavailable",
           action: "reuse_same_payment",
           checkStatusUrl: "https://relay.example/status/pay_123",
-          compatShimUsed: true,
         },
         { classification_code: "transaction_pending" }
       )
@@ -31,7 +30,6 @@ describe("payment observability helpers", () => {
       terminalReason: "queue_unavailable",
       action: "reuse_same_payment",
       checkStatusUrl_present: true,
-      compat_shim_used: true,
       repo_version: PAYMENT_REPO_VERSION,
       classification_code: "transaction_pending",
     });
@@ -62,5 +60,25 @@ describe("payment observability helpers", () => {
         error: "fallback pricing table used after fee refresh timeout",
       })
     ).toBe("fee_estimation_issue");
+  });
+
+  test("classifies relay and settlement instability correctly", () => {
+    expect(
+      derivePaymentInstability({
+        terminalReason: "queue_unavailable",
+      })
+    ).toBe("relay_failure");
+
+    expect(
+      derivePaymentInstability({
+        terminalReason: "broadcast_failure",
+      })
+    ).toBe("relay_failure");
+
+    expect(
+      derivePaymentInstability({
+        terminalReason: "invalid_transaction",
+      })
+    ).toBe("invalid_transaction_state");
   });
 });

@@ -19,7 +19,8 @@
     "bindings": [
       { "name": "USAGE_DO", "class_name": "UsageDO" },
       { "name": "STORAGE_DO", "class_name": "StorageDO" },
-      { "name": "METRICS_DO", "class_name": "MetricsDO" }
+      { "name": "METRICS_DO", "class_name": "MetricsDO" },
+      { "name": "PAYMENT_POLLING_DO", "class_name": "PaymentPollingDO" }
     ]
   },
   "services": [
@@ -27,7 +28,8 @@
   ],
   "migrations": [
     { "tag": "v1", "new_sqlite_classes": ["UsageDO", "StorageDO"] },
-    { "tag": "v2", "new_sqlite_classes": ["MetricsDO"] }
+    { "tag": "v2", "new_sqlite_classes": ["MetricsDO"] },
+    { "tag": "v3", "new_sqlite_classes": ["PaymentPollingDO"] }
   ],
   "vars": {
     "ENVIRONMENT": "development",
@@ -63,7 +65,8 @@
         "bindings": [
           { "name": "USAGE_DO", "class_name": "UsageDO" },
           { "name": "STORAGE_DO", "class_name": "StorageDO" },
-          { "name": "METRICS_DO", "class_name": "MetricsDO" }
+          { "name": "METRICS_DO", "class_name": "MetricsDO" },
+          { "name": "PAYMENT_POLLING_DO", "class_name": "PaymentPollingDO" }
         ]
       },
       "services": [
@@ -87,7 +90,8 @@
         "bindings": [
           { "name": "USAGE_DO", "class_name": "UsageDO" },
           { "name": "STORAGE_DO", "class_name": "StorageDO" },
-          { "name": "METRICS_DO", "class_name": "MetricsDO" }
+          { "name": "METRICS_DO", "class_name": "MetricsDO" },
+          { "name": "PAYMENT_POLLING_DO", "class_name": "PaymentPollingDO" }
         ]
       },
       "services": [
