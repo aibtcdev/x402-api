@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.7.1](https://github.com/aibtcdev/x402-api/compare/v1.7.0...v1.7.1) (2026-04-30)
+
+
+### Bug Fixes
+
+* **ax-discovery:** bind agent card URLs to request origin ([#114](https://github.com/aibtcdev/x402-api/issues/114)) ([9f53811](https://github.com/aibtcdev/x402-api/commit/9f53811886b388ec14fe6445a92ae24adcbe599e))
+* **payment-middleware:** fail closed when X402_SERVER_ADDRESS missing outside dev ([#116](https://github.com/aibtcdev/x402-api/issues/116)) ([43d12c7](https://github.com/aibtcdev/x402-api/commit/43d12c7e161a6c9843eef84e1801ba4c6737d1db))
+
 ## [1.7.0](https://github.com/aibtcdev/x402-api/compare/v1.6.2...v1.7.0) (2026-04-29)
 
 
