@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.7.0](https://github.com/aibtcdev/x402-api/compare/v1.6.2...v1.7.0) (2026-04-29)
+
+
+### Features
+
+* **payments:** adopt native boring-tx state machine ([#107](https://github.com/aibtcdev/x402-api/issues/107)) ([04c5a6a](https://github.com/aibtcdev/x402-api/commit/04c5a6a48ecf4e11003f067a9a42ab3e0c0ab380))
+
+
+### Bug Fixes
+
+* **deps:** upgrade lodash to 4.18.0 to patch CVE-2026-4800 ([#110](https://github.com/aibtcdev/x402-api/issues/110)) ([60ac45a](https://github.com/aibtcdev/x402-api/commit/60ac45a189d99dd6dbfe1b7047645667674a739d))
+
 ## [1.6.2](https://github.com/aibtcdev/x402-api/compare/v1.6.1...v1.6.2) (2026-04-16)
 
 
