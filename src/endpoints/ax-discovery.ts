@@ -1500,34 +1500,38 @@ const TOPIC_DOCS: Record<string, string> = {
   "payment-flow": PAYMENT_FLOW_DOC,
 };
 
-// Agent card
-const AGENT_CARD = {
+// Agent card builder. URLs are bound to the request origin so the same code
+// deployed to x402.aibtc.com and x402.aibtc.dev returns network-appropriate
+// discovery pointers — testnet agents discover testnet endpoints, not mainnet.
+function buildAgentCard(requestUrl: string) {
+  const base = new URL(requestUrl).origin;
+  return {
   name: "x402 Stacks API",
   description:
     "Pay-per-use API powered by x402 v2 protocol on Stacks blockchain. " +
     "Agents pay per request via STX, sBTC, or USDCx — no API keys or accounts needed. " +
     "Provides inference (LLM), hashing, Stacks utilities, and agent storage.",
-  url: "https://x402.aibtc.com",
+  url: base,
   provider: {
     organization: "AIBTC Working Group",
     url: "https://aibtc.com",
   },
   // x402 protocol version (not the package version, which is in package.json)
   version: "2.0.0",
-  documentationUrl: "https://x402.aibtc.com/llms.txt",
-  openApiUrl: "https://x402.aibtc.com/openapi.json",
+  documentationUrl: `${base}/llms.txt`,
+  openApiUrl: `${base}/openapi.json`,
   documentation: {
-    quickStart: "https://x402.aibtc.com/llms.txt",
-    fullReference: "https://x402.aibtc.com/llms-full.txt",
-    openApiSpec: "https://x402.aibtc.com/openapi.json",
-    x402Manifest: "https://x402.aibtc.com/x402.json",
+    quickStart: `${base}/llms.txt`,
+    fullReference: `${base}/llms-full.txt`,
+    openApiSpec: `${base}/openapi.json`,
+    x402Manifest: `${base}/x402.json`,
     platform: "https://aibtc.com/llms.txt",
     topicDocs: {
-      index: "https://x402.aibtc.com/topics",
-      inference: "https://x402.aibtc.com/topics/inference",
-      hashing: "https://x402.aibtc.com/topics/hashing",
-      storage: "https://x402.aibtc.com/topics/storage",
-      paymentFlow: "https://x402.aibtc.com/topics/payment-flow",
+      index: `${base}/topics`,
+      inference: `${base}/topics/inference`,
+      hashing: `${base}/topics/hashing`,
+      storage: `${base}/topics/storage`,
+      paymentFlow: `${base}/topics/payment-flow`,
     },
   },
   capabilities: {
@@ -1746,7 +1750,8 @@ const AGENT_CARD = {
       outputModes: ["application/json"],
     },
   ],
-};
+  } as const;
+}
 
 // =============================================================================
 // AX Discovery Router
@@ -1836,7 +1841,7 @@ axDiscoveryRouter.get("/topics/:topic", (c) => {
 });
 
 axDiscoveryRouter.get("/.well-known/agent.json", (c) => {
-  return c.json(AGENT_CARD, 200, {
+  return c.json(buildAgentCard(c.req.url), 200, {
     "Cache-Control": "public, max-age=3600, s-maxage=86400",
   });
 });
