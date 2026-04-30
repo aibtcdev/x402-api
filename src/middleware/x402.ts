@@ -288,10 +288,21 @@ export function x402Middleware(
   return async (c, next) => {
     const log = c.var.logger;
 
-    // Check if x402 is configured
+    // Check if x402 is configured. Skip is allowed only in local development —
+    // staging/production deploys must have X402_SERVER_ADDRESS or all paid routes
+    // silently become free.
     if (!c.env.X402_SERVER_ADDRESS) {
-      log.warn("X402_SERVER_ADDRESS not configured, skipping payment verification");
-      return next();
+      if (c.env.ENVIRONMENT === "development") {
+        log.warn("X402_SERVER_ADDRESS not configured (local dev), skipping payment verification");
+        return next();
+      }
+      log.error("X402_SERVER_ADDRESS not configured outside local dev — refusing request", {
+        environment: c.env.ENVIRONMENT,
+      });
+      return c.json(
+        { error: "x402 misconfiguration", code: "NOT_CONFIGURED" },
+        503
+      );
     }
 
     // Get token type from header or query

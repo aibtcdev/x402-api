@@ -302,10 +302,20 @@ app.use("*", async (c, next) => {
     return next();
   }
 
-  // Skip if no x402 config (local dev without payment setup)
+  // Skip is allowed only in local development — staging/production deploys must
+  // have X402_SERVER_ADDRESS or all paid routes silently become free.
   if (!c.env.X402_SERVER_ADDRESS) {
-    c.var.logger.warn("X402_SERVER_ADDRESS not configured, skipping payment verification");
-    return next();
+    if (c.env.ENVIRONMENT === "development") {
+      c.var.logger.warn("X402_SERVER_ADDRESS not configured (local dev), skipping payment verification");
+      return next();
+    }
+    c.var.logger.error("X402_SERVER_ADDRESS not configured outside local dev — refusing request", {
+      environment: c.env.ENVIRONMENT,
+    });
+    return c.json(
+      { error: "x402 misconfiguration", code: "NOT_CONFIGURED" },
+      503
+    );
   }
 
   // Get tier from endpoint config
