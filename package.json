@@ -37,7 +37,7 @@
     "@stacks/transactions": "^7.3.1",
     "axios": "^1.15.0",
     "chanfana": "^3.0.0",
-    "hono": "^4.12.14",
+    "hono": "^4.12.21",
     "x402-stacks": "^2.0.1"
   }
 }
