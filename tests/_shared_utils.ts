@@ -154,6 +154,23 @@ export const RETRYABLE_ERROR_CODES = [
  */
 export const RETRYABLE_STATUS_CODES = [429, 500, 502, 503, 504];
 
+/** Matches worker 500/502 bodies that wrap an upstream Hiro HTTP 429 */
+export const HIRO_UPSTREAM_RATE_LIMIT_RE = /429|rate limit|too many requests/i;
+
+/**
+ * True when the API returned 500/502 because Hiro rate-limited upstream.
+ * Retrying the whole X402 request amplifies Hiro load — fail fast instead.
+ */
+export function isUpstreamHiroRateLimitResponse(
+  status: number,
+  errorMessage?: string,
+  rawText?: string
+): boolean {
+  if (status !== 500 && status !== 502) return false;
+  const combined = `${errorMessage ?? ""} ${rawText ?? ""}`;
+  return HIRO_UPSTREAM_RATE_LIMIT_RE.test(combined);
+}
+
 /**
  * Check if error is a nonce conflict (transaction with same nonce already in mempool)
  * These require waiting for the stuck tx to confirm, then re-signing with fresh nonce
@@ -177,6 +194,17 @@ export function isRetryableError(
   errorMessage?: string,
   errorBody?: unknown
 ): boolean {
+  const rawText =
+    typeof errorBody === "string"
+      ? errorBody
+      : errorBody !== undefined
+        ? JSON.stringify(errorBody)
+        : undefined;
+
+  if (isUpstreamHiroRateLimitResponse(status, errorMessage, rawText)) {
+    return false;
+  }
+
   const retryContext = getRetryDecisionContext(errorBody);
 
   if (retryContext?.status && isInFlightPaymentState(retryContext.status)) return true;
@@ -801,6 +829,16 @@ export async function makeX402RequestWithRetry(
 
     // Check for other retryable errors (mutually exclusive with nonce conflict)
     if (
+      isUpstreamHiroRateLimitResponse(
+        paidRes.status,
+        parsedError.errorMessage || errText,
+        errText
+      )
+    ) {
+      log(
+        `Upstream Hiro rate limit surfaced as ${paidRes.status}; not retrying test harness (avoids amplification)`
+      );
+    } else if (
       !isNonceConflict(fullErrorText) &&
       isRetryableError(
         paidRes.status,
