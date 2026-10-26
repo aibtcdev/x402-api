@@ -29,7 +29,8 @@
   },
   "overrides": {
     "lodash": ">=4.18.0",
-    "sharp": ">=0.35.2"
+    "sharp": ">=0.35.2",
+    "undici": ">=7.30.1 <8"
   },
   "dependencies": {
     "@aibtc/tx-schemas": "^1.1.0",
