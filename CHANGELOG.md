@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.7.2](https://github.com/aibtcdev/x402-api/compare/v1.7.1...v1.7.2) (2026-10-27)
+
+
+### Bug Fixes
+
+* **deps:** bump sharp to 0.35.2+ via override to fix GHSA-f88m-g3jw-g9cj ([#139](https://github.com/aibtcdev/x402-api/issues/139)) ([e765b69](https://github.com/aibtcdev/x402-api/commit/e765b69d80d55b36a4b4d8c4b4c8f127fd198892))
+* **deps:** override undici to &gt;=7.30.1 &lt;8 (GHSA-xjj6-f33q-929c, GHSA-4qv8-2p9j-2685, GHSA-f72v-6w45-q472) ([#148](https://github.com/aibtcdev/x402-api/issues/148)) ([11e67af](https://github.com/aibtcdev/x402-api/commit/11e67af3905871a3f7076025bcf3c75eaf9f1563))
+
 ## [1.7.1](https://github.com/aibtcdev/x402-api/compare/v1.7.0...v1.7.1) (2026-04-30)
 
 
