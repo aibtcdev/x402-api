@@ -139,7 +139,7 @@ export class HiroClient {
     if (!response.ok) {
       const error = await response.text();
       this.log.error("Failed to fetch account balance", { address, error });
-      throw new HiroError(`Failed to fetch balance: ${response.status}`, response.status);
+      throw new HiroError(`Failed to fetch balance: ${response.status}`, response.status, parseRetryAfterSeconds(response));
     }
 
     return response.json() as Promise<AccountBalance>;
@@ -159,7 +159,7 @@ export class HiroClient {
     if (!response.ok) {
       const error = await response.text();
       this.log.error("Failed to fetch account info", { address, error });
-      throw new HiroError(`Failed to fetch account info: ${response.status}`, response.status);
+      throw new HiroError(`Failed to fetch account info: ${response.status}`, response.status, parseRetryAfterSeconds(response));
     }
 
     return response.json() as Promise<AccountInfo>;
@@ -183,7 +183,7 @@ export class HiroClient {
       }
       const error = await response.text();
       this.log.error("Failed to fetch BNS names", { address, error });
-      throw new HiroError(`Failed to fetch BNS names: ${response.status}`, response.status);
+      throw new HiroError(`Failed to fetch BNS names: ${response.status}`, response.status, parseRetryAfterSeconds(response));
     }
 
     return response.json() as Promise<{ names: string[] }>;
@@ -214,7 +214,7 @@ export class HiroClient {
       }
       const error = await response.text();
       this.log.error("Failed to resolve BNS name", { name, error });
-      throw new HiroError(`Failed to resolve BNS: ${response.status}`, response.status);
+      throw new HiroError(`Failed to resolve BNS: ${response.status}`, response.status, parseRetryAfterSeconds(response));
     }
 
     const data = (await response.json()) as BnsName;
@@ -238,7 +238,7 @@ export class HiroClient {
     if (!response.ok) {
       const error = await response.text();
       this.log.error("Failed to fetch transaction", { txId, error });
-      throw new HiroError(`Failed to fetch transaction: ${response.status}`, response.status);
+      throw new HiroError(`Failed to fetch transaction: ${response.status}`, response.status, parseRetryAfterSeconds(response));
     }
 
     return response.json() as Promise<Transaction>;
@@ -258,7 +258,7 @@ export class HiroClient {
     if (!response.ok) {
       const error = await response.text();
       this.log.error("Failed to fetch current block", { error });
-      throw new HiroError(`Failed to fetch block: ${response.status}`, response.status);
+      throw new HiroError(`Failed to fetch block: ${response.status}`, response.status, parseRetryAfterSeconds(response));
     }
 
     const data = (await response.json()) as { results: BlockInfo[] };
@@ -276,10 +276,24 @@ export class HiroClient {
 
 export class HiroError extends Error {
   public status: number;
+  /** Seconds from Hiro's Retry-After header (delta-seconds form), when it sent one. */
+  public retryAfterSeconds?: number;
 
-  constructor(message: string, status: number) {
+  constructor(message: string, status: number, retryAfterSeconds?: number) {
     super(message);
     this.name = "HiroError";
     this.status = status;
+    this.retryAfterSeconds = retryAfterSeconds;
   }
+}
+
+/**
+ * Read a Retry-After header in its delta-seconds form (RFC 9110 section 10.2.3).
+ * Returns undefined when absent, in HTTP-date form, or not a positive integer.
+ */
+export function parseRetryAfterSeconds(response: Response): number | undefined {
+  const raw = response.headers.get("Retry-After");
+  if (!raw || !/^\d+$/.test(raw.trim())) return undefined;
+  const seconds = Number(raw.trim());
+  return seconds > 0 ? seconds : undefined;
 }

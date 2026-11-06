@@ -10,6 +10,9 @@ import { Address } from "@stacks/transactions";
 import { HiroClient, HiroError } from "../../services/hiro";
 import type { AppContext, StacksProfile } from "../../types";
 
+/** Hiro rate limits are per minute; wait one window when Hiro sends no Retry-After. */
+const HIRO_RATE_LIMIT_DEFAULT_RETRY_SECONDS = 60;
+
 export class Profile extends SimpleEndpoint {
   schema = {
     tags: ["Stacks"],
@@ -56,6 +59,10 @@ export class Profile extends SimpleEndpoint {
       "400": response400,
       "402": response402,
       "404": { description: "Address not found" },
+      "503": {
+        description:
+          "Upstream Stacks API (Hiro) is rate limiting. Retry after the Retry-After header (seconds); the body repeats it as retryAfter.",
+      },
     },
   };
 
@@ -151,6 +158,22 @@ export class Profile extends SimpleEndpoint {
       if (error instanceof HiroError) {
         if (error.status === 404) {
           return this.errorResponse(c, "Address not found", 404);
+        }
+        if (error.status === 429) {
+          // Upstream rate limit, not a server fault: answer 503 + Retry-After
+          // (RFC 9110 sections 15.6.4 and 10.2.3) so clients back off instead of
+          // retrying a 500 straight back into the same limit. Hiro's limits are
+          // per minute (https://docs.hiro.so/resources/guides/rate-limits), so
+          // without a Retry-After from Hiro, wait one window.
+          const retryAfter = error.retryAfterSeconds ?? HIRO_RATE_LIMIT_DEFAULT_RETRY_SECONDS;
+          log.warn("Hiro API rate limited", { error: error.message, retryAfter });
+          c.header("Retry-After", String(retryAfter));
+          return this.errorResponse(
+            c,
+            "Upstream Stacks API (Hiro) is rate limiting requests; retry later",
+            503,
+            { retryable: true, retryAfter }
+          );
         }
         log.error("Hiro API error", { error: error.message, status: error.status });
         return this.errorResponse(c, `API error: ${error.message}`, error.status >= 500 ? 502 : 500);
