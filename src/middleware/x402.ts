@@ -1,18 +1,19 @@
 /**
  * x402 Payment Middleware (V2 Protocol)
  *
- * Verifies x402 payments for API requests using the x402-stacks library.
+ * Verifies x402 payments for API requests using the x402-stacks library
+ * or the bound X402_RELAY WorkerEntrypoint RPC service.
  * Implements Coinbase-compatible x402 v2 protocol.
  *
  * Payment lifecycle events emitted:
- *   payment.initiated  — paymentId minted, about to submit to relay
- *   payment.pending    — relay accepted but payment is still in-flight
- *   payment.confirmed  — relay settled successfully
+ *   payment.initiated  — requestCorrelationId derived, about to submit to relay
+ *   payment.pending    — relay accepted (enqueued) but payment is still in-flight
+ *   payment.confirmed  — relay settled and confirmed on-chain with verified origin
  *   payment.failed     — relay rejected with a terminal failure reason
  *   payment.replaced   — payment was replaced by another tx (nonce race)
  */
 
-import type { Context, MiddlewareHandler } from "hono";
+import type { MiddlewareHandler } from "hono";
 import {
   X402PaymentVerifier,
   networkToCAIP2,
@@ -20,12 +21,19 @@ import {
   X402_ERROR_CODES,
 } from "x402-stacks";
 import type {
-  NetworkV2,
   PaymentRequiredV2,
   PaymentRequirementsV2,
   PaymentPayloadV2,
 } from "x402-stacks";
+import {
+  deserializeTransaction,
+  addressHashModeToVersion,
+  Address,
+  AuthType,
+} from "@stacks/transactions";
+import { stripHexPrefix } from "../utils/encoding";
 import type { SettleResult } from "../services/payment-contract";
+import type { TerminalReason } from "../services/payment-contract";
 import type {
   Env,
   AppVariables,
@@ -36,6 +44,8 @@ import type {
   PriceEstimate,
   X402Context,
   ChatCompletionRequest,
+  RelayRPC,
+  RelayCheckPaymentResult,
 } from "../types";
 import {
   validateTokenType,
@@ -62,6 +72,103 @@ export interface X402MiddlewareOptions {
   dynamic?: boolean;
   /** Custom price estimator for dynamic pricing */
   estimator?: (body: unknown, tokenType: TokenType, log: Logger) => PriceEstimate;
+  /** Max checkPayment poll attempts per request after RPC enqueue (default: 2) */
+  rpcPollMaxAttempts?: number;
+  /** Delay in ms between checkPayment poll attempts (default: 10ms) */
+  rpcPollIntervalMs?: number;
+}
+
+export interface VerifiedTransactionOrigin {
+  cleanHex: string;
+  payerAddress: string;
+  authType: number;
+  nonce: string;
+}
+
+interface BoundRpcPayment {
+  relayPaymentId: string;
+  requestCorrelationId: string;
+  txHash: string;
+  verifiedPayer: string;
+  checkStatusUrl: string;
+  expectedRecipient: string;
+  minAmount: string;
+  asset: string;
+  network: string;
+  createdAt: number;
+}
+
+interface RelayBoundStore {
+  byRelayId: Map<string, BoundRpcPayment>;
+  byCorrelationId: Map<string, BoundRpcPayment>;
+  byTxHash: Map<string, BoundRpcPayment>;
+}
+
+// =============================================================================
+// Constants & In-Flight Bound Settlement Store
+// =============================================================================
+
+const IN_FLIGHT_RPC_STATUSES = new Set([
+  "queued",
+  "queued_with_warning",
+  "broadcasting",
+  "mempool",
+  "submitted",
+]);
+
+const TERMINAL_FAILURE_RPC_STATUSES = new Set([
+  "failed",
+  "replaced",
+  "not_found",
+]);
+
+const RPC_CODE_TO_TERMINAL_REASON: Partial<Record<string, TerminalReason>> = {
+  INVALID_TRANSACTION: "invalid_transaction",
+  NOT_SPONSORED: "not_sponsored",
+  SENDER_NONCE_STALE: "sender_nonce_stale",
+  SENDER_NONCE_DUPLICATE: "sender_nonce_duplicate",
+  SENDER_NONCE_GAP: "sender_nonce_gap",
+  ORIGIN_CHAINING_LIMIT: "origin_chaining_limit",
+  TOO_MUCH_CHAINING: "origin_chaining_limit",
+  QUEUE_UNAVAILABLE: "queue_unavailable",
+  SPONSOR_FAILURE: "sponsor_failure",
+  SPONSOR_NONCE_CONFLICT: "sponsor_nonce_conflict",
+  INTERNAL_ERROR: "internal_error",
+  BROADCAST_FAILED: "broadcast_failure",
+  TX_BROADCAST_ERROR: "broadcast_failure",
+  BROADCAST_RATE_LIMITED: "broadcast_rate_limited",
+  SETTLEMENT_FAILED: "chain_abort",
+  PAYMENT_IDENTIFIER_CONFLICT: "unknown_payment_identity",
+  SENDER_HAND_EXPIRED: "expired",
+};
+
+const BOUND_RPC_STORES = new WeakMap<object, RelayBoundStore>();
+
+function getRelayBoundStore(relay: RelayRPC): RelayBoundStore {
+  let store = BOUND_RPC_STORES.get(relay as unknown as object);
+  if (!store) {
+    store = {
+      byRelayId: new Map(),
+      byCorrelationId: new Map(),
+      byTxHash: new Map(),
+    };
+    BOUND_RPC_STORES.set(relay as unknown as object, store);
+  }
+  return store;
+}
+
+function saveBoundPayment(relay: RelayRPC, entry: BoundRpcPayment): void {
+  const store = getRelayBoundStore(relay);
+  store.byRelayId.set(entry.relayPaymentId, entry);
+  store.byCorrelationId.set(entry.requestCorrelationId, entry);
+  store.byTxHash.set(entry.txHash, entry);
+}
+
+function removeBoundPayment(relay: RelayRPC, entry: BoundRpcPayment): void {
+  const store = getRelayBoundStore(relay);
+  store.byRelayId.delete(entry.relayPaymentId);
+  store.byCorrelationId.delete(entry.requestCorrelationId);
+  store.byTxHash.delete(entry.txHash);
 }
 
 // =============================================================================
@@ -106,6 +213,89 @@ function decodeBase64Json<T>(base64: string): T | null {
 }
 
 /**
+ * Compute SHA-256 hex digest using Web Crypto API
+ */
+async function sha256Hex(input: string): Promise<string> {
+  const bytes = new TextEncoder().encode(input);
+  const digest = await crypto.subtle.digest("SHA-256", bytes);
+  return [...new Uint8Array(digest)]
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
+}
+
+/**
+ * Derive a deterministic request correlation key (`pay_<28 hex chars>`)
+ * from the signed transaction and payment requirements.
+ * Kept strictly separate from the relay-assigned `paymentId` and confirmed `txid`.
+ */
+export async function deriveRequestCorrelationId(
+  cleanTxHex: string,
+  expectedRecipient: string,
+  minAmount: string,
+  asset: string
+): Promise<string> {
+  const hashHex = await sha256Hex(
+    `${cleanTxHex.toLowerCase()}|${expectedRecipient}|${minAmount}|${asset}`
+  );
+  return `pay_${hashHex.slice(0, 28)}`;
+}
+
+/**
+ * Deserialize a Stacks transaction hex and extract its verified origin signer,
+ * authType (Standard vs Sponsored), and nonce.
+ * Never trusts unsigned outer payload fields.
+ */
+export function extractVerifiedTransactionOrigin(
+  txHex: string,
+  network: "mainnet" | "testnet"
+): VerifiedTransactionOrigin | null {
+  try {
+    const cleanHex = stripHexPrefix(txHex.trim());
+    if (!cleanHex || cleanHex.length < 20) {
+      return null;
+    }
+    const tx = deserializeTransaction(cleanHex);
+    const sc = tx.auth?.spendingCondition as
+      | { hashMode?: number; signer?: string; nonce?: bigint | number }
+      | undefined;
+    if (!sc || typeof sc.signer !== "string" || sc.signer.length === 0 || sc.hashMode === undefined) {
+      return null;
+    }
+    const version = addressHashModeToVersion(sc.hashMode, network);
+    const payerAddress = Address.stringify({ hash160: sc.signer, version });
+    if (!payerAddress) {
+      return null;
+    }
+    return {
+      cleanHex,
+      payerAddress,
+      authType: tx.auth.authType,
+      nonce: String(sc.nonce ?? 0),
+    };
+  } catch {
+    return null;
+  }
+}
+
+function extractCallerSuppliedPaymentId(
+  paymentPayload: PaymentPayloadV2,
+  headerPaymentId?: string
+): string | undefined {
+  if (headerPaymentId && headerPaymentId.startsWith("pay_")) {
+    return headerPaymentId;
+  }
+  const ext = paymentPayload.extensions as Record<string, unknown> | undefined;
+  const paymentIdentifier = ext?.["payment-identifier"] as
+    | { info?: { id?: unknown } }
+    | undefined;
+  const extId = paymentIdentifier?.info?.id;
+  if (typeof extId === "string" && extId.startsWith("pay_")) {
+    return extId;
+  }
+  return undefined;
+}
+
+/**
  * Convert token type and contract to v2 asset string
  */
 function getAssetV2(
@@ -120,21 +310,55 @@ function getAssetV2(
 }
 
 /**
- * Extract checkStatusUrl from settle result extensions, or construct from relay URL + paymentId.
- * The relay returns checkStatusUrl in extensions when the payment is tracked.
+ * Extract checkStatusUrl from top-level settleResult, settleResult.extensions,
+ * or construct from relay URL + canonical relay paymentId.
  */
-function extractCheckStatusUrl(
-  settleResult: SettleResult,
+export function extractCheckStatusUrl(
+  settleResult: Partial<SettleResult> & Record<string, unknown>,
   relayBaseUrl: string,
   paymentId: string
 ): string {
-  const ext = (settleResult as Record<string, unknown>).extensions as Record<string, unknown> | undefined;
+  if (typeof settleResult.checkStatusUrl === "string" && settleResult.checkStatusUrl.length > 0) {
+    return settleResult.checkStatusUrl;
+  }
+  const ext = settleResult.extensions as Record<string, unknown> | undefined;
   if (ext && typeof ext.checkStatusUrl === "string" && ext.checkStatusUrl.length > 0) {
     return ext.checkStatusUrl;
   }
-  // Fallback: construct from known relay URL pattern
   const base = relayBaseUrl.replace(/\/$/, "");
   return `${base}/payment/${paymentId}`;
+}
+
+function trackPaymentInDO(
+  c: { env: Env },
+  input: {
+    paymentId: string;
+    checkStatusUrl: string;
+    payerAddress: string;
+    route: string;
+    tokenType: string;
+  },
+  log: Logger
+): void {
+  if (!c.env.PAYMENT_POLLING_DO) {
+    return;
+  }
+  try {
+    const doId = c.env.PAYMENT_POLLING_DO.idFromName(input.paymentId);
+    c.env.PAYMENT_POLLING_DO.get(doId)
+      .track(input)
+      .catch((err: unknown) => {
+        log.warn("PaymentPollingDO.track failed (non-blocking)", {
+          paymentId: input.paymentId,
+          err: String(err),
+        });
+      });
+  } catch (err) {
+    log.warn("PaymentPollingDO.track invocation failed (non-blocking)", {
+      paymentId: input.paymentId,
+      err: String(err),
+    });
+  }
 }
 
 /**
@@ -152,6 +376,19 @@ export function classifyPaymentError(error: unknown, settleResult?: Partial<Sett
     ? (settleResult as { status?: string }).status
     : undefined;
 
+  if (
+    canonicalStatus === "queued" ||
+    canonicalStatus === "queued_with_warning" ||
+    canonicalStatus === "broadcasting" ||
+    canonicalStatus === "mempool"
+  ) {
+    return {
+      code: X402_ERROR_CODES.TRANSACTION_PENDING,
+      message: "Transaction pending in settlement relay, please retry",
+      httpStatus: 402,
+      retryAfter: 10,
+    };
+  }
   if (canonicalStatus === "failed") {
     return { code: X402_ERROR_CODES.TRANSACTION_FAILED, message: "Payment failed in settlement relay", httpStatus: 402 };
   }
@@ -269,21 +506,17 @@ function getRetryAction(code: string): string {
  *
  * @param options - Configuration for the middleware
  * @returns Hono middleware handler
- *
- * @example Fixed tier pricing:
- * ```ts
- * app.post("/hash/sha256", x402Middleware({ tier: "standard" }), handleHash);
- * ```
- *
- * @example Dynamic pricing for LLM:
- * ```ts
- * app.post("/inference/chat", x402Middleware({ dynamic: true }), handleChat);
- * ```
  */
 export function x402Middleware(
   options: X402MiddlewareOptions = {}
 ): MiddlewareHandler<{ Bindings: Env; Variables: AppVariables }> {
-  const { tier = "standard", dynamic = false, estimator } = options;
+  const {
+    tier = "standard",
+    dynamic = false,
+    estimator,
+    rpcPollMaxAttempts = 2,
+    rpcPollIntervalMs = 10,
+  } = options;
 
   return async (c, next) => {
     const log = c.var.logger;
@@ -337,9 +570,7 @@ export function x402Middleware(
           return c.json({ error: "Missing or invalid 'model' field", code: "invalid_request" }, 400);
         }
 
-        // Validate messages field before calling estimateChatPayment, which expects a non-empty
-        // array. This is request validation; downstream token estimation now guards non-array/empty
-        // values and returns a safe default instead of throwing.
+        // Validate messages field before calling estimateChatPayment
         if (!Array.isArray(chatRequest.messages) || chatRequest.messages.length === 0) {
           return c.json({ error: "Missing or invalid 'messages' field: must be a non-empty array", code: "invalid_request" }, 400);
         }
@@ -348,7 +579,6 @@ export function x402Middleware(
         if (c.env.OPENROUTER_API_KEY) {
           const modelResult = await lookupModel(chatRequest.model, c.env.OPENROUTER_API_KEY, log);
           if (modelResult.valid && modelResult.degraded) {
-            // Cache was empty after refresh attempt — allow the request but warn operators
             log.warn("Model cache degraded at middleware — skipping pre-payment model validation", {
               model: chatRequest.model,
             });
@@ -367,7 +597,6 @@ export function x402Middleware(
               400
             );
           }
-          // Use live registry pricing if available, otherwise fall through to hardcoded table
           priceEstimate = estimateChatPayment(chatRequest, tokenType, log, modelResult.pricing);
         } else {
           priceEstimate = estimateChatPayment(chatRequest, tokenType, log);
@@ -383,7 +612,6 @@ export function x402Middleware(
       c.set("x402", {
         payerAddress: "anonymous",
         settleResult: { success: true, transaction: "", network: networkToCAIP2(c.env.X402_NETWORK), payer: "anonymous" },
-        // No payment data for free tier
         paymentPayload: undefined,
         paymentRequirements: undefined,
         priceEstimate,
@@ -425,7 +653,6 @@ export function x402Middleware(
     const paymentSignature = c.req.header(X402_HEADERS.PAYMENT_SIGNATURE);
 
     if (!paymentSignature) {
-      // Return 402 with v2 payment requirements
       log.info("No payment header, returning 402", {
         tier: dynamic ? "dynamic" : tier,
         amountRequired: paymentRequirements.amount,
@@ -453,7 +680,6 @@ export function x402Middleware(
         accepts: [paymentRequirements],
       };
 
-      // Add Bazaar discovery extension if metadata exists for this endpoint
       const endpointMetadata = getEndpointMetadata(c.req.path, c.req.method);
       if (endpointMetadata) {
         paymentRequired.extensions = {
@@ -462,7 +688,6 @@ export function x402Middleware(
         log.debug("Added Bazaar extension to 402 response", { path: c.req.path });
       }
 
-      // Set payment-required header (base64 encoded)
       c.header(X402_HEADERS.PAYMENT_REQUIRED, encodeBase64Json(paymentRequired));
 
       return c.json(paymentRequired, 402);
@@ -471,7 +696,7 @@ export function x402Middleware(
     // Parse v2 payment payload from base64
     const paymentPayload = decodeBase64Json<PaymentPayloadV2>(paymentSignature);
 
-    if (!paymentPayload || paymentPayload.x402Version !== 2) {
+    if (!paymentPayload || paymentPayload.x402Version !== 2 || !paymentPayload.payload) {
       log.error("Invalid payment payload", { paymentSignature: paymentSignature.substring(0, 50) });
       return c.json({
         error: "Invalid payment-signature header",
@@ -479,84 +704,442 @@ export function x402Middleware(
       }, 400);
     }
 
-    // Mint paymentId for this payment attempt. Sent to relay as idempotency input via
-    // payment-identifier extension — the relay echoes it back in checkStatusUrl.
-    const paymentId = "pay_" + crypto.randomUUID();
+    const rawTxHex =
+      paymentPayload.payload.transaction ??
+      ((paymentPayload.payload as unknown as Record<string, unknown>).signedTransaction as string | undefined);
+
+    if (!rawTxHex || typeof rawTxHex !== "string") {
+      return c.json({
+        error: "Missing transaction hex in paymentPayload.payload",
+        code: X402_ERROR_CODES.INVALID_PAYLOAD,
+      }, 400);
+    }
+
+    const txOrigin = extractVerifiedTransactionOrigin(rawTxHex, c.env.X402_NETWORK);
+    const cleanTxHex = txOrigin?.cleanHex ?? stripHexPrefix(rawTxHex.trim());
+    const callerSuppliedPaymentId = extractCallerSuppliedPaymentId(
+      paymentPayload,
+      c.req.header("X-PAYMENT-ID")
+    );
+
+    // Derive stable request correlation key (distinct from relay paymentId and confirmed txid)
+    const requestCorrelationId = await deriveRequestCorrelationId(
+      cleanTxHex,
+      c.env.X402_SERVER_ADDRESS,
+      paymentRequirements.amount,
+      asset
+    );
+    const txHash = await sha256Hex(cleanTxHex.toLowerCase());
+
     paymentPayload.extensions = {
       ...(paymentPayload.extensions ?? {}),
-      "payment-identifier": { info: { id: paymentId } },
+      "payment-identifier": { info: { id: requestCorrelationId } },
     };
 
-    // Verify payment with settlement relay using v2 API
     const verifier = new X402PaymentVerifier(c.env.X402_FACILITATOR_URL);
+    const settlementTransport = c.env.X402_RELAY ? "rpc" : "http";
 
+    log.info("Initiating x402 payment settlement", {
+      settlementTransport,
+      requestCorrelationId,
+      route: c.req.path,
+      asset,
+      network: networkV2,
+    });
     logPaymentEvent(log, "info", "payment.initiated", {
       route: c.req.path,
-      paymentId,
+      paymentId: requestCorrelationId,
       status: "requires_payment",
       action: "submit_to_relay",
     }, {
+      settlementTransport,
+      requestCorrelationId,
       relayUrl: c.env.X402_FACILITATOR_URL,
       asset,
       network: networkV2,
     });
 
-    log.debug("Settling payment via settlement relay", {
-      relayUrl: c.env.X402_FACILITATOR_URL,
-      paymentId,
-      expectedRecipient: c.env.X402_SERVER_ADDRESS,
-      minAmount: paymentRequirements.amount,
-      asset,
+    let settleResult: SettleResult = {
+      success: false,
+      transaction: "",
       network: networkV2,
-    });
+      status: "failed",
+      errorReason: "uninitialized",
+    } as unknown as SettleResult;
+    let canonicalPaymentId = requestCorrelationId;
 
-    let settleResult: SettleResult;
     try {
       if (c.env.X402_RELAY) {
-        const txHex =
-          paymentPayload.payload.transaction ??
-          ((paymentPayload.payload as Record<string, unknown>).signedTransaction as string | undefined);
-        if (!txHex) {
-          throw new Error("Missing transaction hex in paymentPayload.payload");
+        // Verified transaction origin check:
+        // Never trust unsigned outer `paymentPayload.payer` and never fall back to `c.env.X402_SERVER_ADDRESS`.
+        let verifiedPayer = txOrigin?.payerAddress;
+        if (verifiedPayer && verifiedPayer === c.env.X402_SERVER_ADDRESS) {
+          return c.json(
+            {
+              error: "Payment sender cannot equal seller address",
+              code: X402_ERROR_CODES.SENDER_MISMATCH,
+            },
+            400
+          );
         }
-        const rpcResult = await c.env.X402_RELAY.submitPayment(
-          txHex,
-          {
-            expectedRecipient: c.env.X402_SERVER_ADDRESS,
-            minAmount: paymentRequirements.amount,
-            tokenType,
-            resource: c.req.path,
-            method: c.req.method,
-            maxTimeoutSeconds: paymentRequirements.maxTimeoutSeconds ?? 300,
-          },
-          paymentId
-        );
-        if (rpcResult.accepted) {
-          settleResult = {
-            success: true,
-            transaction: rpcResult.paymentId,
-            network: networkV2,
-            payer: ((paymentPayload as Record<string, unknown>).payer as string | undefined) ?? c.env.X402_SERVER_ADDRESS,
-            status: rpcResult.status,
-            checkStatusUrl: rpcResult.checkStatusUrl,
-          } as unknown as SettleResult;
-        } else {
-          settleResult = {
-            success: false,
-            transaction: "",
-            network: networkV2,
-            errorReason: rpcResult.code,
-            terminalReason: rpcResult.code,
-            status: "failed",
-            error: rpcResult.error,
-          } as unknown as SettleResult;
+
+        const relayStore = getRelayBoundStore(c.env.X402_RELAY);
+        let boundEntry: BoundRpcPayment | undefined;
+
+        if (callerSuppliedPaymentId) {
+          boundEntry =
+            relayStore.byRelayId.get(callerSuppliedPaymentId) ??
+            relayStore.byCorrelationId.get(callerSuppliedPaymentId);
+          if (boundEntry) {
+            const payerMismatch =
+              Boolean(verifiedPayer && boundEntry.verifiedPayer && verifiedPayer !== boundEntry.verifiedPayer);
+            const txMismatch = boundEntry.txHash !== txHash;
+            if (payerMismatch || txMismatch) {
+              return c.json(
+                {
+                  error: "Bound payment origin mismatch for recovery attempt",
+                  code: X402_ERROR_CODES.SENDER_MISMATCH,
+                },
+                400
+              );
+            }
+          }
+        }
+
+        if (!boundEntry) {
+          const existingByTx = relayStore.byTxHash.get(txHash);
+          if (
+            existingByTx &&
+            existingByTx.expectedRecipient === c.env.X402_SERVER_ADDRESS &&
+            existingByTx.minAmount === paymentRequirements.amount &&
+            existingByTx.asset === asset
+          ) {
+            if (verifiedPayer && existingByTx.verifiedPayer && verifiedPayer !== existingByTx.verifiedPayer) {
+              return c.json(
+                {
+                  error: "Bound payment origin mismatch for recovery attempt",
+                  code: X402_ERROR_CODES.SENDER_MISMATCH,
+                },
+                400
+              );
+            }
+            boundEntry = existingByTx;
+          }
+        }
+
+        let initialSubmitStatus: string | undefined;
+        let usedHttpCompatibilityFallback = false;
+
+        if (!boundEntry) {
+          const rpcResult = await c.env.X402_RELAY.submitPayment(
+            rawTxHex,
+            {
+              expectedRecipient: c.env.X402_SERVER_ADDRESS,
+              minAmount: paymentRequirements.amount,
+              tokenType,
+              ...(verifiedPayer ? { expectedSender: verifiedPayer } : {}),
+              resource: c.req.path,
+              method: c.req.method,
+              maxTimeoutSeconds: paymentRequirements.maxTimeoutSeconds ?? 300,
+            },
+            requestCorrelationId
+          );
+
+          if (!rpcResult.accepted) {
+            // Explicit compatibility case:
+            // The 402 quote does not advertise a sponsor, while pinned x402-sponsor-relay
+            // rejects non-sponsored (AuthType.Standard) transactions with NOT_SPONSORED.
+            const quoteAdvertisesSponsor = Boolean(
+              (paymentRequirements.extra as Record<string, unknown> | undefined)?.sponsor ||
+              (paymentRequirements.extra as Record<string, unknown> | undefined)?.feePayer
+            );
+            const isNonSponsoredCompatibilityCase =
+              rpcResult.code === "NOT_SPONSORED" &&
+              !quoteAdvertisesSponsor &&
+              txOrigin?.authType === AuthType.Standard;
+
+            if (isNonSponsoredCompatibilityCase) {
+              log.info("Non-sponsored transaction on non-sponsored quote; settling via HTTP facilitator compatibility path", {
+                requestCorrelationId,
+                payerAddress: verifiedPayer,
+              });
+              logPaymentEvent(log, "info", "payment.fallback_used", {
+                route: c.req.path,
+                paymentId: requestCorrelationId,
+                status: "requires_payment",
+                action: "non_sponsored_quote_http_settle",
+              }, {
+                requestCorrelationId,
+                fallback_source: "not_sponsored_rpc_rejection",
+              });
+
+              const httpResult = (await verifier.settle(paymentPayload, {
+                paymentRequirements,
+              })) as unknown as SettleResult;
+              const resolvedHttpPayer =
+                httpResult.success && httpResult.payer && httpResult.payer !== c.env.X402_SERVER_ADDRESS
+                  ? httpResult.payer
+                  : verifiedPayer;
+              settleResult = {
+                ...httpResult,
+                ...(httpResult.success && resolvedHttpPayer ? { payer: resolvedHttpPayer } : {}),
+              } as SettleResult;
+              const httpRelayId = (httpResult as { paymentId?: string }).paymentId;
+              if (typeof httpRelayId === "string" && httpRelayId.startsWith("pay_")) {
+                canonicalPaymentId = httpRelayId;
+              }
+              usedHttpCompatibilityFallback = true;
+            } else {
+              const mappedTerminalReason = RPC_CODE_TO_TERMINAL_REASON[rpcResult.code];
+              settleResult = {
+                success: false,
+                transaction: "",
+                network: networkV2,
+                errorReason: rpcResult.code,
+                ...(mappedTerminalReason ? { terminalReason: mappedTerminalReason } : {}),
+                status: "failed",
+                error: rpcResult.error,
+              } as unknown as SettleResult;
+              usedHttpCompatibilityFallback = true;
+            }
+          } else {
+            if (typeof rpcResult.paymentId !== "string" || !rpcResult.paymentId.startsWith("pay_")) {
+              return c.json(
+                {
+                  error: "Settlement relay accepted payment without a canonical pay_ identifier",
+                  code: X402_ERROR_CODES.UNEXPECTED_SETTLE_ERROR,
+                  retryable: true,
+                  nextSteps: "retry_later",
+                },
+                502
+              );
+            }
+
+            const relayPaymentId = rpcResult.paymentId;
+            canonicalPaymentId = relayPaymentId;
+            initialSubmitStatus = rpcResult.status;
+
+            const rpcReturnedPayer =
+              ((rpcResult as Record<string, unknown>).payer as string | undefined) ??
+              ((rpcResult as Record<string, unknown>).senderAddress as string | undefined);
+            if (
+              !verifiedPayer &&
+              typeof rpcReturnedPayer === "string" &&
+              rpcReturnedPayer.length > 0 &&
+              rpcReturnedPayer !== c.env.X402_SERVER_ADDRESS
+            ) {
+              verifiedPayer = rpcReturnedPayer;
+            }
+
+            const relayCheckStatusUrl = extractCheckStatusUrl(
+              { checkStatusUrl: rpcResult.checkStatusUrl },
+              c.env.X402_FACILITATOR_URL,
+              relayPaymentId
+            );
+
+            boundEntry = {
+              relayPaymentId,
+              requestCorrelationId,
+              txHash,
+              verifiedPayer: verifiedPayer ?? "",
+              checkStatusUrl: relayCheckStatusUrl,
+              expectedRecipient: c.env.X402_SERVER_ADDRESS,
+              minAmount: paymentRequirements.amount,
+              asset,
+              network: networkV2,
+              createdAt: Date.now(),
+            };
+            saveBoundPayment(c.env.X402_RELAY, boundEntry);
+
+            // Track enqueued payment in PaymentPollingDO using canonical relayPaymentId & relayCheckStatusUrl
+            trackPaymentInDO(
+              c,
+              {
+                paymentId: relayPaymentId,
+                checkStatusUrl: relayCheckStatusUrl,
+                payerAddress: verifiedPayer ?? "pending",
+                route: c.req.path,
+                tokenType,
+              },
+              log
+            );
+          }
+        }
+
+        if (!usedHttpCompatibilityFallback && boundEntry) {
+          const relayPaymentId = boundEntry.relayPaymentId;
+          canonicalPaymentId = relayPaymentId;
+          let relayCheckStatusUrl = boundEntry.checkStatusUrl;
+          let lastStatus = initialSubmitStatus ?? "queued";
+          let latestCheck: RelayCheckPaymentResult | undefined;
+
+          // Poll checkPayment using the canonical relayPaymentId (never the request correlation key).
+          // Any timeout/exception after enqueue stays on the pending path with zero HTTP resubmit.
+          if (typeof c.env.X402_RELAY.checkPayment === "function") {
+            const maxAttempts = Math.max(1, rpcPollMaxAttempts);
+            for (let attempt = 0; attempt < maxAttempts; attempt++) {
+              if (attempt > 0 && rpcPollIntervalMs > 0) {
+                await new Promise<void>((resolve) => setTimeout(resolve, rpcPollIntervalMs));
+              }
+              try {
+                const rawCheck = await c.env.X402_RELAY.checkPayment(relayPaymentId);
+                if (!rawCheck || typeof rawCheck.status !== "string") {
+                  break;
+                }
+                latestCheck = rawCheck;
+                lastStatus = rawCheck.status === "submitted" ? "queued" : rawCheck.status;
+                if (typeof rawCheck.checkStatusUrl === "string" && rawCheck.checkStatusUrl.length > 0) {
+                  relayCheckStatusUrl = rawCheck.checkStatusUrl;
+                  boundEntry.checkStatusUrl = relayCheckStatusUrl;
+                }
+
+                const checkReturnedPayer =
+                  ((rawCheck as unknown as Record<string, unknown>).payer as string | undefined) ??
+                  ((rawCheck as unknown as Record<string, unknown>).senderAddress as string | undefined);
+                if (typeof checkReturnedPayer === "string" && checkReturnedPayer.length > 0) {
+                  if (verifiedPayer && checkReturnedPayer !== verifiedPayer) {
+                    removeBoundPayment(c.env.X402_RELAY, boundEntry);
+                    return c.json(
+                      {
+                        error: "Relay payer does not match verified transaction origin",
+                        code: X402_ERROR_CODES.SENDER_MISMATCH,
+                      },
+                      400
+                    );
+                  }
+                  if (!verifiedPayer && checkReturnedPayer !== c.env.X402_SERVER_ADDRESS) {
+                    verifiedPayer = checkReturnedPayer;
+                    boundEntry.verifiedPayer = verifiedPayer;
+                  }
+                }
+
+                if (lastStatus === "confirmed" || TERMINAL_FAILURE_RPC_STATUSES.has(lastStatus)) {
+                  break;
+                }
+              } catch (pollErr) {
+                log.warn("RPC checkPayment failed or timed out after enqueue; preserving pending relay state without HTTP resubmit", {
+                  relayPaymentId,
+                  requestCorrelationId,
+                  attempt,
+                  error: String(pollErr),
+                });
+                break;
+              }
+            }
+          }
+
+          if (lastStatus === "confirmed") {
+            const confirmedTxid = latestCheck?.txid;
+            if (
+              typeof confirmedTxid !== "string" ||
+              confirmedTxid.length === 0 ||
+              confirmedTxid === relayPaymentId
+            ) {
+              // Do not allow enqueue job ID or empty txid to pass as confirmed settlement
+              lastStatus = "queued";
+            } else {
+              const resolvedPayer = verifiedPayer || boundEntry.verifiedPayer;
+              if (!resolvedPayer || resolvedPayer === c.env.X402_SERVER_ADDRESS) {
+                removeBoundPayment(c.env.X402_RELAY, boundEntry);
+                return c.json(
+                  {
+                    error: "Could not verify transaction origin payer for confirmed payment",
+                    code: X402_ERROR_CODES.SENDER_MISMATCH,
+                  },
+                  400
+                );
+              }
+              verifiedPayer = resolvedPayer;
+              settleResult = {
+                success: true,
+                transaction: confirmedTxid,
+                network: networkV2,
+                payer: verifiedPayer,
+                paymentId: relayPaymentId,
+                status: "confirmed",
+                checkStatusUrl: relayCheckStatusUrl,
+              } as unknown as SettleResult;
+            }
+          }
+
+          if (TERMINAL_FAILURE_RPC_STATUSES.has(lastStatus)) {
+            removeBoundPayment(c.env.X402_RELAY, boundEntry);
+            settleResult = {
+              success: false,
+              transaction: latestCheck?.txid ?? "",
+              network: networkV2,
+              paymentId: relayPaymentId,
+              status: lastStatus,
+              terminalReason: latestCheck?.terminalReason,
+              errorReason: latestCheck?.terminalReason ?? latestCheck?.error ?? lastStatus,
+              checkStatusUrl: relayCheckStatusUrl,
+            } as unknown as SettleResult;
+          } else if (lastStatus !== "confirmed") {
+            // Payment is still in-flight (queued, queued_with_warning, broadcasting, mempool, or poll timeout after enqueue).
+            // Never invoke paid handler or emit payment.confirmed on enqueue!
+            const pendingStatus = IN_FLIGHT_RPC_STATUSES.has(lastStatus) ? lastStatus : "queued";
+            const pendingHints: DerivedHints = {
+              retryable: true,
+              retryAfter: 10,
+              nextSteps: "retry_later",
+            };
+
+            logPaymentEvent(log, "info", "payment.pending", {
+              route: c.req.path,
+              paymentId: relayPaymentId,
+              status: "queued",
+              checkStatusUrl: relayCheckStatusUrl,
+              action: "reuse_same_payment",
+            }, {
+              requestCorrelationId,
+              relayPaymentId,
+              relayStatus: pendingStatus,
+              payerAddress: verifiedPayer ?? null,
+              classification_code: X402_ERROR_CODES.TRANSACTION_PENDING,
+              http_status: 402,
+              retry_after: 10,
+            });
+
+            c.header("Retry-After", "10");
+            c.header("X-PAYMENT-ID", relayPaymentId);
+            c.header(
+              X402_HEADERS.PAYMENT_RESPONSE,
+              encodeBase64Json({
+                ...pendingHints,
+                paymentId: relayPaymentId,
+                status: pendingStatus,
+                checkStatusUrl: relayCheckStatusUrl,
+              })
+            );
+
+            return c.json(
+              {
+                error: "Transaction pending in settlement relay, please retry",
+                code: X402_ERROR_CODES.TRANSACTION_PENDING,
+                status: pendingStatus,
+                retryable: pendingHints.retryable,
+                retryAfter: pendingHints.retryAfter,
+                nextSteps: pendingHints.nextSteps,
+                paymentId: relayPaymentId,
+                requestCorrelationId,
+                checkStatusUrl: relayCheckStatusUrl,
+                asset,
+                network: networkV2,
+                resource: c.req.path,
+              },
+              402
+            );
+          }
         }
       } else {
-        // x402-stacks settle() returns SettlementResponseV2; cast to SettleResult
-        // (HttpSettleResponse from tx-schemas). Structurally compatible.
-        settleResult = await verifier.settle(paymentPayload, {
+        // HTTP facilitator path (when X402_RELAY is not bound)
+        settleResult = (await verifier.settle(paymentPayload, {
           paymentRequirements,
-        }) as unknown as SettleResult;
+        })) as unknown as SettleResult;
+        const httpRelayId = (settleResult as { paymentId?: string }).paymentId;
+        if (typeof httpRelayId === "string" && httpRelayId.startsWith("pay_")) {
+          canonicalPaymentId = httpRelayId;
+        }
       }
 
       log.debug("Settle result", { ...settleResult });
@@ -567,10 +1150,11 @@ export function x402Middleware(
       const classified = classifyPaymentError(error);
       logPaymentEvent(log, "error", "payment.failed", {
         route: c.req.path,
-        paymentId,
+        paymentId: canonicalPaymentId,
         status: "failed",
         action: getRetryAction(classified.code),
       }, {
+        requestCorrelationId,
         classification_code: classified.code,
         http_status: classified.httpStatus,
         retry_after: classified.retryAfter ?? null,
@@ -585,9 +1169,9 @@ export function x402Middleware(
         c.header("Retry-After", String(classified.retryAfter));
       }
 
-      // Derive hints from classified code (no canonical status available on exception path)
       const exceptionHints = hintsFromClassifiedCode(classified);
       c.header(X402_HEADERS.PAYMENT_RESPONSE, encodeBase64Json(exceptionHints));
+      c.header("X-PAYMENT-ID", canonicalPaymentId);
 
       return c.json(
         {
@@ -596,6 +1180,8 @@ export function x402Middleware(
           retryable: exceptionHints.retryable,
           nextSteps: exceptionHints.nextSteps,
           ...(exceptionHints.retryAfter !== undefined ? { retryAfter: exceptionHints.retryAfter } : {}),
+          paymentId: canonicalPaymentId,
+          requestCorrelationId,
           asset,
           network: networkV2,
           resource: c.req.path,
@@ -607,30 +1193,38 @@ export function x402Middleware(
       );
     }
 
-    if (!settleResult.success) {
-      log.error("Payment settlement failed", { ...settleResult });
+    if (!settleResult!.success) {
+      log.error("Payment settlement failed", { ...settleResult! });
 
-      const errorReason = (settleResult as { errorReason?: string }).errorReason;
-      const canonicalStatus = (settleResult as { status?: string }).status;
-      const terminalReason = (settleResult as { terminalReason?: string }).terminalReason;
-      const classified = classifyPaymentError(errorReason || "settlement_failed", settleResult);
+      const settleRecord = settleResult! as Partial<SettleResult> & Record<string, unknown>;
+      const resultPaymentId =
+        typeof settleRecord.paymentId === "string" && settleRecord.paymentId.startsWith("pay_")
+          ? settleRecord.paymentId
+          : canonicalPaymentId;
+      const errorReason = (settleResult! as { errorReason?: string }).errorReason;
+      const canonicalStatus = (settleResult! as { status?: string }).status;
+      const terminalReason = (settleResult! as { terminalReason?: string }).terminalReason;
+      const classified = classifyPaymentError(errorReason || "settlement_failed", settleResult!);
       const instability = derivePaymentInstability({
         classifiedCode: classified.code,
         errorReason,
       });
 
-      // Derive checkStatusUrl even on failure — relay may still track the payment
-      const checkStatusUrl = extractCheckStatusUrl(settleResult, c.env.X402_FACILITATOR_URL, paymentId);
+      const checkStatusUrl = extractCheckStatusUrl(
+        settleRecord,
+        c.env.X402_FACILITATOR_URL,
+        resultPaymentId
+      );
 
-      // Emit the appropriate native payment lifecycle event
       if (classified.code === X402_ERROR_CODES.TRANSACTION_PENDING) {
         logPaymentEvent(log, "info", "payment.pending", {
           route: c.req.path,
-          paymentId,
+          paymentId: resultPaymentId,
           status: "queued",
           checkStatusUrl,
           action: "reuse_same_payment",
         }, {
+          requestCorrelationId,
           classification_code: classified.code,
           http_status: classified.httpStatus,
           retry_after: classified.retryAfter ?? null,
@@ -639,26 +1233,28 @@ export function x402Middleware(
         });
       } else if (
         classified.code === X402_ERROR_CODES.TRANSACTION_FAILED &&
-        (errorReason === "nonce_replacement" || errorReason === "superseded")
+        (errorReason === "nonce_replacement" || errorReason === "superseded" || canonicalStatus === "replaced")
       ) {
         logPaymentEvent(log, "warn", "payment.replaced", {
           route: c.req.path,
-          paymentId,
+          paymentId: resultPaymentId,
           status: "replaced",
           checkStatusUrl,
           action: "start_new_payment",
         }, {
+          requestCorrelationId,
           classification_code: classified.code,
           errorReason: errorReason ?? null,
         });
       } else {
         logPaymentEvent(log, classified.httpStatus >= 500 ? "error" : "warn", "payment.failed", {
           route: c.req.path,
-          paymentId,
+          paymentId: resultPaymentId,
           status: "failed",
           checkStatusUrl,
           action: getRetryAction(classified.code),
         }, {
+          requestCorrelationId,
           classification_code: classified.code,
           http_status: classified.httpStatus,
           retry_after: classified.retryAfter ?? null,
@@ -671,21 +1267,23 @@ export function x402Middleware(
         c.header("Retry-After", String(classified.retryAfter));
       }
 
-      // Compute hints: prefer canonical status/terminalReason from relay, else fall back
-      // to classified code. computeDerivedHints handles non-terminal status gracefully.
       const settleHints: DerivedHints =
         computeDerivedHints(canonicalStatus ?? "failed", terminalReason) ??
         hintsFromClassifiedCode(classified);
       c.header(X402_HEADERS.PAYMENT_RESPONSE, encodeBase64Json(settleHints));
+      c.header("X-PAYMENT-ID", resultPaymentId);
 
       return c.json(
         {
           error: classified.message,
           code: classified.code,
+          ...(canonicalStatus ? { status: canonicalStatus } : {}),
+          ...(terminalReason ? { terminalReason } : {}),
           retryable: settleHints.retryable,
           nextSteps: settleHints.nextSteps,
           ...(settleHints.retryAfter !== undefined ? { retryAfter: settleHints.retryAfter } : {}),
-          paymentId,
+          paymentId: resultPaymentId,
+          requestCorrelationId,
           checkStatusUrl,
           asset,
           network: networkV2,
@@ -698,23 +1296,41 @@ export function x402Middleware(
       );
     }
 
-    // Extract payer address from settle result
-    const payerAddress = settleResult.payer;
+    // Extract verified payer address and confirmed txid from settleResult
+    const payerAddress = settleResult!.payer;
+    const confirmedTxid = settleResult!.transaction;
 
-    if (!payerAddress) {
-      log.error("Could not extract payer address from valid payment");
+    if (!payerAddress || payerAddress === c.env.X402_SERVER_ADDRESS) {
+      log.error("Could not extract verified payer address from payment");
       return c.json(
         { error: "Could not identify payer from payment", code: X402_ERROR_CODES.SENDER_MISMATCH },
-        500
+        400
       );
     }
 
-    // Extract checkStatusUrl for the confirmed payment
-    const checkStatusUrl = extractCheckStatusUrl(settleResult, c.env.X402_FACILITATOR_URL, paymentId);
+    if (!confirmedTxid) {
+      log.error("Confirmed settlement missing transaction ID");
+      return c.json(
+        { error: "Missing confirmed transaction ID", code: X402_ERROR_CODES.UNEXPECTED_SETTLE_ERROR },
+        502
+      );
+    }
+
+    const settleRecord = settleResult! as Partial<SettleResult> & Record<string, unknown>;
+    if (typeof settleRecord.paymentId === "string" && settleRecord.paymentId.startsWith("pay_")) {
+      canonicalPaymentId = settleRecord.paymentId;
+    }
+
+    const checkStatusUrl = extractCheckStatusUrl(
+      settleRecord,
+      c.env.X402_FACILITATOR_URL,
+      canonicalPaymentId
+    );
 
     log.info("Payment verified successfully", {
-      txId: settleResult.transaction,
-      paymentId,
+      txId: confirmedTxid,
+      paymentId: canonicalPaymentId,
+      requestCorrelationId,
       payerAddress,
       asset,
       network: networkV2,
@@ -723,12 +1339,13 @@ export function x402Middleware(
     });
     logPaymentEvent(log, "info", "payment.confirmed", {
       route: c.req.path,
-      paymentId,
+      paymentId: canonicalPaymentId,
       status: "confirmed",
       checkStatusUrl,
       action: "allow_request",
     }, {
-      txid: settleResult.transaction,
+      txid: confirmedTxid,
+      requestCorrelationId,
       payerAddress,
       asset,
       network: networkV2,
@@ -736,41 +1353,37 @@ export function x402Middleware(
       tier: dynamic ? "dynamic" : tier,
     });
 
-    // Register payment with PaymentPollingDO for async status tracking.
-    // Fire-and-forget: middleware does not wait on DO startup.
-    {
-      const doId = c.env.PAYMENT_POLLING_DO.idFromName(paymentId);
-      c.env.PAYMENT_POLLING_DO.get(doId).track({
-        paymentId,
+    // Register payment with PaymentPollingDO using canonicalPaymentId & checkStatusUrl
+    trackPaymentInDO(
+      c,
+      {
+        paymentId: canonicalPaymentId,
         checkStatusUrl,
         payerAddress,
         route: c.req.path,
         tokenType,
-      }).catch((err: unknown) => {
-        log.warn("PaymentPollingDO.track failed (non-blocking)", {
-          paymentId,
-          err: String(err),
-        });
-      });
-    }
+      },
+      log
+    );
 
-    // Store payment context for downstream use
+    // Store payment context for downstream use with separate requestCorrelationId, paymentId, and confirmedTxid
     c.set("x402", {
       payerAddress,
-      settleResult,
+      settleResult: settleResult!,
       paymentPayload,
       paymentRequirements,
       priceEstimate,
       parsedBody,
+      requestCorrelationId,
+      paymentId: canonicalPaymentId,
+      confirmedTxid,
     } as X402Context);
 
     // Add v2 response headers (base64 encoded)
-    c.header(X402_HEADERS.PAYMENT_RESPONSE, encodeBase64Json(settleResult));
+    c.header(X402_HEADERS.PAYMENT_RESPONSE, encodeBase64Json(settleResult!));
     c.header("X-PAYER-ADDRESS", payerAddress);
-    c.header("X-PAYMENT-ID", paymentId);
+    c.header("X-PAYMENT-ID", canonicalPaymentId);
 
     return next();
   };
 }
-
-// No exported convenience functions - use x402Middleware directly

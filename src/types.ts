@@ -144,6 +144,12 @@ export interface X402Context {
   paymentRequirements?: import("x402-stacks").PaymentRequirementsV2;
   priceEstimate: PriceEstimate;
   parsedBody?: unknown;
+  /** Stable request correlation key sent as payment-identifier input */
+  requestCorrelationId?: string;
+  /** Canonical relay-assigned payment identifier (pay_ prefix) */
+  paymentId?: string;
+  /** Confirmed on-chain transaction ID */
+  confirmedTxid?: string;
 }
 
 // =============================================================================
