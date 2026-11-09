@@ -512,11 +512,52 @@ export function x402Middleware(
 
     let settleResult: SettleResult;
     try {
-      // x402-stacks settle() returns SettlementResponseV2; cast to SettleResult
-      // (HttpSettleResponse from tx-schemas). Structurally compatible.
-      settleResult = await verifier.settle(paymentPayload, {
-        paymentRequirements,
-      }) as unknown as SettleResult;
+      if (c.env.X402_RELAY) {
+        const txHex =
+          paymentPayload.payload.transaction ??
+          ((paymentPayload.payload as Record<string, unknown>).signedTransaction as string | undefined);
+        if (!txHex) {
+          throw new Error("Missing transaction hex in paymentPayload.payload");
+        }
+        const rpcResult = await c.env.X402_RELAY.submitPayment(
+          txHex,
+          {
+            expectedRecipient: c.env.X402_SERVER_ADDRESS,
+            minAmount: paymentRequirements.amount,
+            tokenType,
+            resource: c.req.path,
+            method: c.req.method,
+            maxTimeoutSeconds: paymentRequirements.maxTimeoutSeconds ?? 300,
+          },
+          paymentId
+        );
+        if (rpcResult.accepted) {
+          settleResult = {
+            success: true,
+            transaction: rpcResult.paymentId,
+            network: networkV2,
+            payer: ((paymentPayload as Record<string, unknown>).payer as string | undefined) ?? c.env.X402_SERVER_ADDRESS,
+            status: rpcResult.status,
+            checkStatusUrl: rpcResult.checkStatusUrl,
+          } as unknown as SettleResult;
+        } else {
+          settleResult = {
+            success: false,
+            transaction: "",
+            network: networkV2,
+            errorReason: rpcResult.code,
+            terminalReason: rpcResult.code,
+            status: "failed",
+            error: rpcResult.error,
+          } as unknown as SettleResult;
+        }
+      } else {
+        // x402-stacks settle() returns SettlementResponseV2; cast to SettleResult
+        // (HttpSettleResponse from tx-schemas). Structurally compatible.
+        settleResult = await verifier.settle(paymentPayload, {
+          paymentRequirements,
+        }) as unknown as SettleResult;
+      }
 
       log.debug("Settle result", { ...settleResult });
     } catch (error) {

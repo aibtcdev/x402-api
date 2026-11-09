@@ -24,7 +24,8 @@
     ]
   },
   "services": [
-    { "binding": "LOGS", "service": "worker-logs-staging", "entrypoint": "LogsRPC" }
+    { "binding": "LOGS", "service": "worker-logs-staging", "entrypoint": "LogsRPC" },
+    { "binding": "X402_RELAY", "service": "x402-sponsor-relay-staging", "entrypoint": "RelayRPC" }
   ],
   "migrations": [
     { "tag": "v1", "new_sqlite_classes": ["UsageDO", "StorageDO"] },
@@ -70,7 +71,8 @@
         ]
       },
       "services": [
-        { "binding": "LOGS", "service": "worker-logs-staging", "entrypoint": "LogsRPC" }
+        { "binding": "LOGS", "service": "worker-logs-staging", "entrypoint": "LogsRPC" },
+        { "binding": "X402_RELAY", "service": "x402-sponsor-relay-staging", "entrypoint": "RelayRPC" }
       ]
     },
     "production": {
@@ -95,7 +97,8 @@
         ]
       },
       "services": [
-        { "binding": "LOGS", "service": "worker-logs-production", "entrypoint": "LogsRPC" }
+        { "binding": "LOGS", "service": "worker-logs-production", "entrypoint": "LogsRPC" },
+        { "binding": "X402_RELAY", "service": "x402-sponsor-relay", "entrypoint": "RelayRPC" }
       ]
     }
   }

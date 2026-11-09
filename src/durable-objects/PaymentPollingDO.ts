@@ -285,7 +285,7 @@ export class PaymentPollingDO extends DurableObject<Env> {
    * Phase #87: Replace with `return await this.env.X402_RELAY.checkPayment(paymentId)`.
    */
   private async _fetchStatus(
-    _paymentId: string,
+    paymentId: string,
     checkStatusUrl: string
   ): Promise<{
     status: string;
@@ -293,6 +293,20 @@ export class PaymentPollingDO extends DurableObject<Env> {
     txid?: string;
     confirmedAt?: string;
   }> {
+    if (this.env.X402_RELAY) {
+      const rpcStatus = await this.env.X402_RELAY.checkPayment(paymentId);
+      const parsedRpc = HttpPaymentStatusResponseSchema.safeParse(rpcStatus);
+      if (!parsedRpc.success) {
+        throw new Error(`relay RPC returned invalid status payload: ${parsedRpc.error.message}`);
+      }
+      return {
+        status: parsedRpc.data.status,
+        terminalReason: parsedRpc.data.terminalReason,
+        txid: parsedRpc.data.txid,
+        confirmedAt: parsedRpc.data.confirmedAt,
+      };
+    }
+
     const response = await fetch(checkStatusUrl, {
       headers: { Accept: "application/json" },
     });
