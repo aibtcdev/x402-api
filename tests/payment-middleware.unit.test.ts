@@ -705,4 +705,251 @@ describe("x402Middleware — RPC enqueue vs confirmed settlement, relay ID recov
       )
     ).toBe("https://relay.example/custom/pay_relay_99");
   });
+
+  test("refuses replay of an identical payment-signature header after confirmation on both the same middleware instance and a fresh instance with cached accepted relay response", async () => {
+    const txHex = await buildSignedTxHex({ sponsored: true, nonce: 61n });
+    const relayId = "pay_relay_no_replay_61";
+    const confirmedTxid = "0x6161616161616161616161616161616161616161616161616161616161616161";
+
+    const relay: RelayRPC = {
+      async submitPayment() {
+        return {
+          accepted: true,
+          status: "queued",
+          paymentId: relayId,
+          checkStatusUrl: `https://relay.example/payment/${relayId}`,
+        };
+      },
+      async checkPayment() {
+        return {
+          paymentId: relayId,
+          status: "confirmed",
+          txid: confirmedTxid,
+        };
+      },
+    };
+
+    const sigHeader = encodePaymentSignature({
+      x402Version: 2,
+      payload: { transaction: txHex },
+    });
+
+    const harness1 = createTestHarness(relay);
+
+    // First call settles and serves once
+    const firstRes = await harness1.app.request(
+      "http://localhost/paid",
+      {
+        method: "POST",
+        headers: { [X402_HEADERS.PAYMENT_SIGNATURE]: sigHeader },
+      },
+      harness1.env
+    );
+    expect(firstRes.status).toBe(200);
+    expect(harness1.getHandlerCount()).toBe(1);
+
+    // Replay on the same middleware instance → refused (402), no second handler call
+    const replaySameRes = await harness1.app.request(
+      "http://localhost/paid",
+      {
+        method: "POST",
+        headers: { [X402_HEADERS.PAYMENT_SIGNATURE]: sigHeader },
+      },
+      harness1.env
+    );
+    expect(replaySameRes.status).toBe(402);
+    expect(harness1.getHandlerCount()).toBe(1);
+
+    // Replay on a fresh middleware instance with a relay stub returning cached accepted → refused (402), zero handler calls
+    const cachedRelayStub: RelayRPC = {
+      async submitPayment() {
+        return {
+          accepted: true,
+          status: "queued",
+          paymentId: relayId,
+          checkStatusUrl: `https://relay.example/payment/${relayId}`,
+        };
+      },
+      async checkPayment() {
+        return {
+          paymentId: relayId,
+          status: "confirmed",
+          txid: confirmedTxid,
+        };
+      },
+    };
+    const harness2 = createTestHarness(cachedRelayStub);
+    const replayFreshRes = await harness2.app.request(
+      "http://localhost/paid",
+      {
+        method: "POST",
+        headers: { [X402_HEADERS.PAYMENT_SIGNATURE]: sigHeader },
+      },
+      harness2.env
+    );
+    expect(replayFreshRes.status).toBe(402);
+    expect(harness2.getHandlerCount()).toBe(0);
+  });
+
+  test("refuses X-PAYMENT-ID recovery when current request paymentRequirements.amount is higher than the enqueued payment", async () => {
+    const txHex = await buildSignedTxHex({ sponsored: true, nonce: 62n });
+    const relayId = "pay_relay_price_upgrade_62";
+    const confirmedTxid = "0x6262626262626262626262626262626262626262626262626262626262626262";
+
+    let checkCalls = 0;
+    const relay: RelayRPC = {
+      async submitPayment() {
+        return {
+          accepted: true,
+          status: "queued",
+          paymentId: relayId,
+          checkStatusUrl: `https://relay.example/payment/${relayId}`,
+        };
+      },
+      async checkPayment() {
+        checkCalls += 1;
+        if (checkCalls === 1) {
+          return { paymentId: relayId, status: "queued" };
+        }
+        return {
+          paymentId: relayId,
+          status: "confirmed",
+          txid: confirmedTxid,
+        };
+      },
+    };
+
+    let handlerCount = 0;
+    const logger: Logger = {
+      debug() {},
+      info() {},
+      warn() {},
+      error() {},
+      child() {
+        return logger;
+      },
+    };
+    const env = {
+      ENVIRONMENT: "staging",
+      X402_FACILITATOR_URL: "https://facilitator.example",
+      X402_NETWORK: "testnet",
+      X402_SERVER_ADDRESS: TEST_SELLER_ADDRESS,
+      X402_RELAY: relay,
+      PAYMENT_POLLING_DO: {
+        idFromName(name: string) {
+          return name as unknown as DurableObjectId;
+        },
+        get() {
+          return { async track() {} };
+        },
+      },
+    } as unknown as Env;
+
+    const app = new Hono<{ Bindings: Env; Variables: AppVariables }>();
+    app.use("*", async (c, next) => {
+      c.set("requestId", "req-dynamic");
+      c.set("logger", logger);
+      await next();
+    });
+    app.post(
+      "/dynamic-paid",
+      x402Middleware({
+        dynamic: true,
+        rpcPollMaxAttempts: 1,
+        rpcPollIntervalMs: 0,
+        estimator(body) {
+          const units = Number((body as { units?: number })?.units ?? 1);
+          return {
+            estimatedCostUsd: 0.001 * units,
+            costWithMarginUsd: 0.0012 * units,
+            amountInToken: BigInt(1000 * units),
+            tokenType: "STX",
+            tier: "dynamic",
+          };
+        },
+      }),
+      (c) => {
+        handlerCount += 1;
+        return c.json({ ok: true });
+      }
+    );
+
+    const sigHeader = encodePaymentSignature({
+      x402Version: 2,
+      payload: { transaction: txHex },
+    });
+
+    // Step 1: Enqueue against cheap prompt (1000 microSTX) → 402 pending
+    const enqueueRes = await app.request(
+      "http://localhost/dynamic-paid",
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          [X402_HEADERS.PAYMENT_SIGNATURE]: sigHeader,
+        },
+        body: JSON.stringify({ units: 1 }),
+      },
+      env
+    );
+    expect(enqueueRes.status).toBe(402);
+    expect(handlerCount).toBe(0);
+
+    // Step 2: Attempt to recover with X-PAYMENT-ID on an expensive prompt (5000 microSTX) → rejected with 402 AMOUNT_INSUFFICIENT
+    const upgradeRes = await app.request(
+      "http://localhost/dynamic-paid",
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-PAYMENT-ID": relayId,
+          [X402_HEADERS.PAYMENT_SIGNATURE]: sigHeader,
+        },
+        body: JSON.stringify({ units: 5 }),
+      },
+      env
+    );
+    expect(upgradeRes.status).toBe(402);
+    const upgradeBody = (await upgradeRes.json()) as Record<string, unknown>;
+    expect(upgradeBody.code).toBe(X402_ERROR_CODES.AMOUNT_INSUFFICIENT);
+    expect(handlerCount).toBe(0);
+  });
+
+  test("preserves rpcResult.retryable on transient unmapped RPC rejection", async () => {
+    const txHex = await buildSignedTxHex({ sponsored: true, nonce: 63n });
+    const relay: RelayRPC = {
+      async submitPayment() {
+        return {
+          accepted: false,
+          code: "TEMPORARY_UPSTREAM_BACKPRESSURE",
+          error: "Relay queue temporarily saturated",
+          retryable: true,
+        };
+      },
+      async checkPayment(paymentId) {
+        return { paymentId, status: "failed" };
+      },
+    };
+
+    const harness = createTestHarness(relay);
+    const res = await harness.app.request(
+      "http://localhost/paid",
+      {
+        method: "POST",
+        headers: {
+          [X402_HEADERS.PAYMENT_SIGNATURE]: encodePaymentSignature({
+            x402Version: 2,
+            payload: { transaction: txHex },
+          }),
+        },
+      },
+      harness.env
+    );
+
+    expect(res.status).toBe(402);
+    expect(harness.getHandlerCount()).toBe(0);
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body.retryable).toBe(true);
+    expect(body.nextSteps).toBe("retry_later");
+  });
 });
