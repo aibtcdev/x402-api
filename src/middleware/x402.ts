@@ -88,6 +88,7 @@ export interface VerifiedTransactionOrigin {
 interface BoundRpcPayment {
   relayPaymentId: string;
   requestCorrelationId: string;
+  requestBindingHash: string;
   txHash: string;
   verifiedPayer: string;
   checkStatusUrl: string;
@@ -264,6 +265,30 @@ async function sha256Hex(input: string): Promise<string> {
   return [...new Uint8Array(digest)]
     .map((b) => b.toString(16).padStart(2, "0"))
     .join("");
+}
+
+/**
+ * Compute a resource-server request binding digest covering HTTP method,
+ * request path, query string, and SHA-256 of raw request body bytes so
+ * a pending payment cannot be recovered against a modified request payload
+ * or route.
+ */
+async function computeRequestBindingHash(req: Request): Promise<string> {
+  const url = new URL(req.url, "http://localhost");
+  const method = req.method.toUpperCase();
+  let bodyHash = "";
+  if (method !== "GET" && method !== "HEAD") {
+    try {
+      const buf = await req.clone().arrayBuffer();
+      const digest = await crypto.subtle.digest("SHA-256", buf);
+      bodyHash = [...new Uint8Array(digest)]
+        .map((b) => b.toString(16).padStart(2, "0"))
+        .join("");
+    } catch {
+      bodyHash = "";
+    }
+  }
+  return sha256Hex(`${method}|${url.pathname}|${url.search}|${bodyHash}`);
 }
 
 /**
@@ -590,6 +615,7 @@ export function x402Middleware(
     // Calculate price estimate based on pricing type
     let priceEstimate: PriceEstimate;
     let parsedBody: unknown = undefined;
+    const requestBindingHash = await computeRequestBindingHash(c.req.raw);
 
     if (dynamic) {
       try {
@@ -892,6 +918,22 @@ export function x402Middleware(
                 402
               );
             }
+            if (boundEntry.requestBindingHash !== requestBindingHash) {
+              return c.json(
+                {
+                  error: "Bound payment request binding mismatch for recovery attempt",
+                  code: X402_ERROR_CODES.INVALID_PAYLOAD,
+                  retryable: false,
+                  nextSteps: "start_new_payment",
+                  paymentId: boundEntry.relayPaymentId,
+                  requestCorrelationId,
+                  asset,
+                  network: networkV2,
+                  resource: c.req.path,
+                },
+                400
+              );
+            }
           }
         }
 
@@ -934,6 +976,22 @@ export function x402Middleware(
                   resource: c.req.path,
                 },
                 402
+              );
+            }
+            if (existingByTx.requestBindingHash !== requestBindingHash) {
+              return c.json(
+                {
+                  error: "Bound payment request binding mismatch for recovery attempt",
+                  code: X402_ERROR_CODES.INVALID_PAYLOAD,
+                  retryable: false,
+                  nextSteps: "start_new_payment",
+                  paymentId: existingByTx.relayPaymentId,
+                  requestCorrelationId,
+                  asset,
+                  network: networkV2,
+                  resource: c.req.path,
+                },
+                400
               );
             }
             boundEntry = existingByTx;
@@ -1078,6 +1136,7 @@ export function x402Middleware(
             boundEntry = {
               relayPaymentId,
               requestCorrelationId,
+              requestBindingHash,
               txHash,
               verifiedPayer: verifiedPayer ?? "",
               checkStatusUrl: relayCheckStatusUrl,

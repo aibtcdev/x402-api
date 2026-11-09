@@ -952,4 +952,160 @@ describe("x402Middleware — RPC enqueue vs confirmed settlement, relay ID recov
     expect(body.retryable).toBe(true);
     expect(body.nextSteps).toBe("retry_later");
   });
+
+  test("binds same-price POST request body on enqueue, refuses changed-body recovery without polling or evicting, and leaves original job recoverable", async () => {
+    const txHex = await buildSignedTxHex({ sponsored: true, nonce: 64n });
+    const relayId = "pay_relay_body_bind_64";
+    const confirmedTxid = "0x6464646464646464646464646464646464646464646464646464646464646464";
+
+    let submitCalls = 0;
+    let checkCalls = 0;
+    const relay: RelayRPC = {
+      async submitPayment() {
+        submitCalls += 1;
+        return {
+          accepted: true,
+          status: "queued",
+          paymentId: relayId,
+          checkStatusUrl: `https://relay.example/payment/${relayId}`,
+        };
+      },
+      async checkPayment() {
+        checkCalls += 1;
+        if (checkCalls === 1) {
+          return { paymentId: relayId, status: "queued" };
+        }
+        return {
+          paymentId: relayId,
+          status: "confirmed",
+          txid: confirmedTxid,
+        };
+      },
+    };
+
+    const executedSubjects: string[] = [];
+    const logger: Logger = {
+      debug() {},
+      info() {},
+      warn() {},
+      error() {},
+      child() {
+        return logger;
+      },
+    };
+    const env = {
+      ENVIRONMENT: "staging",
+      X402_FACILITATOR_URL: "https://facilitator.example",
+      X402_NETWORK: "testnet",
+      X402_SERVER_ADDRESS: TEST_SELLER_ADDRESS,
+      X402_RELAY: relay,
+      PAYMENT_POLLING_DO: {
+        idFromName(name: string) {
+          return name as unknown as DurableObjectId;
+        },
+        get() {
+          return { async track() {} };
+        },
+      },
+    } as unknown as Env;
+
+    const app = new Hono<{ Bindings: Env; Variables: AppVariables }>();
+    app.use("*", async (c, next) => {
+      c.set("requestId", "req-body-bind");
+      c.set("logger", logger);
+      await next();
+    });
+    app.post(
+      "/paid-job",
+      x402Middleware({
+        tier: "standard",
+        rpcPollMaxAttempts: 1,
+        rpcPollIntervalMs: 0,
+      }),
+      async (c) => {
+        const payload = (await c.req.json()) as { subject: string };
+        executedSubjects.push(payload.subject);
+        return c.json({ ok: true, subject: payload.subject });
+      }
+    );
+
+    const sigHeader = encodePaymentSignature({
+      x402Version: 2,
+      payload: { transaction: txHex },
+    });
+
+    // 1. Enqueue same-price POST with subject "original" → 402 pending (1 submit, 1 check)
+    const enqueueRes = await app.request(
+      "http://localhost/paid-job",
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          [X402_HEADERS.PAYMENT_SIGNATURE]: sigHeader,
+        },
+        body: JSON.stringify({ subject: "original" }),
+      },
+      env
+    );
+    expect(enqueueRes.status).toBe(402);
+    expect(submitCalls).toBe(1);
+    expect(checkCalls).toBe(1);
+    expect(executedSubjects).toEqual([]);
+
+    // 2. Attempt recovery with X-PAYMENT-ID and modified body ("different") → 400 refused before polling or executing
+    const changedBodyWithIdRes = await app.request(
+      "http://localhost/paid-job",
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-PAYMENT-ID": relayId,
+          [X402_HEADERS.PAYMENT_SIGNATURE]: sigHeader,
+        },
+        body: JSON.stringify({ subject: "different" }),
+      },
+      env
+    );
+    expect(changedBodyWithIdRes.status).toBe(400);
+    expect(submitCalls).toBe(1);
+    expect(checkCalls).toBe(1);
+    expect(executedSubjects).toEqual([]);
+
+    // 3. Attempt recovery via byTxHash (no X-PAYMENT-ID) and modified body ("different") → 400 refused before polling or executing
+    const changedBodyByTxRes = await app.request(
+      "http://localhost/paid-job",
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          [X402_HEADERS.PAYMENT_SIGNATURE]: sigHeader,
+        },
+        body: JSON.stringify({ subject: "different" }),
+      },
+      env
+    );
+    expect(changedBodyByTxRes.status).toBe(400);
+    expect(submitCalls).toBe(1);
+    expect(checkCalls).toBe(1);
+    expect(executedSubjects).toEqual([]);
+
+    // 4. Recover with original body ("original") and X-PAYMENT-ID → succeeds (200), polls checkPayment once more, executes "original"
+    const validRecoveryRes = await app.request(
+      "http://localhost/paid-job",
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-PAYMENT-ID": relayId,
+          [X402_HEADERS.PAYMENT_SIGNATURE]: sigHeader,
+        },
+        body: JSON.stringify({ subject: "original" }),
+      },
+      env
+    );
+    expect(validRecoveryRes.status).toBe(200);
+    expect(submitCalls).toBe(1);
+    expect(checkCalls).toBe(2);
+    expect(executedSubjects).toEqual(["original"]);
+  });
 });
