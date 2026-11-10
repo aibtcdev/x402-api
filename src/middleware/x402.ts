@@ -13,7 +13,7 @@
  *   payment.replaced   — payment was replaced by another tx (nonce race)
  */
 
-import type { MiddlewareHandler } from "hono";
+import type { Context, MiddlewareHandler } from "hono";
 import {
   X402PaymentVerifier,
   networkToCAIP2,
