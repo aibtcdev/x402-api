@@ -145,15 +145,32 @@ const RPC_CODE_TO_TERMINAL_REASON: Partial<Record<string, TerminalReason>> = {
 
 const BOUND_RPC_STORES = new WeakMap<object, RelayBoundStore>();
 
+const MAX_CONSUMED_PAYMENTS_PER_SET = 10_000;
+
 /**
- * Tracks payments that have already been confirmed and served so a confirmed
- * transaction/paymentId/txid can never be replayed to serve a second request.
+ * Per-isolate bounded fast guard tracking payments that have already been
+ * confirmed and served in this Worker isolate. Cross-isolate replay of a
+ * confirmed transaction is blocked by the per-attempt random `pay_` identifier,
+ * the relay's `getReusablePaymentRecord` dropping terminal records, and
+ * chain/relay rejection of already-mined transactions.
  */
 const CONSUMED_PAYMENTS = {
   byTxHash: new Set<string>(),
   byRelayId: new Set<string>(),
   byConfirmedTxid: new Set<string>(),
 };
+
+function addBoundedSetEntry(set: Set<string>, value: string): void {
+  if (set.has(value)) {
+    set.delete(value);
+  } else if (set.size >= MAX_CONSUMED_PAYMENTS_PER_SET) {
+    const oldest = set.values().next().value;
+    if (oldest !== undefined) {
+      set.delete(oldest);
+    }
+  }
+  set.add(value);
+}
 
 function getRelayBoundStore(relay: RelayRPC): RelayBoundStore {
   let store = BOUND_RPC_STORES.get(relay as unknown as object);
@@ -188,13 +205,13 @@ function markPaymentConsumed(
   confirmedTxid?: string
 ): void {
   if (txHash) {
-    CONSUMED_PAYMENTS.byTxHash.add(txHash);
+    addBoundedSetEntry(CONSUMED_PAYMENTS.byTxHash, txHash);
   }
   if (relayPaymentId && relayPaymentId.startsWith("pay_")) {
-    CONSUMED_PAYMENTS.byRelayId.add(relayPaymentId);
+    addBoundedSetEntry(CONSUMED_PAYMENTS.byRelayId, relayPaymentId);
   }
   if (confirmedTxid) {
-    CONSUMED_PAYMENTS.byConfirmedTxid.add(confirmedTxid.toLowerCase());
+    addBoundedSetEntry(CONSUMED_PAYMENTS.byConfirmedTxid, confirmedTxid.toLowerCase());
   }
 }
 
@@ -271,24 +288,143 @@ async function sha256Hex(input: string): Promise<string> {
  * Compute a resource-server request binding digest covering HTTP method,
  * request path, query string, and SHA-256 of raw request body bytes so
  * a pending payment cannot be recovered against a modified request payload
- * or route.
+ * or route. Fails closed (returns null and logs a warning) if reading the
+ * body on a non-GET/HEAD request fails.
  */
-async function computeRequestBindingHash(req: Request): Promise<string> {
+async function computeRequestBindingHash(
+  req: Request,
+  log: Logger,
+  prebufferedBody?: ArrayBuffer
+): Promise<string | null> {
   const url = new URL(req.url, "http://localhost");
   const method = req.method.toUpperCase();
   let bodyHash = "";
   if (method !== "GET" && method !== "HEAD") {
     try {
-      const buf = await req.clone().arrayBuffer();
+      const buf = prebufferedBody ?? (await req.clone().arrayBuffer());
       const digest = await crypto.subtle.digest("SHA-256", buf);
       bodyHash = [...new Uint8Array(digest)]
         .map((b) => b.toString(16).padStart(2, "0"))
         .join("");
-    } catch {
-      bodyHash = "";
+    } catch (err) {
+      log.warn("Failed to read request body for x402 request binding; failing closed", {
+        method,
+        path: url.pathname,
+        error: String(err),
+      });
+      return null;
     }
   }
   return sha256Hex(`${method}|${url.pathname}|${url.search}|${bodyHash}`);
+}
+
+function respondConsumedPayment(
+  c: Context<{ Bindings: Env; Variables: AppVariables }>,
+  opts: {
+    paymentId?: string;
+    requestCorrelationId: string;
+    asset: string;
+    network: string;
+  }
+): Response {
+  const replayHints: DerivedHints = {
+    retryable: false,
+    nextSteps: "start_new_payment",
+  };
+  c.header(X402_HEADERS.PAYMENT_RESPONSE, encodeBase64Json(replayHints));
+  if (opts.paymentId) {
+    c.header("X-PAYMENT-ID", opts.paymentId);
+  }
+  return c.json(
+    {
+      error: "Payment has already been settled and consumed, start a new payment flow",
+      code: X402_ERROR_CODES.INVALID_TRANSACTION_STATE,
+      retryable: false,
+      nextSteps: "start_new_payment",
+      ...(opts.paymentId ? { paymentId: opts.paymentId } : {}),
+      requestCorrelationId: opts.requestCorrelationId,
+      asset: opts.asset,
+      network: opts.network,
+      resource: c.req.path,
+    },
+    402
+  );
+}
+
+function validateBoundPaymentForRecovery(
+  c: Context<{ Bindings: Env; Variables: AppVariables }>,
+  entry: BoundRpcPayment,
+  opts: {
+    verifiedPayer?: string;
+    txHash: string;
+    requireTxHashMatch: boolean;
+    expectedRecipient: string;
+    asset: string;
+    network: string;
+    minAmount: string;
+    requestBindingHash: string;
+    requestCorrelationId: string;
+  }
+): Response | null {
+  const payerMismatch = Boolean(
+    opts.verifiedPayer && entry.verifiedPayer && opts.verifiedPayer !== entry.verifiedPayer
+  );
+  const txMismatch = opts.requireTxHashMatch && entry.txHash !== opts.txHash;
+  if (payerMismatch || txMismatch) {
+    return c.json(
+      {
+        error: "Bound payment origin mismatch for recovery attempt",
+        code: X402_ERROR_CODES.SENDER_MISMATCH,
+      },
+      400
+    );
+  }
+  if (
+    entry.expectedRecipient !== opts.expectedRecipient ||
+    entry.asset !== opts.asset ||
+    entry.network !== opts.network
+  ) {
+    return c.json(
+      {
+        error: "Bound payment recipient or asset mismatch for recovery attempt",
+        code: X402_ERROR_CODES.RECIPIENT_MISMATCH,
+      },
+      400
+    );
+  }
+  if (BigInt(entry.minAmount) < BigInt(opts.minAmount)) {
+    return c.json(
+      {
+        error: "Payment amount below minimum required",
+        code: X402_ERROR_CODES.AMOUNT_INSUFFICIENT,
+        retryable: false,
+        nextSteps: "start_new_payment",
+        paymentId: entry.relayPaymentId,
+        requestCorrelationId: opts.requestCorrelationId,
+        asset: opts.asset,
+        network: opts.network,
+        resource: c.req.path,
+      },
+      402
+    );
+  }
+  if (entry.requestBindingHash !== opts.requestBindingHash) {
+    return c.json(
+      {
+        error: "Bound payment request binding mismatch for recovery attempt",
+        code: X402_ERROR_CODES.INVALID_PAYLOAD,
+        retryable: false,
+        nextSteps: "start_new_payment",
+        paymentId: entry.relayPaymentId,
+        requestCorrelationId: opts.requestCorrelationId,
+        asset: opts.asset,
+        network: opts.network,
+        resource: c.req.path,
+      },
+      400
+    );
+  }
+  return null;
 }
 
 /**
@@ -615,7 +751,11 @@ export function x402Middleware(
     // Calculate price estimate based on pricing type
     let priceEstimate: PriceEstimate;
     let parsedBody: unknown = undefined;
-    const requestBindingHash = await computeRequestBindingHash(c.req.raw);
+    const paymentSignature = c.req.header(X402_HEADERS.PAYMENT_SIGNATURE);
+    const requestForBinding =
+      dynamic && paymentSignature && c.req.method !== "GET" && c.req.method !== "HEAD"
+        ? c.req.raw.clone()
+        : c.req.raw;
 
     if (dynamic) {
       try {
@@ -710,8 +850,6 @@ export function x402Middleware(
     };
 
     // Check for v2 payment header
-    const paymentSignature = c.req.header(X402_HEADERS.PAYMENT_SIGNATURE);
-
     if (!paymentSignature) {
       log.info("No payment header, returning 402", {
         tier: dynamic ? "dynamic" : tier,
@@ -751,6 +889,17 @@ export function x402Middleware(
       c.header(X402_HEADERS.PAYMENT_REQUIRED, encodeBase64Json(paymentRequired));
 
       return c.json(paymentRequired, 402);
+    }
+
+    const requestBindingHash = await computeRequestBindingHash(requestForBinding, log);
+    if (!requestBindingHash) {
+      return c.json(
+        {
+          error: "Unreadable request body for payment binding",
+          code: X402_ERROR_CODES.INVALID_PAYLOAD,
+        },
+        400
+      );
     }
 
     // Parse v2 payment payload from base64
@@ -796,24 +945,11 @@ export function x402Middleware(
 
     // Refuse replay of an already-confirmed and served payment immediately
     if (isPaymentConsumed(txHash, callerSuppliedPaymentId)) {
-      const replayHints: DerivedHints = {
-        retryable: false,
-        nextSteps: "start_new_payment",
-      };
-      c.header(X402_HEADERS.PAYMENT_RESPONSE, encodeBase64Json(replayHints));
-      return c.json(
-        {
-          error: "Payment has already been settled and consumed, start a new payment flow",
-          code: X402_ERROR_CODES.INVALID_TRANSACTION_STATE,
-          retryable: false,
-          nextSteps: "start_new_payment",
-          requestCorrelationId,
-          asset,
-          network: networkV2,
-          resource: c.req.path,
-        },
-        402
-      );
+      return respondConsumedPayment(c, {
+        requestCorrelationId,
+        asset,
+        network: networkV2,
+      });
     }
 
     paymentPayload.extensions = {
@@ -877,62 +1013,19 @@ export function x402Middleware(
             relayStore.byRelayId.get(callerSuppliedPaymentId) ??
             relayStore.byCorrelationId.get(callerSuppliedPaymentId);
           if (boundEntry) {
-            const payerMismatch =
-              Boolean(verifiedPayer && boundEntry.verifiedPayer && verifiedPayer !== boundEntry.verifiedPayer);
-            const txMismatch = boundEntry.txHash !== txHash;
-            if (payerMismatch || txMismatch) {
-              return c.json(
-                {
-                  error: "Bound payment origin mismatch for recovery attempt",
-                  code: X402_ERROR_CODES.SENDER_MISMATCH,
-                },
-                400
-              );
-            }
-            if (
-              boundEntry.expectedRecipient !== c.env.X402_SERVER_ADDRESS ||
-              boundEntry.asset !== asset ||
-              boundEntry.network !== networkV2
-            ) {
-              return c.json(
-                {
-                  error: "Bound payment recipient or asset mismatch for recovery attempt",
-                  code: X402_ERROR_CODES.RECIPIENT_MISMATCH,
-                },
-                400
-              );
-            }
-            if (BigInt(boundEntry.minAmount) < BigInt(paymentRequirements.amount)) {
-              return c.json(
-                {
-                  error: "Payment amount below minimum required",
-                  code: X402_ERROR_CODES.AMOUNT_INSUFFICIENT,
-                  retryable: false,
-                  nextSteps: "start_new_payment",
-                  paymentId: boundEntry.relayPaymentId,
-                  requestCorrelationId,
-                  asset,
-                  network: networkV2,
-                  resource: c.req.path,
-                },
-                402
-              );
-            }
-            if (boundEntry.requestBindingHash !== requestBindingHash) {
-              return c.json(
-                {
-                  error: "Bound payment request binding mismatch for recovery attempt",
-                  code: X402_ERROR_CODES.INVALID_PAYLOAD,
-                  retryable: false,
-                  nextSteps: "start_new_payment",
-                  paymentId: boundEntry.relayPaymentId,
-                  requestCorrelationId,
-                  asset,
-                  network: networkV2,
-                  resource: c.req.path,
-                },
-                400
-              );
+            const mismatchResponse = validateBoundPaymentForRecovery(c, boundEntry, {
+              verifiedPayer,
+              txHash,
+              requireTxHashMatch: true,
+              expectedRecipient: c.env.X402_SERVER_ADDRESS,
+              asset,
+              network: networkV2,
+              minAmount: paymentRequirements.amount,
+              requestBindingHash,
+              requestCorrelationId,
+            });
+            if (mismatchResponse) {
+              return mismatchResponse;
             }
           }
         }
@@ -940,59 +1033,19 @@ export function x402Middleware(
         if (!boundEntry) {
           const existingByTx = relayStore.byTxHash.get(txHash);
           if (existingByTx) {
-            if (verifiedPayer && existingByTx.verifiedPayer && verifiedPayer !== existingByTx.verifiedPayer) {
-              return c.json(
-                {
-                  error: "Bound payment origin mismatch for recovery attempt",
-                  code: X402_ERROR_CODES.SENDER_MISMATCH,
-                },
-                400
-              );
-            }
-            if (
-              existingByTx.expectedRecipient !== c.env.X402_SERVER_ADDRESS ||
-              existingByTx.asset !== asset ||
-              existingByTx.network !== networkV2
-            ) {
-              return c.json(
-                {
-                  error: "Bound payment recipient or asset mismatch for recovery attempt",
-                  code: X402_ERROR_CODES.RECIPIENT_MISMATCH,
-                },
-                400
-              );
-            }
-            if (BigInt(existingByTx.minAmount) < BigInt(paymentRequirements.amount)) {
-              return c.json(
-                {
-                  error: "Payment amount below minimum required",
-                  code: X402_ERROR_CODES.AMOUNT_INSUFFICIENT,
-                  retryable: false,
-                  nextSteps: "start_new_payment",
-                  paymentId: existingByTx.relayPaymentId,
-                  requestCorrelationId,
-                  asset,
-                  network: networkV2,
-                  resource: c.req.path,
-                },
-                402
-              );
-            }
-            if (existingByTx.requestBindingHash !== requestBindingHash) {
-              return c.json(
-                {
-                  error: "Bound payment request binding mismatch for recovery attempt",
-                  code: X402_ERROR_CODES.INVALID_PAYLOAD,
-                  retryable: false,
-                  nextSteps: "start_new_payment",
-                  paymentId: existingByTx.relayPaymentId,
-                  requestCorrelationId,
-                  asset,
-                  network: networkV2,
-                  resource: c.req.path,
-                },
-                400
-              );
+            const mismatchResponse = validateBoundPaymentForRecovery(c, existingByTx, {
+              verifiedPayer,
+              txHash,
+              requireTxHashMatch: false,
+              expectedRecipient: c.env.X402_SERVER_ADDRESS,
+              asset,
+              network: networkV2,
+              minAmount: paymentRequirements.amount,
+              requestBindingHash,
+              requestCorrelationId,
+            });
+            if (mismatchResponse) {
+              return mismatchResponse;
             }
             boundEntry = existingByTx;
           }
@@ -1093,26 +1146,12 @@ export function x402Middleware(
             initialSubmitStatus = rpcResult.status;
 
             if (isPaymentConsumed(txHash, relayPaymentId)) {
-              const replayHints: DerivedHints = {
-                retryable: false,
-                nextSteps: "start_new_payment",
-              };
-              c.header(X402_HEADERS.PAYMENT_RESPONSE, encodeBase64Json(replayHints));
-              c.header("X-PAYMENT-ID", relayPaymentId);
-              return c.json(
-                {
-                  error: "Payment has already been settled and consumed, start a new payment flow",
-                  code: X402_ERROR_CODES.INVALID_TRANSACTION_STATE,
-                  retryable: false,
-                  nextSteps: "start_new_payment",
-                  paymentId: relayPaymentId,
-                  requestCorrelationId,
-                  asset,
-                  network: networkV2,
-                  resource: c.req.path,
-                },
-                402
-              );
+              return respondConsumedPayment(c, {
+                paymentId: relayPaymentId,
+                requestCorrelationId,
+                asset,
+                network: networkV2,
+              });
             }
 
             const rpcReturnedPayer =
@@ -1237,26 +1276,12 @@ export function x402Middleware(
             } else {
               if (isPaymentConsumed(txHash, relayPaymentId, confirmedTxid)) {
                 removeBoundPayment(c.env.X402_RELAY, boundEntry);
-                const replayHints: DerivedHints = {
-                  retryable: false,
-                  nextSteps: "start_new_payment",
-                };
-                c.header(X402_HEADERS.PAYMENT_RESPONSE, encodeBase64Json(replayHints));
-                c.header("X-PAYMENT-ID", relayPaymentId);
-                return c.json(
-                  {
-                    error: "Payment has already been settled and consumed, start a new payment flow",
-                    code: X402_ERROR_CODES.INVALID_TRANSACTION_STATE,
-                    retryable: false,
-                    nextSteps: "start_new_payment",
-                    paymentId: relayPaymentId,
-                    requestCorrelationId,
-                    asset,
-                    network: networkV2,
-                    resource: c.req.path,
-                  },
-                  402
-                );
+                return respondConsumedPayment(c, {
+                  paymentId: relayPaymentId,
+                  requestCorrelationId,
+                  asset,
+                  network: networkV2,
+                });
               }
 
               const resolvedPayer = verifiedPayer || boundEntry.verifiedPayer;
@@ -1566,26 +1591,12 @@ export function x402Middleware(
     }
 
     if (isPaymentConsumed(txHash, canonicalPaymentId, confirmedTxid)) {
-      const replayHints: DerivedHints = {
-        retryable: false,
-        nextSteps: "start_new_payment",
-      };
-      c.header(X402_HEADERS.PAYMENT_RESPONSE, encodeBase64Json(replayHints));
-      c.header("X-PAYMENT-ID", canonicalPaymentId);
-      return c.json(
-        {
-          error: "Payment has already been settled and consumed, start a new payment flow",
-          code: X402_ERROR_CODES.INVALID_TRANSACTION_STATE,
-          retryable: false,
-          nextSteps: "start_new_payment",
-          paymentId: canonicalPaymentId,
-          requestCorrelationId,
-          asset,
-          network: networkV2,
-          resource: c.req.path,
-        },
-        402
-      );
+      return respondConsumedPayment(c, {
+        paymentId: canonicalPaymentId,
+        requestCorrelationId,
+        asset,
+        network: networkV2,
+      });
     }
 
     // Record consumed payment so neither same-isolate nor cross-instance replay can serve it twice

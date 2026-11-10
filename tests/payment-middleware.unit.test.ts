@@ -1108,4 +1108,89 @@ describe("x402Middleware — RPC enqueue vs confirmed settlement, relay ID recov
     expect(checkCalls).toBe(2);
     expect(executedSubjects).toEqual(["original"]);
   });
+
+  it("skips body hashing on unpaid 402 probes and fails closed (400) if body hashing throws on a paid POST request", async () => {
+    const { logger, logs } = createMockLogger();
+    const txHex = await buildSponsoredStxTransferHex(704n);
+    let submitCalls = 0;
+
+    const relay: X402RelayBinding = {
+      async submitPayment() {
+        submitCalls++;
+        return {
+          accepted: true,
+          paymentId: "pay_unreachable",
+          status: "queued",
+        };
+      },
+    };
+
+    const env: Env = {
+      ENVIRONMENT: "production",
+      X402_NETWORK: "testnet",
+      X402_FACILITATOR_URL: "https://facilitator.example.com",
+      X402_SERVER_ADDRESS: TEST_SELLER_ADDRESS,
+      X402_RELAY: relay,
+    } as unknown as Env;
+
+    const app = new Hono<{ Bindings: Env; Variables: AppVariables }>();
+    app.use("*", async (c, next) => {
+      c.set("requestId", "req-fail-closed-body");
+      c.set("logger", logger);
+      await next();
+    });
+    app.post(
+      "/paid-job",
+      x402Middleware({
+        tier: "standard",
+        rpcPollMaxAttempts: 1,
+        rpcPollIntervalMs: 0,
+      }),
+      async (c) => c.json({ ok: true })
+    );
+
+    const brokenBodyReq = (withPayment: boolean) => {
+      const headers: Record<string, string> = {
+        "Content-Type": "application/json",
+      };
+      if (withPayment) {
+        headers[X402_HEADERS.PAYMENT_SIGNATURE] = encodePaymentSignature({
+          x402Version: 2,
+          payload: { transaction: txHex },
+        });
+      }
+      const req = new Request("http://localhost/paid-job", {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ hello: "world" }),
+      });
+      Object.defineProperty(req, "clone", {
+        value: () => ({
+          arrayBuffer: async () => {
+            throw new Error("simulated stream read failure");
+          },
+        }),
+      });
+      return req;
+    };
+
+    // Unpaid probe returns 402 before attempting to clone/hash the body
+    const unpaidRes = await app.request(brokenBodyReq(false), undefined, env);
+    expect(unpaidRes.status).toBe(402);
+    expect(submitCalls).toBe(0);
+
+    // Paid request with unreadable body fails closed with 400 and logs a warning
+    const paidBrokenRes = await app.request(brokenBodyReq(true), undefined, env);
+    expect(paidBrokenRes.status).toBe(400);
+    const body = (await paidBrokenRes.json()) as Record<string, unknown>;
+    expect(body.code).toBe("INVALID_PAYLOAD");
+    expect(submitCalls).toBe(0);
+    expect(
+      logs.some(
+        (entry) =>
+          entry.level === "warn" &&
+          entry.message.includes("Failed to read request body for x402 request binding; failing closed")
+      )
+    ).toBe(true);
+  });
 });
