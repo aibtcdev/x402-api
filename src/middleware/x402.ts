@@ -146,6 +146,8 @@ const RPC_CODE_TO_TERMINAL_REASON: Partial<Record<string, TerminalReason>> = {
 const BOUND_RPC_STORES = new WeakMap<object, RelayBoundStore>();
 
 const MAX_CONSUMED_PAYMENTS_PER_SET = 10_000;
+const MAX_BOUND_PAYMENTS_PER_STORE = 5_000;
+const BOUND_PAYMENT_TTL_MS = 10 * 60 * 1_000;
 
 /**
  * Per-isolate bounded fast guard tracking payments that have already been
@@ -162,14 +164,42 @@ const CONSUMED_PAYMENTS = {
 
 function addBoundedSetEntry(set: Set<string>, value: string): void {
   if (set.has(value)) {
-    set.delete(value);
-  } else if (set.size >= MAX_CONSUMED_PAYMENTS_PER_SET) {
+    return;
+  }
+  if (set.size >= MAX_CONSUMED_PAYMENTS_PER_SET) {
     const oldest = set.values().next().value;
     if (oldest !== undefined) {
       set.delete(oldest);
     }
   }
   set.add(value);
+}
+
+function deleteBoundEntryFromStore(store: RelayBoundStore, entry: BoundRpcPayment): void {
+  store.byRelayId.delete(entry.relayPaymentId);
+  if (store.byCorrelationId.get(entry.requestCorrelationId) === entry) {
+    store.byCorrelationId.delete(entry.requestCorrelationId);
+  }
+  if (store.byTxHash.get(entry.txHash) === entry) {
+    store.byTxHash.delete(entry.txHash);
+  }
+}
+
+function pruneRelayBoundStore(store: RelayBoundStore, now = Date.now()): void {
+  for (const entry of store.byRelayId.values()) {
+    if (now - entry.createdAt > BOUND_PAYMENT_TTL_MS) {
+      deleteBoundEntryFromStore(store, entry);
+    } else {
+      break;
+    }
+  }
+  while (store.byRelayId.size >= MAX_BOUND_PAYMENTS_PER_STORE) {
+    const oldest = store.byRelayId.values().next().value;
+    if (!oldest) {
+      break;
+    }
+    deleteBoundEntryFromStore(store, oldest);
+  }
 }
 
 function getRelayBoundStore(relay: RelayRPC): RelayBoundStore {
@@ -181,12 +211,15 @@ function getRelayBoundStore(relay: RelayRPC): RelayBoundStore {
       byTxHash: new Map(),
     };
     BOUND_RPC_STORES.set(relay as unknown as object, store);
+  } else {
+    pruneRelayBoundStore(store);
   }
   return store;
 }
 
 function saveBoundPayment(relay: RelayRPC, entry: BoundRpcPayment): void {
   const store = getRelayBoundStore(relay);
+  pruneRelayBoundStore(store, entry.createdAt);
   store.byRelayId.set(entry.relayPaymentId, entry);
   store.byCorrelationId.set(entry.requestCorrelationId, entry);
   store.byTxHash.set(entry.txHash, entry);
@@ -194,9 +227,7 @@ function saveBoundPayment(relay: RelayRPC, entry: BoundRpcPayment): void {
 
 function removeBoundPayment(relay: RelayRPC, entry: BoundRpcPayment): void {
   const store = getRelayBoundStore(relay);
-  store.byRelayId.delete(entry.relayPaymentId);
-  store.byCorrelationId.delete(entry.requestCorrelationId);
-  store.byTxHash.delete(entry.txHash);
+  deleteBoundEntryFromStore(store, entry);
 }
 
 function markPaymentConsumed(
@@ -292,16 +323,18 @@ async function sha256Hex(input: string): Promise<string> {
  * body on a non-GET/HEAD request fails.
  */
 async function computeRequestBindingHash(
-  req: Request,
-  log: Logger,
-  prebufferedBody?: ArrayBuffer
+  c: Context<{ Bindings: Env; Variables: AppVariables }>,
+  log: Logger
 ): Promise<string | null> {
+  const req = c.req.raw;
   const url = new URL(req.url, "http://localhost");
   const method = req.method.toUpperCase();
   let bodyHash = "";
   if (method !== "GET" && method !== "HEAD") {
     try {
-      const buf = prebufferedBody ?? (await req.clone().arrayBuffer());
+      const buf = req.bodyUsed
+        ? await c.req.arrayBuffer()
+        : await req.clone().arrayBuffer();
       const digest = await crypto.subtle.digest("SHA-256", buf);
       bodyHash = [...new Uint8Array(digest)]
         .map((b) => b.toString(16).padStart(2, "0"))
@@ -751,11 +784,6 @@ export function x402Middleware(
     // Calculate price estimate based on pricing type
     let priceEstimate: PriceEstimate;
     let parsedBody: unknown = undefined;
-    const paymentSignature = c.req.header(X402_HEADERS.PAYMENT_SIGNATURE);
-    const requestForBinding =
-      dynamic && paymentSignature && c.req.method !== "GET" && c.req.method !== "HEAD"
-        ? c.req.raw.clone()
-        : c.req.raw;
 
     if (dynamic) {
       try {
@@ -850,6 +878,8 @@ export function x402Middleware(
     };
 
     // Check for v2 payment header
+    const paymentSignature = c.req.header(X402_HEADERS.PAYMENT_SIGNATURE);
+
     if (!paymentSignature) {
       log.info("No payment header, returning 402", {
         tier: dynamic ? "dynamic" : tier,
@@ -889,17 +919,6 @@ export function x402Middleware(
       c.header(X402_HEADERS.PAYMENT_REQUIRED, encodeBase64Json(paymentRequired));
 
       return c.json(paymentRequired, 402);
-    }
-
-    const requestBindingHash = await computeRequestBindingHash(requestForBinding, log);
-    if (!requestBindingHash) {
-      return c.json(
-        {
-          error: "Unreadable request body for payment binding",
-          code: X402_ERROR_CODES.INVALID_PAYLOAD,
-        },
-        400
-      );
     }
 
     // Parse v2 payment payload from base64
@@ -992,6 +1011,17 @@ export function x402Middleware(
 
     try {
       if (c.env.X402_RELAY) {
+        const requestBindingHash = await computeRequestBindingHash(c, log);
+        if (!requestBindingHash) {
+          return c.json(
+            {
+              error: "Unreadable request body for payment binding",
+              code: X402_ERROR_CODES.INVALID_PAYLOAD,
+            },
+            400
+          );
+        }
+
         // Verified transaction origin check:
         // Never trust unsigned outer `paymentPayload.payer` and never fall back to `c.env.X402_SERVER_ADDRESS`.
         let verifiedPayer = txOrigin?.payerAddress;
@@ -1599,7 +1629,7 @@ export function x402Middleware(
       });
     }
 
-    // Record consumed payment so neither same-isolate nor cross-instance replay can serve it twice
+    // Record consumed payment in the bounded per-isolate guard so same-isolate replay is refused immediately
     markPaymentConsumed(txHash, canonicalPaymentId, confirmedTxid);
 
     const checkStatusUrl = extractCheckStatusUrl(
