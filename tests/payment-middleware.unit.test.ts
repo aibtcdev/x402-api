@@ -1109,12 +1109,11 @@ describe("x402Middleware — RPC enqueue vs confirmed settlement, relay ID recov
     expect(executedSubjects).toEqual(["original"]);
   });
 
-  it("skips body hashing on unpaid 402 probes and fails closed (400) if body hashing throws on a paid POST request", async () => {
-    const { logger, logs } = createMockLogger();
-    const txHex = await buildSponsoredStxTransferHex(704n);
+  test("skips body hashing on unpaid 402 probes and fails closed (400) if body hashing throws on a paid POST request", async () => {
+    const txHex = await buildSignedTxHex({ sponsored: true, nonce: 704n });
     let submitCalls = 0;
 
-    const relay: X402RelayBinding = {
+    const relay: RelayRPC = {
       async submitPayment() {
         submitCalls++;
         return {
@@ -1123,31 +1122,12 @@ describe("x402Middleware — RPC enqueue vs confirmed settlement, relay ID recov
           status: "queued",
         };
       },
+      async checkPayment() {
+        return { paymentId: "pay_unreachable", status: "queued" };
+      },
     };
 
-    const env: Env = {
-      ENVIRONMENT: "production",
-      X402_NETWORK: "testnet",
-      X402_FACILITATOR_URL: "https://facilitator.example.com",
-      X402_SERVER_ADDRESS: TEST_SELLER_ADDRESS,
-      X402_RELAY: relay,
-    } as unknown as Env;
-
-    const app = new Hono<{ Bindings: Env; Variables: AppVariables }>();
-    app.use("*", async (c, next) => {
-      c.set("requestId", "req-fail-closed-body");
-      c.set("logger", logger);
-      await next();
-    });
-    app.post(
-      "/paid-job",
-      x402Middleware({
-        tier: "standard",
-        rpcPollMaxAttempts: 1,
-        rpcPollIntervalMs: 0,
-      }),
-      async (c) => c.json({ ok: true })
-    );
+    const { app, env, events } = createTestHarness(relay);
 
     const brokenBodyReq = (withPayment: boolean) => {
       const headers: Record<string, string> = {
@@ -1159,7 +1139,7 @@ describe("x402Middleware — RPC enqueue vs confirmed settlement, relay ID recov
           payload: { transaction: txHex },
         });
       }
-      const req = new Request("http://localhost/paid-job", {
+      const req = new Request("http://localhost/paid", {
         method: "POST",
         headers,
         body: JSON.stringify({ hello: "world" }),
@@ -1183,10 +1163,10 @@ describe("x402Middleware — RPC enqueue vs confirmed settlement, relay ID recov
     const paidBrokenRes = await app.request(brokenBodyReq(true), undefined, env);
     expect(paidBrokenRes.status).toBe(400);
     const body = (await paidBrokenRes.json()) as Record<string, unknown>;
-    expect(body.code).toBe("INVALID_PAYLOAD");
+    expect(body.code).toBe(X402_ERROR_CODES.INVALID_PAYLOAD);
     expect(submitCalls).toBe(0);
     expect(
-      logs.some(
+      events.some(
         (entry) =>
           entry.level === "warn" &&
           entry.message.includes("Failed to read request body for x402 request binding; failing closed")
