@@ -24,8 +24,7 @@
     ]
   },
   "services": [
-    { "binding": "LOGS", "service": "worker-logs-staging", "entrypoint": "LogsRPC" },
-    { "binding": "X402_RELAY", "service": "x402-sponsor-relay-staging", "entrypoint": "RelayRPC" }
+    { "binding": "LOGS", "service": "worker-logs-staging", "entrypoint": "LogsRPC" }
   ],
   "migrations": [
     { "tag": "v1", "new_sqlite_classes": ["UsageDO", "StorageDO"] },

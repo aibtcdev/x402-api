@@ -32,8 +32,13 @@ import {
   AuthType,
 } from "@stacks/transactions";
 import { stripHexPrefix } from "../utils/encoding";
-import type { SettleResult } from "../services/payment-contract";
-import type { TerminalReason } from "../services/payment-contract";
+import { TERMINAL_REASON_TO_CATEGORY } from "../services/payment-contract";
+import type { SettleResult, TerminalReason } from "../services/payment-contract";
+import type {
+  TxGuardRecord,
+  BindTxPaymentInput,
+  MarkTxConsumedInput,
+} from "../durable-objects/PaymentPollingDO";
 import type {
   Env,
   AppVariables,
@@ -72,9 +77,9 @@ export interface X402MiddlewareOptions {
   dynamic?: boolean;
   /** Custom price estimator for dynamic pricing */
   estimator?: (body: unknown, tokenType: TokenType, log: Logger) => PriceEstimate;
-  /** Max checkPayment poll attempts per request after RPC enqueue (default: 2) */
+  /** Max checkPayment poll attempts per request after RPC enqueue (default: 15) */
   rpcPollMaxAttempts?: number;
-  /** Delay in ms between checkPayment poll attempts (default: 10ms) */
+  /** Delay in ms between checkPayment poll attempts (default: 1000ms) */
   rpcPollIntervalMs?: number;
 }
 
@@ -133,6 +138,7 @@ const RPC_CODE_TO_TERMINAL_REASON: Partial<Record<string, TerminalReason>> = {
   TOO_MUCH_CHAINING: "origin_chaining_limit",
   QUEUE_UNAVAILABLE: "queue_unavailable",
   SPONSOR_FAILURE: "sponsor_failure",
+  SPONSOR_EXHAUSTED: "sponsor_exhausted",
   SPONSOR_NONCE_CONFLICT: "sponsor_nonce_conflict",
   INTERNAL_ERROR: "internal_error",
   BROADCAST_FAILED: "broadcast_failure",
@@ -148,6 +154,12 @@ const BOUND_RPC_STORES = new WeakMap<object, RelayBoundStore>();
 const MAX_CONSUMED_PAYMENTS_PER_SET = 10_000;
 const MAX_BOUND_PAYMENTS_PER_STORE = 5_000;
 const BOUND_PAYMENT_TTL_MS = 10 * 60 * 1_000;
+/**
+ * Grace window right after RPC enqueue where KV eventual-consistency `not_found`
+ * from a remote edge POP is treated as still pending instead of deleting the
+ * bound entry or telling the caller to rebuild (which would risk a double charge).
+ */
+const NOT_FOUND_ENQUEUE_GRACE_MS = 30_000;
 
 /**
  * Per-isolate bounded fast guard tracking payments that have already been
@@ -317,10 +329,14 @@ async function sha256Hex(input: string): Promise<string> {
 
 /**
  * Compute a resource-server request binding digest covering HTTP method,
- * request path, query string, and SHA-256 of raw request body bytes so
- * a pending payment cannot be recovered against a modified request payload
- * or route. Fails closed (returns null and logs a warning) if reading the
- * body on a non-GET/HEAD request fails.
+ * request path, query string, and request body bytes so a pending payment
+ * cannot be recovered against a modified request payload or route.
+ * On dynamic routes where `c.req.json()` has already parsed the body,
+ * Hono 4.12.14 (`#cachedBody`) causes `c.req.arrayBuffer()` to serialize
+ * `JSON.stringify(parsedBody)` rather than the original wire bytes, which
+ * still matches the parsed value observed by the downstream handler.
+ * Fails closed (returns null and logs a warning) if reading the body on a
+ * non-GET/HEAD request fails.
  */
 async function computeRequestBindingHash(
   c: Context<{ Bindings: Env; Variables: AppVariables }>,
@@ -599,6 +615,113 @@ function trackPaymentInDO(
   }
 }
 
+interface TxGuardDOStub {
+  getTxGuard?: () => Promise<TxGuardRecord | null>;
+  bindTxPayment?: (input: BindTxPaymentInput) => Promise<TxGuardRecord>;
+  clearBoundTx?: () => Promise<void>;
+  markTxConsumed?: (input: MarkTxConsumedInput) => Promise<{
+    alreadyConsumed: boolean;
+    record: TxGuardRecord;
+  }>;
+}
+
+type DoGuardLookupResult =
+  | { available: false }
+  | { available: true; record: TxGuardRecord | null }
+  | { available: true; error: unknown };
+
+function getTxGuardStub(c: { env: Env }, txHash: string): TxGuardDOStub | null {
+  if (!c.env.PAYMENT_POLLING_DO || !txHash) {
+    return null;
+  }
+  const doId = c.env.PAYMENT_POLLING_DO.idFromName(`tx:${txHash}`);
+  return c.env.PAYMENT_POLLING_DO.get(doId) as unknown as TxGuardDOStub;
+}
+
+async function readTxGuardFromDO(
+  c: { env: Env },
+  txHash: string,
+  log: Logger
+): Promise<DoGuardLookupResult> {
+  try {
+    const stub = getTxGuardStub(c, txHash);
+    if (!stub || typeof stub.getTxGuard !== "function") {
+      return { available: false };
+    }
+    const record = await stub.getTxGuard();
+    return { available: true, record };
+  } catch (err) {
+    log.error("PaymentPollingDO.getTxGuard failed", {
+      txHash,
+      err: String(err),
+    });
+    return { available: true, error: err };
+  }
+}
+
+async function bindTxPaymentInDO(
+  c: { env: Env },
+  input: BindTxPaymentInput,
+  log: Logger
+): Promise<{ available: boolean; record?: TxGuardRecord; error?: unknown }> {
+  try {
+    const stub = getTxGuardStub(c, input.txHash);
+    if (!stub || typeof stub.bindTxPayment !== "function") {
+      return { available: false };
+    }
+    const record = await stub.bindTxPayment(input);
+    return { available: true, record };
+  } catch (err) {
+    log.error("PaymentPollingDO.bindTxPayment failed", {
+      txHash: input.txHash,
+      paymentId: input.relayPaymentId,
+      err: String(err),
+    });
+    return { available: true, error: err };
+  }
+}
+
+async function clearBoundTxInDO(
+  c: { env: Env },
+  txHash: string,
+  log: Logger
+): Promise<void> {
+  try {
+    const stub = getTxGuardStub(c, txHash);
+    if (!stub || typeof stub.clearBoundTx !== "function") {
+      return;
+    }
+    await stub.clearBoundTx();
+  } catch (err) {
+    log.warn("PaymentPollingDO.clearBoundTx failed (non-blocking)", {
+      txHash,
+      err: String(err),
+    });
+  }
+}
+
+async function markTxConsumedInDO(
+  c: { env: Env },
+  input: MarkTxConsumedInput,
+  log: Logger
+): Promise<{ available: boolean; alreadyConsumed?: boolean; error?: unknown }> {
+  try {
+    const stub = getTxGuardStub(c, input.txHash);
+    if (!stub || typeof stub.markTxConsumed !== "function") {
+      return { available: false };
+    }
+    const res = await stub.markTxConsumed(input);
+    return { available: true, alreadyConsumed: res.alreadyConsumed };
+  } catch (err) {
+    log.error("PaymentPollingDO.markTxConsumed failed", {
+      txHash: input.txHash,
+      paymentId: input.relayPaymentId,
+      err: String(err),
+    });
+    return { available: true, error: err };
+  }
+}
+
 /**
  * Classify payment errors for appropriate response
  */
@@ -634,6 +757,25 @@ export function classifyPaymentError(error: unknown, settleResult?: Partial<Sett
   }
   if (canonicalStatus === "not_found") {
     return { code: X402_ERROR_CODES.INVALID_TRANSACTION_STATE, message: "Payment identity expired or was not found, start a new payment flow", httpStatus: 402 };
+  }
+
+  // Transient pre-enqueue relay or settlement rejections (status omitted, e.g. QUEUE_UNAVAILABLE / BROADCAST_RATE_LIMITED)
+  const settleTerminalReason = settleResult && "terminalReason" in settleResult
+    ? (settleResult as { terminalReason?: TerminalReason }).terminalReason
+    : undefined;
+  const settleRetryable = settleResult && "retryable" in settleResult
+    ? (settleResult as { retryable?: boolean }).retryable
+    : undefined;
+  if (settleTerminalReason && settleRetryable !== false) {
+    const category = TERMINAL_REASON_TO_CATEGORY[settleTerminalReason];
+    if (category === "relay" || category === "settlement") {
+      return {
+        code: X402_ERROR_CODES.UNEXPECTED_SETTLE_ERROR,
+        message: "Settlement relay temporarily unavailable, please retry",
+        httpStatus: 503,
+        retryAfter: 30,
+      };
+    }
   }
 
   // Legacy string-heuristic fallback — used when relay does not return canonical status.
@@ -748,8 +890,8 @@ export function x402Middleware(
     tier = "standard",
     dynamic = false,
     estimator,
-    rpcPollMaxAttempts = 2,
-    rpcPollIntervalMs = 10,
+    rpcPollMaxAttempts = 15,
+    rpcPollIntervalMs = 1000,
   } = options;
 
   return async (c, next) => {
@@ -962,9 +1104,38 @@ export function x402Middleware(
     const settlementAttemptId = "pay_" + crypto.randomUUID();
     const txHash = await sha256Hex(cleanTxHex.toLowerCase());
 
-    // Refuse replay of an already-confirmed and served payment immediately
+    // Refuse replay of an already-confirmed and served payment immediately (in-isolate cache + cross-isolate DO)
     if (isPaymentConsumed(txHash, callerSuppliedPaymentId)) {
       return respondConsumedPayment(c, {
+        requestCorrelationId,
+        asset,
+        network: networkV2,
+      });
+    }
+
+    const doGuardLookup = await readTxGuardFromDO(c, txHash, log);
+    if ("error" in doGuardLookup) {
+      c.header("Retry-After", "5");
+      return c.json(
+        {
+          error: "Payment state store temporarily unavailable, please retry",
+          code: X402_ERROR_CODES.UNEXPECTED_SETTLE_ERROR,
+          retryable: true,
+          retryAfter: 5,
+          nextSteps: "retry_later",
+        },
+        503
+      );
+    }
+
+    if (doGuardLookup.available && doGuardLookup.record?.consumed) {
+      markPaymentConsumed(
+        txHash,
+        doGuardLookup.record.relayPaymentId,
+        doGuardLookup.record.consumedTxid
+      );
+      return respondConsumedPayment(c, {
+        paymentId: doGuardLookup.record.relayPaymentId ?? callerSuppliedPaymentId,
         requestCorrelationId,
         asset,
         network: networkV2,
@@ -1081,6 +1252,62 @@ export function x402Middleware(
           }
         }
 
+        // Cross-isolate recovery: hydrate from PaymentPollingDO (keyed by txHash) if this isolate is cold
+        if (!boundEntry && doGuardLookup.available && doGuardLookup.record?.relayPaymentId) {
+          const rec = doGuardLookup.record;
+          if (callerSuppliedPaymentId && rec.relayPaymentId !== callerSuppliedPaymentId) {
+            return c.json(
+              {
+                error: "Provided X-PAYMENT-ID does not match transaction payment binding",
+                code: X402_ERROR_CODES.SENDER_MISMATCH,
+              },
+              400
+            );
+          }
+          if (
+            rec.relayPaymentId &&
+            rec.expectedRecipient &&
+            rec.minAmount &&
+            rec.asset &&
+            rec.network &&
+            rec.requestBindingHash
+          ) {
+            const hydratedEntry: BoundRpcPayment = {
+              relayPaymentId: rec.relayPaymentId,
+              requestCorrelationId,
+              requestBindingHash: rec.requestBindingHash,
+              txHash: rec.txHash,
+              verifiedPayer: rec.verifiedPayer ?? "",
+              checkStatusUrl: extractCheckStatusUrl(
+                {},
+                c.env.X402_FACILITATOR_URL,
+                rec.relayPaymentId
+              ),
+              expectedRecipient: rec.expectedRecipient,
+              minAmount: rec.minAmount,
+              asset: rec.asset,
+              network: rec.network,
+              createdAt: rec.boundAt ?? Date.now(),
+            };
+            const mismatchResponse = validateBoundPaymentForRecovery(c, hydratedEntry, {
+              verifiedPayer,
+              txHash,
+              requireTxHashMatch: Boolean(callerSuppliedPaymentId),
+              expectedRecipient: c.env.X402_SERVER_ADDRESS,
+              asset,
+              network: networkV2,
+              minAmount: paymentRequirements.amount,
+              requestBindingHash,
+              requestCorrelationId,
+            });
+            if (mismatchResponse) {
+              return mismatchResponse;
+            }
+            saveBoundPayment(c.env.X402_RELAY, hydratedEntry);
+            boundEntry = hydratedEntry;
+          }
+        }
+
         let initialSubmitStatus: string | undefined;
         let skipRpcPolling = false;
 
@@ -1146,6 +1373,12 @@ export function x402Middleware(
               skipRpcPolling = true;
             } else {
               const mappedTerminalReason = RPC_CODE_TO_TERMINAL_REASON[rpcResult.code];
+              const mappedCategory = mappedTerminalReason
+                ? TERMINAL_REASON_TO_CATEGORY[mappedTerminalReason]
+                : undefined;
+              const isRetryableRelayRejection =
+                rpcResult.retryable !== false &&
+                (mappedCategory === "relay" || mappedCategory === "settlement");
               settleResult = {
                 success: false,
                 transaction: "",
@@ -1153,7 +1386,9 @@ export function x402Middleware(
                 errorReason: rpcResult.code,
                 ...(mappedTerminalReason ? { terminalReason: mappedTerminalReason } : {}),
                 retryable: rpcResult.retryable,
-                status: "failed",
+                // Omit canonical "failed" status on transient pre-enqueue relay rejections
+                // so classifyPaymentError surfaces HTTP 503 + Retry-After instead of 402 TRANSACTION_FAILED.
+                ...(!isRetryableRelayRejection ? { status: "failed" } : {}),
                 error: rpcResult.error,
               } as unknown as SettleResult;
               skipRpcPolling = true;
@@ -1216,6 +1451,21 @@ export function x402Middleware(
               createdAt: Date.now(),
             };
             saveBoundPayment(c.env.X402_RELAY, boundEntry);
+            await bindTxPaymentInDO(
+              c,
+              {
+                txHash,
+                relayPaymentId,
+                expectedRecipient: c.env.X402_SERVER_ADDRESS,
+                minAmount: paymentRequirements.amount,
+                asset,
+                network: networkV2,
+                verifiedPayer: verifiedPayer ?? undefined,
+                requestBindingHash,
+                boundAt: boundEntry.createdAt,
+              },
+              log
+            );
 
             // Track enqueued payment in PaymentPollingDO using canonical relayPaymentId & relayCheckStatusUrl
             trackPaymentInDO(
@@ -1265,6 +1515,7 @@ export function x402Middleware(
                 if (typeof checkReturnedPayer === "string" && checkReturnedPayer.length > 0) {
                   if (verifiedPayer && checkReturnedPayer !== verifiedPayer) {
                     removeBoundPayment(c.env.X402_RELAY, boundEntry);
+                    await clearBoundTxInDO(c, txHash, log);
                     return c.json(
                       {
                         error: "Relay payer does not match verified transaction origin",
@@ -1279,7 +1530,14 @@ export function x402Middleware(
                   }
                 }
 
-                if (lastStatus === "confirmed" || TERMINAL_FAILURE_RPC_STATUSES.has(lastStatus)) {
+                const isGraceWindowNotFound =
+                  lastStatus === "not_found" &&
+                  Date.now() - boundEntry.createdAt < NOT_FOUND_ENQUEUE_GRACE_MS;
+
+                if (
+                  lastStatus === "confirmed" ||
+                  (TERMINAL_FAILURE_RPC_STATUSES.has(lastStatus) && !isGraceWindowNotFound)
+                ) {
                   break;
                 }
               } catch (pollErr) {
@@ -1317,6 +1575,7 @@ export function x402Middleware(
               const resolvedPayer = verifiedPayer || boundEntry.verifiedPayer;
               if (!resolvedPayer || resolvedPayer === c.env.X402_SERVER_ADDRESS) {
                 removeBoundPayment(c.env.X402_RELAY, boundEntry);
+                await clearBoundTxInDO(c, txHash, log);
                 return c.json(
                   {
                     error: "Could not verify transaction origin payer for confirmed payment",
@@ -1340,8 +1599,13 @@ export function x402Middleware(
             }
           }
 
-          if (TERMINAL_FAILURE_RPC_STATUSES.has(lastStatus)) {
+          const isNotFoundWithinGraceWindow =
+            lastStatus === "not_found" &&
+            Date.now() - boundEntry.createdAt < NOT_FOUND_ENQUEUE_GRACE_MS;
+
+          if (TERMINAL_FAILURE_RPC_STATUSES.has(lastStatus) && !isNotFoundWithinGraceWindow) {
             removeBoundPayment(c.env.X402_RELAY, boundEntry);
+            await clearBoundTxInDO(c, txHash, log);
             const checkRetryable = (latestCheck as { retryable?: boolean } | undefined)?.retryable;
             settleResult = {
               success: false,
@@ -1621,6 +1885,44 @@ export function x402Middleware(
     }
 
     if (isPaymentConsumed(txHash, canonicalPaymentId, confirmedTxid)) {
+      return respondConsumedPayment(c, {
+        paymentId: canonicalPaymentId,
+        requestCorrelationId,
+        asset,
+        network: networkV2,
+      });
+    }
+
+    // Atomically mark txHash as consumed in PaymentPollingDO across isolates before serving
+    const consumeDOResult = await markTxConsumedInDO(
+      c,
+      {
+        txHash,
+        relayPaymentId: canonicalPaymentId,
+        txid: confirmedTxid,
+        expectedRecipient: c.env.X402_SERVER_ADDRESS,
+        minAmount: paymentRequirements.amount,
+        asset,
+        network: networkV2,
+        verifiedPayer: payerAddress,
+      },
+      log
+    );
+    if ("error" in consumeDOResult) {
+      c.header("Retry-After", "5");
+      return c.json(
+        {
+          error: "Payment state store temporarily unavailable, please retry",
+          code: X402_ERROR_CODES.UNEXPECTED_SETTLE_ERROR,
+          retryable: true,
+          retryAfter: 5,
+          nextSteps: "retry_later",
+        },
+        503
+      );
+    }
+    if (consumeDOResult.available && consumeDOResult.alreadyConsumed) {
+      markPaymentConsumed(txHash, canonicalPaymentId, confirmedTxid);
       return respondConsumedPayment(c, {
         paymentId: canonicalPaymentId,
         requestCorrelationId,

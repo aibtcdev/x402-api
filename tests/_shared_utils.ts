@@ -597,8 +597,14 @@ export async function makeX402RequestWithRetry(
   let paymentReqBody: PaymentRequiredV2 | null = null;
   let paymentPayload: PaymentPayloadV2 | null = null;
   let paymentSignature: string | null = null;
+  let inFlightPaymentId: string | null = null;
+  let pendingRetryCount = 0;
+  const maxPendingRetries = Math.max(maxRetries, 6);
 
-  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+  for (let attempt = 0; attempt <= maxRetries || pendingRetryCount <= maxPendingRetries; attempt++) {
+    if (attempt > maxRetries && !inFlightPaymentId) {
+      break;
+    }
     if (!paymentReqBody || !paymentPayload || !paymentSignature) {
       log(`Attempt ${attempt + 1}/${maxRetries + 1}: fetching payment requirements...`);
 
@@ -712,6 +718,7 @@ export async function makeX402RequestWithRetry(
           ...(body ? { "Content-Type": "application/json" } : {}),
           ...extraHeaders,
           [X402_HEADERS.PAYMENT_SIGNATURE]: paymentSignature,
+          ...(inFlightPaymentId ? { "X-PAYMENT-ID": inFlightPaymentId } : {}),
           "X-PAYMENT-TOKEN-TYPE": tokenType,
         },
         body: body ? JSON.stringify(body) : undefined,
@@ -727,6 +734,7 @@ export async function makeX402RequestWithRetry(
         paymentReqBody = null;
         paymentPayload = null;
         paymentSignature = null;
+        inFlightPaymentId = null;
         nonceTracker.reset();
         continue;
       }
@@ -761,8 +769,12 @@ export async function makeX402RequestWithRetry(
     );
     const fullErrorText = `${parsedError.errorCode || ""} ${parsedError.errorMessage || ""} ${errText}`;
 
-    if (parsedError.status && isInFlightPaymentState(parsedError.status) && attempt < maxRetries) {
+    if (parsedError.status && isInFlightPaymentState(parsedError.status) && pendingRetryCount < maxPendingRetries) {
       retryCount++;
+      pendingRetryCount++;
+      if (parsedError.paymentId) {
+        inFlightPaymentId = parsedError.paymentId;
+      }
       const delayMs = Math.min(calculateBackoff(attempt, parsedError.retryAfterSecs), maxDelayMs);
       log(
         `Payment ${parsedError.paymentId || "unknown"} still ${parsedError.status}, waiting ${delayMs}ms before reusing the same payment...`
@@ -782,6 +794,7 @@ export async function makeX402RequestWithRetry(
       paymentReqBody = null;
       paymentPayload = null;
       paymentSignature = null;
+      inFlightPaymentId = null;
       nonceTracker.reset();
       continue;
     }
@@ -795,6 +808,7 @@ export async function makeX402RequestWithRetry(
       paymentReqBody = null;
       paymentPayload = null;
       paymentSignature = null;
+      inFlightPaymentId = null;
       nonceTracker.reset();
       continue;
     }
@@ -818,6 +832,7 @@ export async function makeX402RequestWithRetry(
         paymentReqBody = null;
         paymentPayload = null;
         paymentSignature = null;
+        inFlightPaymentId = null;
         nonceTracker.reset();
       }
       continue;

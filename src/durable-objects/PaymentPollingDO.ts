@@ -43,6 +43,45 @@ export interface PaymentStatusSnapshot {
   pollCount: number;
 }
 
+export interface TxGuardRecord {
+  txHash: string;
+  relayPaymentId?: string;
+  expectedRecipient?: string;
+  minAmount?: string;
+  asset?: string;
+  network?: string;
+  verifiedPayer?: string;
+  requestBindingHash?: string;
+  boundAt?: number;
+  consumed: boolean;
+  consumedAt?: number;
+  consumedTxid?: string;
+  updatedAt: number;
+}
+
+export interface BindTxPaymentInput {
+  txHash: string;
+  relayPaymentId: string;
+  expectedRecipient: string;
+  minAmount: string;
+  asset: string;
+  network: string;
+  verifiedPayer?: string;
+  requestBindingHash: string;
+  boundAt?: number;
+}
+
+export interface MarkTxConsumedInput {
+  txHash: string;
+  relayPaymentId?: string;
+  txid?: string;
+  expectedRecipient?: string;
+  minAmount?: string;
+  asset?: string;
+  network?: string;
+  verifiedPayer?: string;
+}
+
 // Re-export from payment-hints for callers that import from this module
 export type { DerivedHints } from "../utils/payment-hints";
 export { computeDerivedHints } from "../utils/payment-hints";
@@ -88,6 +127,23 @@ const SCHEMA_SQL = `
     poll_count       INTEGER NOT NULL DEFAULT 0,
     created_at       TEXT NOT NULL,
     is_terminal      INTEGER NOT NULL DEFAULT 0
+  );
+
+  CREATE TABLE IF NOT EXISTS tx_guard (
+    id                   INTEGER PRIMARY KEY CHECK (id = 1),
+    tx_hash              TEXT NOT NULL,
+    relay_payment_id     TEXT,
+    expected_recipient   TEXT,
+    min_amount           TEXT,
+    asset                TEXT,
+    network              TEXT,
+    verified_payer       TEXT,
+    request_binding_hash TEXT,
+    bound_at             INTEGER,
+    consumed             INTEGER NOT NULL DEFAULT 0,
+    consumed_at          INTEGER,
+    consumed_txid        TEXT,
+    updated_at           INTEGER NOT NULL
   );
 `;
 
@@ -396,6 +452,149 @@ export class PaymentPollingDO extends DurableObject<Env> {
       checkStatusUrl: row.check_status_url as string,
       polledAt: row.polled_at as string,
       pollCount: row.poll_count as number,
+    };
+  }
+
+  // ---------------------------------------------------------------------------
+  // Cross-isolate txHash guard methods (keyed by idFromName("tx:" + txHash))
+  // ---------------------------------------------------------------------------
+
+  /** Synchronous internal read for tx_guard so guard checks/writes run without yielding. */
+  private _readTxGuard(): TxGuardRecord | null {
+    const rows = [...this.sql.exec("SELECT * FROM tx_guard WHERE id = 1 LIMIT 1")];
+    if (rows.length === 0) return null;
+    return this._rowToTxGuard(rows[0] as Record<string, unknown>);
+  }
+
+  /** Read bound + consumed state for this txHash DO instance. */
+  async getTxGuard(): Promise<TxGuardRecord | null> {
+    return this._readTxGuard();
+  }
+
+  /**
+   * Persist bound relay payment metadata for this txHash across Worker isolates.
+   * Preserves original bound_at when the same relayPaymentId is re-saved and never
+   * clears consumed=1 if already finalized.
+   */
+  async bindTxPayment(input: BindTxPaymentInput): Promise<TxGuardRecord> {
+    const now = Date.now();
+    const existing = this._readTxGuard();
+    const boundAt =
+      existing?.relayPaymentId === input.relayPaymentId && typeof existing.boundAt === "number"
+        ? existing.boundAt
+        : input.boundAt ?? now;
+    const verifiedPayer = input.verifiedPayer || existing?.verifiedPayer || null;
+
+    this.sql.exec(
+      `
+      INSERT INTO tx_guard
+        (id, tx_hash, relay_payment_id, expected_recipient, min_amount, asset, network,
+         verified_payer, request_binding_hash, bound_at, consumed, consumed_at, consumed_txid, updated_at)
+      VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, NULL, NULL, ?)
+      ON CONFLICT(id) DO UPDATE SET
+        relay_payment_id     = CASE WHEN tx_guard.consumed = 1 THEN tx_guard.relay_payment_id ELSE excluded.relay_payment_id END,
+        expected_recipient   = CASE WHEN tx_guard.consumed = 1 THEN tx_guard.expected_recipient ELSE excluded.expected_recipient END,
+        min_amount           = CASE WHEN tx_guard.consumed = 1 THEN tx_guard.min_amount ELSE excluded.min_amount END,
+        asset                = CASE WHEN tx_guard.consumed = 1 THEN tx_guard.asset ELSE excluded.asset END,
+        network              = CASE WHEN tx_guard.consumed = 1 THEN tx_guard.network ELSE excluded.network END,
+        verified_payer       = COALESCE(excluded.verified_payer, tx_guard.verified_payer),
+        request_binding_hash = CASE WHEN tx_guard.consumed = 1 THEN tx_guard.request_binding_hash ELSE excluded.request_binding_hash END,
+        bound_at             = CASE WHEN tx_guard.consumed = 1 THEN tx_guard.bound_at ELSE ? END,
+        updated_at           = excluded.updated_at
+      `,
+      input.txHash,
+      input.relayPaymentId,
+      input.expectedRecipient,
+      input.minAmount,
+      input.asset,
+      input.network,
+      verifiedPayer,
+      input.requestBindingHash,
+      boundAt,
+      now,
+      boundAt
+    );
+
+    return this._readTxGuard()!;
+  }
+
+  /** Clear pending bound metadata after a terminal non-grace failure or payer mismatch. */
+  async clearBoundTx(): Promise<void> {
+    const existing = this._readTxGuard();
+    if (!existing) return;
+    if (existing.consumed) {
+      this.sql.exec(
+        "UPDATE tx_guard SET relay_payment_id = NULL, updated_at = ? WHERE id = 1",
+        Date.now()
+      );
+      return;
+    }
+    this.sql.exec("DELETE FROM tx_guard WHERE id = 1");
+  }
+
+  /**
+   * Atomically mark a txHash as consumed before delivering the paid response.
+   * Returns alreadyConsumed=true if another request/isolate already consumed it.
+   */
+  async markTxConsumed(
+    input: MarkTxConsumedInput
+  ): Promise<{ alreadyConsumed: boolean; record: TxGuardRecord }> {
+    const existing = this._readTxGuard();
+    if (existing?.consumed) {
+      return { alreadyConsumed: true, record: existing };
+    }
+
+    const now = Date.now();
+    this.sql.exec(
+      `
+      INSERT INTO tx_guard
+        (id, tx_hash, relay_payment_id, expected_recipient, min_amount, asset, network,
+         verified_payer, request_binding_hash, bound_at, consumed, consumed_at, consumed_txid, updated_at)
+      VALUES (1, ?, ?, ?, ?, ?, ?, ?, NULL, ?, 1, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET
+        relay_payment_id   = COALESCE(excluded.relay_payment_id, tx_guard.relay_payment_id),
+        expected_recipient = COALESCE(excluded.expected_recipient, tx_guard.expected_recipient),
+        min_amount         = COALESCE(excluded.min_amount, tx_guard.min_amount),
+        asset              = COALESCE(excluded.asset, tx_guard.asset),
+        network            = COALESCE(excluded.network, tx_guard.network),
+        verified_payer     = COALESCE(excluded.verified_payer, tx_guard.verified_payer),
+        consumed           = 1,
+        consumed_at        = COALESCE(tx_guard.consumed_at, excluded.consumed_at),
+        consumed_txid      = COALESCE(tx_guard.consumed_txid, excluded.consumed_txid),
+        updated_at         = excluded.updated_at
+      `,
+      input.txHash,
+      input.relayPaymentId ?? null,
+      input.expectedRecipient ?? null,
+      input.minAmount ?? null,
+      input.asset ?? null,
+      input.network ?? null,
+      input.verifiedPayer ?? null,
+      existing?.boundAt ?? now,
+      now,
+      input.txid ?? null,
+      now
+    );
+
+    const updated = this._readTxGuard()!;
+    return { alreadyConsumed: false, record: updated };
+  }
+
+  private _rowToTxGuard(row: Record<string, unknown>): TxGuardRecord {
+    return {
+      txHash: row.tx_hash as string,
+      relayPaymentId: (row.relay_payment_id as string | null) ?? undefined,
+      expectedRecipient: (row.expected_recipient as string | null) ?? undefined,
+      minAmount: (row.min_amount as string | null) ?? undefined,
+      asset: (row.asset as string | null) ?? undefined,
+      network: (row.network as string | null) ?? undefined,
+      verifiedPayer: (row.verified_payer as string | null) ?? undefined,
+      requestBindingHash: (row.request_binding_hash as string | null) ?? undefined,
+      boundAt: typeof row.bound_at === "number" ? row.bound_at : undefined,
+      consumed: row.consumed === 1,
+      consumedAt: typeof row.consumed_at === "number" ? row.consumed_at : undefined,
+      consumedTxid: (row.consumed_txid as string | null) ?? undefined,
+      updatedAt: row.updated_at as number,
     };
   }
 }
