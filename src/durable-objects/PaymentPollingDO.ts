@@ -53,11 +53,31 @@ export interface TxGuardRecord {
   verifiedPayer?: string;
   requestBindingHash?: string;
   boundAt?: number;
+  claimId?: string;
+  claimExpiresAt?: number;
   consumed: boolean;
   consumedAt?: number;
   consumedTxid?: string;
   updatedAt: number;
 }
+
+export interface ClaimTxInput {
+  txHash: string;
+  claimId: string;
+  expectedRecipient: string;
+  minAmount: string;
+  asset: string;
+  network: string;
+  verifiedPayer?: string;
+  requestBindingHash: string;
+  ttlMs?: number;
+}
+
+export type ClaimTxResult =
+  | { status: "claimed"; record: TxGuardRecord }
+  | { status: "consumed"; record: TxGuardRecord }
+  | { status: "bound"; record: TxGuardRecord }
+  | { status: "in_progress"; record: TxGuardRecord };
 
 export interface BindTxPaymentInput {
   txHash: string;
@@ -69,6 +89,7 @@ export interface BindTxPaymentInput {
   verifiedPayer?: string;
   requestBindingHash: string;
   boundAt?: number;
+  claimId?: string;
 }
 
 export interface MarkTxConsumedInput {
@@ -100,6 +121,15 @@ const TERMINAL_STATUSES = new Set([
 
 /** Max polling duration: 10 minutes. After this we mark internal_error. */
 const MAX_POLL_DURATION_MS = 10 * 60 * 1000;
+
+/** TTL for an in-flight submitPayment claim before a binding or release is recorded. */
+export const TX_CLAIM_TTL_MS = 30_000;
+
+/** Retention window for unconsumed bound tx_guard rows before alarm cleanup. */
+export const TX_BOUND_TTL_MS = 60 * 60 * 1_000;
+
+/** Retention window for consumed tx_guard rows (replay protection) before alarm cleanup. */
+export const TX_CONSUMED_TTL_MS = 24 * 60 * 60 * 1_000;
 
 /** Backoff schedule: poll count → delay in ms before next alarm. */
 function nextAlarmDelayMs(pollCount: number): number {
@@ -140,6 +170,8 @@ const SCHEMA_SQL = `
     verified_payer       TEXT,
     request_binding_hash TEXT,
     bound_at             INTEGER,
+    claim_id             TEXT,
+    claim_expires_at     INTEGER,
     consumed             INTEGER NOT NULL DEFAULT 0,
     consumed_at          INTEGER,
     consumed_txid        TEXT,
@@ -161,6 +193,17 @@ export class PaymentPollingDO extends DurableObject<Env> {
     // Initialize schema synchronously before any method runs
     ctx.blockConcurrencyWhile(async () => {
       this.sql.exec(SCHEMA_SQL);
+      const cols = new Set(
+        [...this.sql.exec("PRAGMA table_info(tx_guard)")].map(
+          (r) => (r as Record<string, unknown>).name as string
+        )
+      );
+      if (!cols.has("claim_id")) {
+        this.sql.exec("ALTER TABLE tx_guard ADD COLUMN claim_id TEXT");
+      }
+      if (!cols.has("claim_expires_at")) {
+        this.sql.exec("ALTER TABLE tx_guard ADD COLUMN claim_expires_at INTEGER");
+      }
     });
   }
 
@@ -196,10 +239,11 @@ export class PaymentPollingDO extends DurableObject<Env> {
       now
     );
 
-    // Schedule first poll in 5 seconds (only if no alarm is already set)
+    // Schedule first poll in 5 seconds (or pull forward if a distant tx_guard alarm is set)
+    const targetPollAt = Date.now() + 5_000;
     const existing = await this.ctx.storage.getAlarm();
-    if (existing === null) {
-      await this.ctx.storage.setAlarm(Date.now() + 5_000);
+    if (existing === null || existing > targetPollAt) {
+      await this.ctx.storage.setAlarm(targetPollAt);
     }
   }
 
@@ -326,6 +370,11 @@ export class PaymentPollingDO extends DurableObject<Env> {
       await this.poll();
     } catch (err) {
       console.error("[PaymentPollingDO] alarm poll error:", err);
+    }
+    try {
+      await this._cleanupExpiredTxGuard();
+    } catch (err) {
+      console.error("[PaymentPollingDO] alarm tx_guard cleanup error:", err);
     }
   }
 
@@ -466,40 +515,202 @@ export class PaymentPollingDO extends DurableObject<Env> {
     return this._rowToTxGuard(rows[0] as Record<string, unknown>);
   }
 
-  /** Read bound + consumed state for this txHash DO instance. */
+  private _hasActivePaymentPoll(): boolean {
+    const rows = [...this.sql.exec("SELECT 1 FROM payment_state WHERE is_terminal = 0 LIMIT 1")];
+    return rows.length > 0;
+  }
+
+  private _getTxGuardExpiresAt(record: TxGuardRecord): number {
+    if (record.consumed) {
+      return (record.consumedAt ?? record.updatedAt) + TX_CONSUMED_TTL_MS;
+    }
+    if (record.relayPaymentId) {
+      return (record.boundAt ?? record.updatedAt) + TX_BOUND_TTL_MS;
+    }
+    return record.claimExpiresAt ?? record.updatedAt + TX_CLAIM_TTL_MS;
+  }
+
+  private async _scheduleTxGuardAlarm(targetTimestampMs: number): Promise<void> {
+    if (this._hasActivePaymentPoll()) {
+      return;
+    }
+    await this.ctx.storage.setAlarm(targetTimestampMs);
+  }
+
+  private async _clearAlarmIfNoActivePoll(): Promise<void> {
+    if (!this._hasActivePaymentPoll()) {
+      await this.ctx.storage.deleteAlarm();
+    }
+  }
+
+  private async _cleanupExpiredTxGuard(now = Date.now()): Promise<boolean> {
+    const existing = this._readTxGuard();
+    if (!existing) {
+      return false;
+    }
+    const expiresAt = this._getTxGuardExpiresAt(existing);
+    if (now >= expiresAt) {
+      this.sql.exec("DELETE FROM tx_guard WHERE id = 1");
+      await this._clearAlarmIfNoActivePoll();
+      return true;
+    }
+    if (!this._hasActivePaymentPoll()) {
+      const currentAlarm = await this.ctx.storage.getAlarm();
+      if (currentAlarm === null || currentAlarm <= now) {
+        await this.ctx.storage.setAlarm(expiresAt);
+      }
+    }
+    return false;
+  }
+
+  /** Read bound + consumed state for this txHash DO instance, pruning expired rows. */
   async getTxGuard(): Promise<TxGuardRecord | null> {
-    return this._readTxGuard();
+    const existing = this._readTxGuard();
+    if (!existing) return null;
+    if (Date.now() >= this._getTxGuardExpiresAt(existing)) {
+      this.sql.exec("DELETE FROM tx_guard WHERE id = 1");
+      await this._clearAlarmIfNoActivePoll();
+      return null;
+    }
+    return existing;
   }
 
   /**
-   * Persist bound relay payment metadata for this txHash across Worker isolates.
-   * Preserves original bound_at when the same relayPaymentId is re-saved and never
-   * clears consumed=1 if already finalized.
+   * Atomically claim an unclaimed txHash before invoking relay submitPayment.
+   * Prevents concurrent cold-isolate TOCTOU duplicate submissions while allowing
+   * stale claims to expire after TTL.
    */
-  async bindTxPayment(input: BindTxPaymentInput): Promise<TxGuardRecord> {
+  async claimTx(input: ClaimTxInput): Promise<ClaimTxResult> {
     const now = Date.now();
-    const existing = this._readTxGuard();
-    const boundAt =
-      existing?.relayPaymentId === input.relayPaymentId && typeof existing.boundAt === "number"
-        ? existing.boundAt
-        : input.boundAt ?? now;
+    let existing = this._readTxGuard();
+    if (existing && now >= this._getTxGuardExpiresAt(existing)) {
+      this.sql.exec("DELETE FROM tx_guard WHERE id = 1");
+      existing = null;
+    }
+
+    if (existing) {
+      if (existing.consumed) {
+        return { status: "consumed", record: existing };
+      }
+      if (existing.relayPaymentId) {
+        return { status: "bound", record: existing };
+      }
+      if (existing.claimId && existing.claimId !== input.claimId) {
+        return { status: "in_progress", record: existing };
+      }
+    }
+
+    const ttlMs = input.ttlMs ?? TX_CLAIM_TTL_MS;
+    const claimExpiresAt = now + ttlMs;
     const verifiedPayer = input.verifiedPayer || existing?.verifiedPayer || null;
 
     this.sql.exec(
       `
       INSERT INTO tx_guard
         (id, tx_hash, relay_payment_id, expected_recipient, min_amount, asset, network,
-         verified_payer, request_binding_hash, bound_at, consumed, consumed_at, consumed_txid, updated_at)
-      VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, NULL, NULL, ?)
+         verified_payer, request_binding_hash, bound_at, claim_id, claim_expires_at,
+         consumed, consumed_at, consumed_txid, updated_at)
+      VALUES (1, ?, NULL, ?, ?, ?, ?, ?, ?, NULL, ?, ?, 0, NULL, NULL, ?)
       ON CONFLICT(id) DO UPDATE SET
-        relay_payment_id     = CASE WHEN tx_guard.consumed = 1 THEN tx_guard.relay_payment_id ELSE excluded.relay_payment_id END,
-        expected_recipient   = CASE WHEN tx_guard.consumed = 1 THEN tx_guard.expected_recipient ELSE excluded.expected_recipient END,
-        min_amount           = CASE WHEN tx_guard.consumed = 1 THEN tx_guard.min_amount ELSE excluded.min_amount END,
-        asset                = CASE WHEN tx_guard.consumed = 1 THEN tx_guard.asset ELSE excluded.asset END,
-        network              = CASE WHEN tx_guard.consumed = 1 THEN tx_guard.network ELSE excluded.network END,
+        expected_recipient   = excluded.expected_recipient,
+        min_amount           = excluded.min_amount,
+        asset                = excluded.asset,
+        network              = excluded.network,
         verified_payer       = COALESCE(excluded.verified_payer, tx_guard.verified_payer),
-        request_binding_hash = CASE WHEN tx_guard.consumed = 1 THEN tx_guard.request_binding_hash ELSE excluded.request_binding_hash END,
-        bound_at             = CASE WHEN tx_guard.consumed = 1 THEN tx_guard.bound_at ELSE ? END,
+        request_binding_hash = excluded.request_binding_hash,
+        claim_id             = excluded.claim_id,
+        claim_expires_at     = excluded.claim_expires_at,
+        updated_at           = excluded.updated_at
+      WHERE tx_guard.consumed = 0 AND tx_guard.relay_payment_id IS NULL
+      `,
+      input.txHash,
+      input.expectedRecipient,
+      input.minAmount,
+      input.asset,
+      input.network,
+      verifiedPayer,
+      input.requestBindingHash,
+      input.claimId,
+      claimExpiresAt,
+      now
+    );
+
+    const record = this._readTxGuard()!;
+    await this._scheduleTxGuardAlarm(claimExpiresAt);
+    return { status: "claimed", record };
+  }
+
+  /**
+   * Release an in-progress claim if submitPayment was rejected or threw before binding.
+   * Strict no-op if already bound, consumed, or held by another claimId.
+   */
+  async releaseTxClaim(claimId: string): Promise<void> {
+    if (!claimId) return;
+    const existing = this._readTxGuard();
+    if (!existing || existing.consumed || existing.relayPaymentId) {
+      return;
+    }
+    if (existing.claimId !== claimId) {
+      return;
+    }
+    this.sql.exec(
+      "DELETE FROM tx_guard WHERE id = 1 AND consumed = 0 AND relay_payment_id IS NULL AND claim_id = ?",
+      claimId
+    );
+    await this._clearAlarmIfNoActivePoll();
+  }
+
+  /**
+   * Persist bound relay payment metadata for this txHash across Worker isolates.
+   * First-writer-wins: preserves existing active unconsumed bindings (including
+   * min_amount and request_binding_hash) and never clears consumed=1.
+   */
+  async bindTxPayment(input: BindTxPaymentInput): Promise<TxGuardRecord> {
+    const now = Date.now();
+    let existing = this._readTxGuard();
+    if (existing && now >= this._getTxGuardExpiresAt(existing)) {
+      this.sql.exec("DELETE FROM tx_guard WHERE id = 1");
+      existing = null;
+    }
+    if (existing?.consumed) {
+      return existing;
+    }
+    if (existing?.relayPaymentId) {
+      if (!existing.verifiedPayer && input.verifiedPayer) {
+        this.sql.exec(
+          "UPDATE tx_guard SET verified_payer = ?, updated_at = ? WHERE id = 1 AND consumed = 0",
+          input.verifiedPayer,
+          now
+        );
+        return this._readTxGuard()!;
+      }
+      return existing;
+    }
+    if (existing?.claimId && existing.claimId !== input.claimId) {
+      return existing;
+    }
+
+    const boundAt = input.boundAt ?? now;
+    const verifiedPayer = input.verifiedPayer || existing?.verifiedPayer || null;
+
+    this.sql.exec(
+      `
+      INSERT INTO tx_guard
+        (id, tx_hash, relay_payment_id, expected_recipient, min_amount, asset, network,
+         verified_payer, request_binding_hash, bound_at, claim_id, claim_expires_at,
+         consumed, consumed_at, consumed_txid, updated_at)
+      VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, 0, NULL, NULL, ?)
+      ON CONFLICT(id) DO UPDATE SET
+        relay_payment_id     = CASE WHEN tx_guard.consumed = 1 OR tx_guard.relay_payment_id IS NOT NULL THEN tx_guard.relay_payment_id ELSE excluded.relay_payment_id END,
+        expected_recipient   = CASE WHEN tx_guard.consumed = 1 OR tx_guard.relay_payment_id IS NOT NULL THEN tx_guard.expected_recipient ELSE excluded.expected_recipient END,
+        min_amount           = CASE WHEN tx_guard.consumed = 1 OR tx_guard.relay_payment_id IS NOT NULL THEN tx_guard.min_amount ELSE excluded.min_amount END,
+        asset                = CASE WHEN tx_guard.consumed = 1 OR tx_guard.relay_payment_id IS NOT NULL THEN tx_guard.asset ELSE excluded.asset END,
+        network              = CASE WHEN tx_guard.consumed = 1 OR tx_guard.relay_payment_id IS NOT NULL THEN tx_guard.network ELSE excluded.network END,
+        verified_payer       = COALESCE(tx_guard.verified_payer, excluded.verified_payer),
+        request_binding_hash = CASE WHEN tx_guard.consumed = 1 OR tx_guard.relay_payment_id IS NOT NULL THEN tx_guard.request_binding_hash ELSE excluded.request_binding_hash END,
+        bound_at             = CASE WHEN tx_guard.consumed = 1 OR tx_guard.relay_payment_id IS NOT NULL THEN tx_guard.bound_at ELSE excluded.bound_at END,
+        claim_id             = NULL,
+        claim_expires_at     = NULL,
         updated_at           = excluded.updated_at
       `,
       input.txHash,
@@ -511,25 +722,28 @@ export class PaymentPollingDO extends DurableObject<Env> {
       verifiedPayer,
       input.requestBindingHash,
       boundAt,
-      now,
-      boundAt
+      now
     );
 
-    return this._readTxGuard()!;
+    const record = this._readTxGuard()!;
+    await this._scheduleTxGuardAlarm(boundAt + TX_BOUND_TTL_MS);
+    return record;
   }
 
-  /** Clear pending bound metadata after a terminal non-grace failure or payer mismatch. */
-  async clearBoundTx(): Promise<void> {
+  /**
+   * Clear pending bound metadata after a terminal non-grace failure or payer mismatch.
+   * Strict no-op if consumed=1 or if relay_payment_id does not match expectedRelayPaymentId.
+   */
+  async clearBoundTx(expectedRelayPaymentId: string): Promise<void> {
+    if (!expectedRelayPaymentId) return;
     const existing = this._readTxGuard();
-    if (!existing) return;
-    if (existing.consumed) {
-      this.sql.exec(
-        "UPDATE tx_guard SET relay_payment_id = NULL, updated_at = ? WHERE id = 1",
-        Date.now()
-      );
-      return;
-    }
-    this.sql.exec("DELETE FROM tx_guard WHERE id = 1");
+    if (!existing || existing.consumed) return;
+    if (existing.relayPaymentId !== expectedRelayPaymentId) return;
+    this.sql.exec(
+      "DELETE FROM tx_guard WHERE id = 1 AND consumed = 0 AND relay_payment_id = ?",
+      expectedRelayPaymentId
+    );
+    await this._clearAlarmIfNoActivePoll();
   }
 
   /**
@@ -549,15 +763,18 @@ export class PaymentPollingDO extends DurableObject<Env> {
       `
       INSERT INTO tx_guard
         (id, tx_hash, relay_payment_id, expected_recipient, min_amount, asset, network,
-         verified_payer, request_binding_hash, bound_at, consumed, consumed_at, consumed_txid, updated_at)
-      VALUES (1, ?, ?, ?, ?, ?, ?, ?, NULL, ?, 1, ?, ?, ?)
+         verified_payer, request_binding_hash, bound_at, claim_id, claim_expires_at,
+         consumed, consumed_at, consumed_txid, updated_at)
+      VALUES (1, ?, ?, ?, ?, ?, ?, ?, NULL, ?, NULL, NULL, 1, ?, ?, ?)
       ON CONFLICT(id) DO UPDATE SET
-        relay_payment_id   = COALESCE(excluded.relay_payment_id, tx_guard.relay_payment_id),
-        expected_recipient = COALESCE(excluded.expected_recipient, tx_guard.expected_recipient),
-        min_amount         = COALESCE(excluded.min_amount, tx_guard.min_amount),
-        asset              = COALESCE(excluded.asset, tx_guard.asset),
-        network            = COALESCE(excluded.network, tx_guard.network),
-        verified_payer     = COALESCE(excluded.verified_payer, tx_guard.verified_payer),
+        relay_payment_id   = COALESCE(tx_guard.relay_payment_id, excluded.relay_payment_id),
+        expected_recipient = COALESCE(tx_guard.expected_recipient, excluded.expected_recipient),
+        min_amount         = COALESCE(tx_guard.min_amount, excluded.min_amount),
+        asset              = COALESCE(tx_guard.asset, excluded.asset),
+        network            = COALESCE(tx_guard.network, excluded.network),
+        verified_payer     = COALESCE(tx_guard.verified_payer, excluded.verified_payer),
+        claim_id           = NULL,
+        claim_expires_at   = NULL,
         consumed           = 1,
         consumed_at        = COALESCE(tx_guard.consumed_at, excluded.consumed_at),
         consumed_txid      = COALESCE(tx_guard.consumed_txid, excluded.consumed_txid),
@@ -577,6 +794,7 @@ export class PaymentPollingDO extends DurableObject<Env> {
     );
 
     const updated = this._readTxGuard()!;
+    await this._scheduleTxGuardAlarm(now + TX_CONSUMED_TTL_MS);
     return { alreadyConsumed: false, record: updated };
   }
 
@@ -591,6 +809,8 @@ export class PaymentPollingDO extends DurableObject<Env> {
       verifiedPayer: (row.verified_payer as string | null) ?? undefined,
       requestBindingHash: (row.request_binding_hash as string | null) ?? undefined,
       boundAt: typeof row.bound_at === "number" ? row.bound_at : undefined,
+      claimId: (row.claim_id as string | null) ?? undefined,
+      claimExpiresAt: typeof row.claim_expires_at === "number" ? row.claim_expires_at : undefined,
       consumed: row.consumed === 1,
       consumedAt: typeof row.consumed_at === "number" ? row.consumed_at : undefined,
       consumedTxid: (row.consumed_txid as string | null) ?? undefined,

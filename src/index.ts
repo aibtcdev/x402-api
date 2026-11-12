@@ -108,6 +108,7 @@ app.use(
       // v2 headers
       "payment-signature",
       "payment-required",
+      "X-PAYMENT-ID",
       // Legacy headers (kept for backward compatibility during transition)
       "X-PAYMENT",
       "X-PAYMENT-TOKEN-TYPE",
@@ -119,6 +120,8 @@ app.use(
       // v2 headers
       "payment-required",
       "payment-response",
+      "X-PAYMENT-ID",
+      "Retry-After",
       // Legacy headers
       "X-PAYMENT-RESPONSE",
       "X-PAYER-ADDRESS",

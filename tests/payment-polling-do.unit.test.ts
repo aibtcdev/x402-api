@@ -10,7 +10,8 @@
  * 3. derivedHints returns null for in-flight payments
  */
 
-import { describe, expect, test } from "bun:test";
+import { describe, expect, mock, test } from "bun:test";
+import { Database } from "bun:sqlite";
 // Import pure utility from payment-hints (no cloudflare:workers dependency)
 import { computeDerivedHints } from "../src/utils/payment-hints";
 import type { DerivedHints } from "../src/utils/payment-hints";
@@ -402,5 +403,371 @@ describe("PaymentPollingDO lifecycle (stub)", () => {
     expect(hints).not.toBeNull();
     expect(hints!.retryable).toBe(false);
     expect(hints!.nextSteps).toBe("wait_for_confirmation");
+  });
+});
+
+
+// =============================================================================
+// Real PaymentPollingDO tx_guard, claimTx, clearBoundTx & alarm() unit tests
+// =============================================================================
+
+mock.module("cloudflare:workers", () => ({
+  DurableObject: class DurableObject<E = unknown> {
+    ctx: DurableObjectState;
+    env: E;
+    constructor(ctx: DurableObjectState, env: E) {
+      this.ctx = ctx;
+      this.env = env;
+    }
+  },
+}));
+
+const {
+  PaymentPollingDO,
+  TX_BOUND_TTL_MS,
+  TX_CONSUMED_TTL_MS,
+} = await import("../src/durable-objects/PaymentPollingDO");
+
+function createInMemoryDO() {
+  const db = new Database(":memory:");
+  let scheduledAlarm: number | null = null;
+  let pendingConcurrency: Promise<unknown> | null = null;
+
+  const sql = {
+    exec(query: string, ...params: unknown[]) {
+      const trimmed = query.trim();
+      const withoutTrailingSemi = trimmed.replace(/;+s*$/, "");
+      // Multi-statement DDL (e.g. SCHEMA_SQL) has embedded semicolons
+      if (withoutTrailingSemi.includes(";")) {
+        db.exec(trimmed);
+        return { toArray: () => [], [Symbol.iterator]: () => [][Symbol.iterator]() };
+      }
+      const stmt = db.query(trimmed);
+      const upper = trimmed.toUpperCase();
+      if (upper.startsWith("SELECT") || upper.startsWith("PRAGMA")) {
+        const rows = stmt.all(...(params as never[])) as Record<string, unknown>[];
+        return {
+          toArray: () => rows,
+          [Symbol.iterator]: () => rows[Symbol.iterator](),
+        };
+      }
+      stmt.run(...(params as never[]));
+      return { toArray: () => [], [Symbol.iterator]: () => [][Symbol.iterator]() };
+    },
+  };
+
+  const ctx = {
+    storage: {
+      sql,
+      async getAlarm() {
+        return scheduledAlarm;
+      },
+      async setAlarm(scheduledTime: number | Date) {
+        scheduledAlarm =
+          typeof scheduledTime === "number" ? scheduledTime : scheduledTime.getTime();
+      },
+      async deleteAlarm() {
+        scheduledAlarm = null;
+      },
+    },
+    blockConcurrencyWhile<T>(fn: () => Promise<T>): Promise<T> {
+      const p = fn();
+      pendingConcurrency = p;
+      return p;
+    },
+  } as unknown as DurableObjectState;
+
+  const env = {
+    X402_FACILITATOR_URL: "https://relay.example",
+  } as never;
+
+  const instance = new PaymentPollingDO(ctx, env);
+
+  return {
+    instance,
+    db,
+    ready: async () => {
+      await pendingConcurrency;
+    },
+    getAlarm: () => scheduledAlarm,
+  };
+}
+
+describe("PaymentPollingDO real tx_guard & alarm() lifecycle", () => {
+  test("claimTx serializes concurrent claims, honors TTL expiry, and guards releaseTxClaim", async () => {
+    const { instance, db, ready, getAlarm } = createInMemoryDO();
+    await ready();
+
+    const first = await instance.claimTx({
+      txHash: "tx_abc",
+      claimId: "claim_1",
+      expectedRecipient: "ST_SELLER",
+      minAmount: "1000",
+      asset: "STX",
+      network: "stacks:2147483648",
+      verifiedPayer: "ST_BUYER",
+      requestBindingHash: "hash_req_1",
+    });
+    expect(first.status).toBe("claimed");
+    expect(getAlarm()).not.toBeNull();
+
+    // Concurrent second claim with a different claimId gets in_progress and does NOT overwrite row
+    const second = await instance.claimTx({
+      txHash: "tx_abc",
+      claimId: "claim_2",
+      expectedRecipient: "ST_SELLER",
+      minAmount: "9999",
+      asset: "STX",
+      network: "stacks:2147483648",
+      verifiedPayer: "ST_BUYER",
+      requestBindingHash: "hash_req_different",
+    });
+    expect(second.status).toBe("in_progress");
+    if (second.status === "in_progress") {
+      expect(second.record.minAmount).toBe("1000");
+      expect(second.record.requestBindingHash).toBe("hash_req_1");
+    }
+
+    // Wrong claimId cannot release claim_1
+    await instance.releaseTxClaim("claim_2");
+    expect((await instance.getTxGuard())?.claimId).toBe("claim_1");
+
+    // Matching claimId releases row cleanly
+    await instance.releaseTxClaim("claim_1");
+    expect(await instance.getTxGuard()).toBeNull();
+    expect(getAlarm()).toBeNull();
+
+    // Stale claim whose TTL expired can be re-claimed by another isolate
+    await instance.claimTx({
+      txHash: "tx_abc",
+      claimId: "claim_stale",
+      expectedRecipient: "ST_SELLER",
+      minAmount: "1000",
+      asset: "STX",
+      network: "stacks:2147483648",
+      requestBindingHash: "hash_req_1",
+    });
+    db.query("UPDATE tx_guard SET claim_expires_at = ? WHERE id = 1").run(Date.now() - 1000);
+
+    const reclaimed = await instance.claimTx({
+      txHash: "tx_abc",
+      claimId: "claim_fresh",
+      expectedRecipient: "ST_SELLER",
+      minAmount: "1000",
+      asset: "STX",
+      network: "stacks:2147483648",
+      requestBindingHash: "hash_req_1",
+    });
+    expect(reclaimed.status).toBe("claimed");
+    if (reclaimed.status === "claimed") {
+      expect(reclaimed.record.claimId).toBe("claim_fresh");
+    }
+
+    // bindTxPayment with missing or mismatched claimId must NOT overwrite active claim_fresh
+    const hijackedNoClaim = await instance.bindTxPayment({
+      txHash: "tx_abc",
+      relayPaymentId: "pay_hijack_none",
+      expectedRecipient: "ST_SELLER",
+      minAmount: "1000",
+      asset: "STX",
+      network: "stacks:2147483648",
+      requestBindingHash: "hash_req_1",
+    });
+    expect(hijackedNoClaim.relayPaymentId).toBeUndefined();
+    expect(hijackedNoClaim.claimId).toBe("claim_fresh");
+
+    const hijackedWrongClaim = await instance.bindTxPayment({
+      txHash: "tx_abc",
+      relayPaymentId: "pay_hijack_wrong",
+      expectedRecipient: "ST_SELLER",
+      minAmount: "1000",
+      asset: "STX",
+      network: "stacks:2147483648",
+      requestBindingHash: "hash_req_1",
+      claimId: "claim_stale",
+    });
+    expect(hijackedWrongClaim.relayPaymentId).toBeUndefined();
+    expect(hijackedWrongClaim.claimId).toBe("claim_fresh");
+
+    // Matching claimId binds cleanly
+    const boundValid = await instance.bindTxPayment({
+      txHash: "tx_abc",
+      relayPaymentId: "pay_fresh_bound",
+      expectedRecipient: "ST_SELLER",
+      minAmount: "1000",
+      asset: "STX",
+      network: "stacks:2147483648",
+      requestBindingHash: "hash_req_1",
+      claimId: "claim_fresh",
+    });
+    expect(boundValid.relayPaymentId).toBe("pay_fresh_bound");
+    expect(boundValid.claimId).toBeUndefined();
+  });
+
+  test("bindTxPayment uses first-writer-wins on active unconsumed bindings and preserves consumed=1", async () => {
+    const { instance, ready } = createInMemoryDO();
+    await ready();
+
+    const first = await instance.bindTxPayment({
+      txHash: "tx_bind_1",
+      relayPaymentId: "pay_first",
+      expectedRecipient: "ST_SELLER",
+      minAmount: "1000",
+      asset: "STX",
+      network: "stacks:2147483648",
+      verifiedPayer: "ST_BUYER",
+      requestBindingHash: "hash_1",
+    });
+    expect(first.relayPaymentId).toBe("pay_first");
+    expect(first.minAmount).toBe("1000");
+
+    // Second bind attempt with lower amount / different binding hash must NOT overwrite first binding
+    const second = await instance.bindTxPayment({
+      txHash: "tx_bind_1",
+      relayPaymentId: "pay_second",
+      expectedRecipient: "ST_SELLER",
+      minAmount: "1",
+      asset: "STX",
+      network: "stacks:2147483648",
+      verifiedPayer: "ST_BUYER",
+      requestBindingHash: "hash_2",
+    });
+    expect(second.relayPaymentId).toBe("pay_first");
+    expect(second.minAmount).toBe("1000");
+    expect(second.requestBindingHash).toBe("hash_1");
+
+    // Mark consumed, then verify bindTxPayment neither clears consumed nor replaces relayPaymentId
+    const consumedRes = await instance.markTxConsumed({
+      txHash: "tx_bind_1",
+      relayPaymentId: "pay_first",
+      txid: "0xconfirmed1",
+    });
+    expect(consumedRes.alreadyConsumed).toBe(false);
+    expect(consumedRes.record.consumed).toBe(true);
+
+    const postConsumedBind = await instance.bindTxPayment({
+      txHash: "tx_bind_1",
+      relayPaymentId: "pay_third",
+      expectedRecipient: "ST_SELLER",
+      minAmount: "500",
+      asset: "STX",
+      network: "stacks:2147483648",
+      requestBindingHash: "hash_3",
+    });
+    expect(postConsumedBind.consumed).toBe(true);
+    expect(postConsumedBind.relayPaymentId).toBe("pay_first");
+  });
+
+  test("clearBoundTx requires matching expectedRelayPaymentId and is a strict no-op when consumed=1", async () => {
+    const { instance, ready, getAlarm } = createInMemoryDO();
+    await ready();
+
+    await instance.bindTxPayment({
+      txHash: "tx_clear_1",
+      relayPaymentId: "pay_real",
+      expectedRecipient: "ST_SELLER",
+      minAmount: "1000",
+      asset: "STX",
+      network: "stacks:2147483648",
+      requestBindingHash: "hash_clear",
+    });
+
+    // Empty or mismatched relayPaymentId must NOT delete bound record
+    await instance.clearBoundTx("");
+    await instance.clearBoundTx("pay_wrong");
+    expect((await instance.getTxGuard())?.relayPaymentId).toBe("pay_real");
+
+    // Matching relayPaymentId deletes unconsumed record and clears cleanup alarm
+    await instance.clearBoundTx("pay_real");
+    expect(await instance.getTxGuard()).toBeNull();
+    expect(getAlarm()).toBeNull();
+
+    // Consumed row must NEVER be cleared even when expectedRelayPaymentId matches
+    await instance.bindTxPayment({
+      txHash: "tx_clear_1",
+      relayPaymentId: "pay_consumed_keep",
+      expectedRecipient: "ST_SELLER",
+      minAmount: "1000",
+      asset: "STX",
+      network: "stacks:2147483648",
+      requestBindingHash: "hash_clear",
+    });
+    await instance.markTxConsumed({
+      txHash: "tx_clear_1",
+      relayPaymentId: "pay_consumed_keep",
+      txid: "0xkeep",
+    });
+
+    await instance.clearBoundTx("pay_consumed_keep");
+    const afterClear = await instance.getTxGuard();
+    expect(afterClear).not.toBeNull();
+    expect(afterClear?.consumed).toBe(true);
+    expect(afterClear?.relayPaymentId).toBe("pay_consumed_keep");
+  });
+
+  test("alarm() cleans expired tx_guard rows without disrupting active payment_state polling alarms", async () => {
+    const { instance, db, ready, getAlarm } = createInMemoryDO();
+    await ready();
+
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async () =>
+      new Response(JSON.stringify({ paymentId: "pay_active_poll", status: "queued" }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      })) as unknown as typeof fetch;
+
+    try {
+      // 1. Non-expired tx_guard survives alarm() and keeps cleanup alarm scheduled
+      const now = Date.now();
+      await instance.bindTxPayment({
+        txHash: "tx_alarm_1",
+        relayPaymentId: "pay_alarm_1",
+        expectedRecipient: "ST_SELLER",
+        minAmount: "1000",
+        asset: "STX",
+        network: "stacks:2147483648",
+        requestBindingHash: "hash_alarm",
+        boundAt: now,
+      });
+      await instance.alarm();
+      expect(await instance.getTxGuard()).not.toBeNull();
+      expect(getAlarm()).toBe(now + TX_BOUND_TTL_MS);
+
+      // 2. Expired tx_guard (without active payment_state) is deleted and alarm is cleared
+      db.query("UPDATE tx_guard SET bound_at = ? WHERE id = 1").run(
+        now - TX_BOUND_TTL_MS - 5000
+      );
+      await instance.alarm();
+      expect(await instance.getTxGuard()).toBeNull();
+      expect(getAlarm()).toBeNull();
+
+      // 3. Expired consumed tx_guard alongside active payment_state poll:
+      // tx_guard is pruned, while payment_state poll alarm remains scheduled (~5s ahead, NOT deleted!)
+      await instance.track({
+        paymentId: "pay_active_poll",
+        checkStatusUrl: "https://relay.example/payment/pay_active_poll",
+        payerAddress: "ST_BUYER",
+        route: "/paid",
+        tokenType: "STX",
+      });
+      await instance.markTxConsumed({
+        txHash: "tx_alarm_consumed",
+        relayPaymentId: "pay_consumed_old",
+        txid: "0xold",
+      });
+      db.query("UPDATE tx_guard SET consumed_at = ?, updated_at = ? WHERE id = 1").run(
+        Date.now() - TX_CONSUMED_TTL_MS - 5000,
+        Date.now() - TX_CONSUMED_TTL_MS - 5000
+      );
+
+      await instance.alarm();
+      expect(await instance.getTxGuard()).toBeNull();
+      const snap = await instance.status();
+      expect(snap?.status).toBe("queued");
+      expect(snap?.pollCount).toBe(1);
+      expect(getAlarm()).not.toBeNull();
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
   });
 });
