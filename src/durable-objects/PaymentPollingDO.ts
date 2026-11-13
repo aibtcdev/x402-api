@@ -19,6 +19,7 @@ import type { Env } from "../types";
 import { HttpPaymentStatusResponseSchema } from "../services/payment-contract";
 import { computeDerivedHints } from "../utils/payment-hints";
 import type { DerivedHints } from "../utils/payment-hints";
+import { NOT_FOUND_ENQUEUE_GRACE_MS } from "../utils/payment-status";
 
 // =============================================================================
 // Public Types
@@ -107,15 +108,16 @@ export interface MarkTxConsumedInput {
   verifiedPayer?: string;
 }
 
-// Re-export from payment-hints for callers that import from this module
+// Re-export shared helpers/constants for callers that import from this module
 export type { DerivedHints } from "../utils/payment-hints";
 export { computeDerivedHints } from "../utils/payment-hints";
+export { NOT_FOUND_ENQUEUE_GRACE_MS } from "../utils/payment-status";
 
 // =============================================================================
 // Internal Constants
 // =============================================================================
 
-/** Terminal states where polling stops. */
+/** Terminal states where polling stops (subject to NOT_FOUND_ENQUEUE_GRACE_MS for `not_found`). */
 const TERMINAL_STATUSES = new Set([
   "confirmed",
   "failed",
@@ -282,10 +284,12 @@ export class PaymentPollingDO extends DurableObject<Env> {
     const checkStatusUrl = row.check_status_url as string;
     const pollCount = (row.poll_count as number) + 1;
     const createdAt = row.created_at as string;
-    const now = new Date().toISOString();
+    const nowMs = Date.now();
+    const now = new Date(nowMs).toISOString();
 
     // Check max poll duration — declare timeout
-    const ageMs = Date.now() - new Date(createdAt).getTime();
+    const createdAtMs = new Date(createdAt).getTime();
+    const ageMs = Number.isFinite(createdAtMs) ? nowMs - createdAtMs : Infinity;
     if (ageMs > MAX_POLL_DURATION_MS) {
       return this._markTerminal(paymentId, "failed", "internal_error", undefined, now, pollCount, checkStatusUrl);
     }
@@ -300,7 +304,15 @@ export class PaymentPollingDO extends DurableObject<Env> {
     }
 
     const { status, terminalReason, txid, confirmedAt } = statusData;
-    const isTerminal = TERMINAL_STATUSES.has(status) ? 1 : 0;
+    // Treat early `not_found` as non-terminal until KV propagation grace expires
+    // so remote edge colos do not freeze an in-flight payment as not_found.
+    const withinNotFoundGrace =
+      status === "not_found" &&
+      Number.isFinite(createdAtMs) &&
+      ageMs <= NOT_FOUND_ENQUEUE_GRACE_MS;
+    const persistedStatus = withinNotFoundGrace ? ((row.status as string) || "queued") : status;
+    const persistedTerminalReason = withinNotFoundGrace ? undefined : terminalReason;
+    const isTerminal = !withinNotFoundGrace && TERMINAL_STATUSES.has(status) ? 1 : 0;
 
     this.sql.exec(
       `
@@ -314,8 +326,8 @@ export class PaymentPollingDO extends DurableObject<Env> {
         is_terminal     = ?
       WHERE payment_id = ?
       `,
-      status,
-      terminalReason ?? null,
+      persistedStatus,
+      persistedTerminalReason ?? null,
       txid ?? null,
       confirmedAt ?? null,
       now,
@@ -330,8 +342,8 @@ export class PaymentPollingDO extends DurableObject<Env> {
 
     return {
       paymentId,
-      status,
-      terminalReason,
+      status: persistedStatus,
+      terminalReason: persistedTerminalReason,
       txid,
       confirmedAt,
       checkStatusUrl,

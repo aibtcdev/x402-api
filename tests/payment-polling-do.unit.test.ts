@@ -424,11 +424,12 @@ mock.module("cloudflare:workers", () => ({
 
 const {
   PaymentPollingDO,
+  NOT_FOUND_ENQUEUE_GRACE_MS,
   TX_BOUND_TTL_MS,
   TX_CONSUMED_TTL_MS,
 } = await import("../src/durable-objects/PaymentPollingDO");
 
-function createInMemoryDO() {
+function createInMemoryDO(envOverrides: Record<string, unknown> = {}) {
   const db = new Database(":memory:");
   let scheduledAlarm: number | null = null;
   let pendingConcurrency: Promise<unknown> | null = null;
@@ -479,6 +480,7 @@ function createInMemoryDO() {
 
   const env = {
     X402_FACILITATOR_URL: "https://relay.example",
+    ...envOverrides,
   } as never;
 
   const instance = new PaymentPollingDO(ctx, env);
@@ -886,5 +888,110 @@ describe("PaymentPollingDO real tx_guard & alarm() lifecycle", () => {
       requestBindingHash: "hash_migrated",
     });
     expect(migrated.callerSuppliedPaymentId).toBe("pay_migrated_client");
+  });
+
+  test("poll() keeps not_found non-terminal within NOT_FOUND_ENQUEUE_GRACE_MS and reschedules until confirmed", async () => {
+    let checkAttempt = 0;
+    const { instance, db, ready, getAlarm } = createInMemoryDO({
+      X402_RELAY: {
+        async checkPayment(paymentId: string) {
+          checkAttempt += 1;
+          if (checkAttempt === 1) {
+            return {
+              paymentId,
+              status: "not_found",
+              terminalReason: "unknown_payment_identity",
+            };
+          }
+          return {
+            paymentId,
+            status: "confirmed",
+            txid: "0x1111222233334444555566667777888899990000aaaabbbbccccddddeeeeffff",
+          };
+        },
+      },
+    });
+    await ready();
+
+    await instance.track({
+      paymentId: "pay_kv_grace_1",
+      checkStatusUrl: "https://relay.example/payment/pay_kv_grace_1",
+      payerAddress: "ST_BUYER",
+      route: "/paid",
+      tokenType: "STX",
+    });
+
+    // Call 1: relay returns not_found while within 90s enqueue propagation grace window
+    const graceSnap = await instance.poll();
+    expect(graceSnap).not.toBeNull();
+    expect(graceSnap!.status).toBe("queued");
+    expect(graceSnap!.terminalReason).toBeUndefined();
+    expect(graceSnap!.pollCount).toBe(1);
+    expect(await instance.derivedHints()).toBeNull();
+    expect(getAlarm()).not.toBeNull();
+
+    const rowAfterGrace = db
+      .query("SELECT status, is_terminal FROM payment_state WHERE payment_id = ?")
+      .get("pay_kv_grace_1") as { status: string; is_terminal: number };
+    expect(rowAfterGrace.status).toBe("queued");
+    expect(rowAfterGrace.is_terminal).toBe(0);
+
+    // Call 2: relay KV propagates and returns confirmed; polling stops afterwards
+    const confirmedSnap = await instance.poll();
+    expect(confirmedSnap).not.toBeNull();
+    expect(confirmedSnap!.status).toBe("confirmed");
+    expect(confirmedSnap!.txid).toBe(
+      "0x1111222233334444555566667777888899990000aaaabbbbccccddddeeeeffff"
+    );
+    expect(confirmedSnap!.pollCount).toBe(2);
+    expect(await instance.poll()).toBeNull();
+  });
+
+  test("poll() marks not_found terminal once age exceeds NOT_FOUND_ENQUEUE_GRACE_MS", async () => {
+    const { instance, db, ready } = createInMemoryDO({
+      X402_RELAY: {
+        async checkPayment(paymentId: string) {
+          return {
+            paymentId,
+            status: "not_found",
+            terminalReason: "unknown_payment_identity",
+          };
+        },
+      },
+    });
+    await ready();
+
+    await instance.track({
+      paymentId: "pay_kv_expired_1",
+      checkStatusUrl: "https://relay.example/payment/pay_kv_expired_1",
+      payerAddress: "ST_BUYER",
+      route: "/paid",
+      tokenType: "STX",
+    });
+
+    const row = db
+      .query("SELECT created_at FROM payment_state WHERE payment_id = ?")
+      .get("pay_kv_expired_1") as { created_at: string | number };
+    const expiredCreatedAt =
+      typeof row.created_at === "number"
+        ? Date.now() - NOT_FOUND_ENQUEUE_GRACE_MS - 5_000
+        : new Date(Date.now() - NOT_FOUND_ENQUEUE_GRACE_MS - 5_000).toISOString();
+    db.query("UPDATE payment_state SET created_at = ? WHERE payment_id = ?").run(
+      expiredCreatedAt,
+      "pay_kv_expired_1"
+    );
+
+    const terminalSnap = await instance.poll();
+    expect(terminalSnap).not.toBeNull();
+    expect(terminalSnap!.status).toBe("not_found");
+    expect(terminalSnap!.terminalReason).toBe("unknown_payment_identity");
+
+    const rowAfterExpiry = db
+      .query("SELECT status, is_terminal FROM payment_state WHERE payment_id = ?")
+      .get("pay_kv_expired_1") as { status: string; is_terminal: number };
+    expect(rowAfterExpiry.status).toBe("not_found");
+    expect(rowAfterExpiry.is_terminal).toBe(1);
+    expect((await instance.derivedHints())?.nextSteps).toBe("start_new_payment");
+    expect(await instance.poll()).toBeNull();
   });
 });
