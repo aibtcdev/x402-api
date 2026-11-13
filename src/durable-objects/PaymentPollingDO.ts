@@ -46,6 +46,7 @@ export interface PaymentStatusSnapshot {
 export interface TxGuardRecord {
   txHash: string;
   relayPaymentId?: string;
+  callerSuppliedPaymentId?: string;
   expectedRecipient?: string;
   minAmount?: string;
   asset?: string;
@@ -64,6 +65,7 @@ export interface TxGuardRecord {
 export interface ClaimTxInput {
   txHash: string;
   claimId: string;
+  callerSuppliedPaymentId?: string;
   expectedRecipient: string;
   minAmount: string;
   asset: string;
@@ -82,6 +84,7 @@ export type ClaimTxResult =
 export interface BindTxPaymentInput {
   txHash: string;
   relayPaymentId: string;
+  callerSuppliedPaymentId?: string;
   expectedRecipient: string;
   minAmount: string;
   asset: string;
@@ -95,6 +98,7 @@ export interface BindTxPaymentInput {
 export interface MarkTxConsumedInput {
   txHash: string;
   relayPaymentId?: string;
+  callerSuppliedPaymentId?: string;
   txid?: string;
   expectedRecipient?: string;
   minAmount?: string;
@@ -160,22 +164,23 @@ const SCHEMA_SQL = `
   );
 
   CREATE TABLE IF NOT EXISTS tx_guard (
-    id                   INTEGER PRIMARY KEY CHECK (id = 1),
-    tx_hash              TEXT NOT NULL,
-    relay_payment_id     TEXT,
-    expected_recipient   TEXT,
-    min_amount           TEXT,
-    asset                TEXT,
-    network              TEXT,
-    verified_payer       TEXT,
-    request_binding_hash TEXT,
-    bound_at             INTEGER,
-    claim_id             TEXT,
-    claim_expires_at     INTEGER,
-    consumed             INTEGER NOT NULL DEFAULT 0,
-    consumed_at          INTEGER,
-    consumed_txid        TEXT,
-    updated_at           INTEGER NOT NULL
+    id                         INTEGER PRIMARY KEY CHECK (id = 1),
+    tx_hash                    TEXT NOT NULL,
+    relay_payment_id           TEXT,
+    caller_supplied_payment_id TEXT,
+    expected_recipient         TEXT,
+    min_amount                 TEXT,
+    asset                      TEXT,
+    network                    TEXT,
+    verified_payer             TEXT,
+    request_binding_hash       TEXT,
+    bound_at                   INTEGER,
+    claim_id                   TEXT,
+    claim_expires_at           INTEGER,
+    consumed                   INTEGER NOT NULL DEFAULT 0,
+    consumed_at                INTEGER,
+    consumed_txid              TEXT,
+    updated_at                 INTEGER NOT NULL
   );
 `;
 
@@ -198,6 +203,9 @@ export class PaymentPollingDO extends DurableObject<Env> {
           (r) => (r as Record<string, unknown>).name as string
         )
       );
+      if (!cols.has("caller_supplied_payment_id")) {
+        this.sql.exec("ALTER TABLE tx_guard ADD COLUMN caller_supplied_payment_id TEXT");
+      }
       if (!cols.has("claim_id")) {
         this.sql.exec("ALTER TABLE tx_guard ADD COLUMN claim_id TEXT");
       }
@@ -603,27 +611,31 @@ export class PaymentPollingDO extends DurableObject<Env> {
     const ttlMs = input.ttlMs ?? TX_CLAIM_TTL_MS;
     const claimExpiresAt = now + ttlMs;
     const verifiedPayer = input.verifiedPayer || existing?.verifiedPayer || null;
+    const callerSuppliedPaymentId =
+      input.callerSuppliedPaymentId || existing?.callerSuppliedPaymentId || null;
 
     this.sql.exec(
       `
       INSERT INTO tx_guard
-        (id, tx_hash, relay_payment_id, expected_recipient, min_amount, asset, network,
+        (id, tx_hash, relay_payment_id, caller_supplied_payment_id, expected_recipient, min_amount, asset, network,
          verified_payer, request_binding_hash, bound_at, claim_id, claim_expires_at,
          consumed, consumed_at, consumed_txid, updated_at)
-      VALUES (1, ?, NULL, ?, ?, ?, ?, ?, ?, NULL, ?, ?, 0, NULL, NULL, ?)
+      VALUES (1, ?, NULL, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, 0, NULL, NULL, ?)
       ON CONFLICT(id) DO UPDATE SET
-        expected_recipient   = excluded.expected_recipient,
-        min_amount           = excluded.min_amount,
-        asset                = excluded.asset,
-        network              = excluded.network,
-        verified_payer       = COALESCE(excluded.verified_payer, tx_guard.verified_payer),
-        request_binding_hash = excluded.request_binding_hash,
-        claim_id             = excluded.claim_id,
-        claim_expires_at     = excluded.claim_expires_at,
-        updated_at           = excluded.updated_at
+        caller_supplied_payment_id = COALESCE(excluded.caller_supplied_payment_id, tx_guard.caller_supplied_payment_id),
+        expected_recipient         = excluded.expected_recipient,
+        min_amount                 = excluded.min_amount,
+        asset                      = excluded.asset,
+        network                    = excluded.network,
+        verified_payer             = COALESCE(excluded.verified_payer, tx_guard.verified_payer),
+        request_binding_hash       = excluded.request_binding_hash,
+        claim_id                   = excluded.claim_id,
+        claim_expires_at           = excluded.claim_expires_at,
+        updated_at                 = excluded.updated_at
       WHERE tx_guard.consumed = 0 AND tx_guard.relay_payment_id IS NULL
       `,
       input.txHash,
+      callerSuppliedPaymentId,
       input.expectedRecipient,
       input.minAmount,
       input.asset,
@@ -692,29 +704,33 @@ export class PaymentPollingDO extends DurableObject<Env> {
 
     const boundAt = input.boundAt ?? now;
     const verifiedPayer = input.verifiedPayer || existing?.verifiedPayer || null;
+    const callerSuppliedPaymentId =
+      input.callerSuppliedPaymentId || existing?.callerSuppliedPaymentId || null;
 
     this.sql.exec(
       `
       INSERT INTO tx_guard
-        (id, tx_hash, relay_payment_id, expected_recipient, min_amount, asset, network,
+        (id, tx_hash, relay_payment_id, caller_supplied_payment_id, expected_recipient, min_amount, asset, network,
          verified_payer, request_binding_hash, bound_at, claim_id, claim_expires_at,
          consumed, consumed_at, consumed_txid, updated_at)
-      VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, 0, NULL, NULL, ?)
+      VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, 0, NULL, NULL, ?)
       ON CONFLICT(id) DO UPDATE SET
-        relay_payment_id     = CASE WHEN tx_guard.consumed = 1 OR tx_guard.relay_payment_id IS NOT NULL THEN tx_guard.relay_payment_id ELSE excluded.relay_payment_id END,
-        expected_recipient   = CASE WHEN tx_guard.consumed = 1 OR tx_guard.relay_payment_id IS NOT NULL THEN tx_guard.expected_recipient ELSE excluded.expected_recipient END,
-        min_amount           = CASE WHEN tx_guard.consumed = 1 OR tx_guard.relay_payment_id IS NOT NULL THEN tx_guard.min_amount ELSE excluded.min_amount END,
-        asset                = CASE WHEN tx_guard.consumed = 1 OR tx_guard.relay_payment_id IS NOT NULL THEN tx_guard.asset ELSE excluded.asset END,
-        network              = CASE WHEN tx_guard.consumed = 1 OR tx_guard.relay_payment_id IS NOT NULL THEN tx_guard.network ELSE excluded.network END,
-        verified_payer       = COALESCE(tx_guard.verified_payer, excluded.verified_payer),
-        request_binding_hash = CASE WHEN tx_guard.consumed = 1 OR tx_guard.relay_payment_id IS NOT NULL THEN tx_guard.request_binding_hash ELSE excluded.request_binding_hash END,
-        bound_at             = CASE WHEN tx_guard.consumed = 1 OR tx_guard.relay_payment_id IS NOT NULL THEN tx_guard.bound_at ELSE excluded.bound_at END,
-        claim_id             = NULL,
-        claim_expires_at     = NULL,
-        updated_at           = excluded.updated_at
+        relay_payment_id           = CASE WHEN tx_guard.consumed = 1 OR tx_guard.relay_payment_id IS NOT NULL THEN tx_guard.relay_payment_id ELSE excluded.relay_payment_id END,
+        caller_supplied_payment_id = CASE WHEN tx_guard.consumed = 1 OR tx_guard.relay_payment_id IS NOT NULL THEN tx_guard.caller_supplied_payment_id ELSE COALESCE(excluded.caller_supplied_payment_id, tx_guard.caller_supplied_payment_id) END,
+        expected_recipient         = CASE WHEN tx_guard.consumed = 1 OR tx_guard.relay_payment_id IS NOT NULL THEN tx_guard.expected_recipient ELSE excluded.expected_recipient END,
+        min_amount                 = CASE WHEN tx_guard.consumed = 1 OR tx_guard.relay_payment_id IS NOT NULL THEN tx_guard.min_amount ELSE excluded.min_amount END,
+        asset                      = CASE WHEN tx_guard.consumed = 1 OR tx_guard.relay_payment_id IS NOT NULL THEN tx_guard.asset ELSE excluded.asset END,
+        network                    = CASE WHEN tx_guard.consumed = 1 OR tx_guard.relay_payment_id IS NOT NULL THEN tx_guard.network ELSE excluded.network END,
+        verified_payer             = COALESCE(tx_guard.verified_payer, excluded.verified_payer),
+        request_binding_hash       = CASE WHEN tx_guard.consumed = 1 OR tx_guard.relay_payment_id IS NOT NULL THEN tx_guard.request_binding_hash ELSE excluded.request_binding_hash END,
+        bound_at                   = CASE WHEN tx_guard.consumed = 1 OR tx_guard.relay_payment_id IS NOT NULL THEN tx_guard.bound_at ELSE excluded.bound_at END,
+        claim_id                   = NULL,
+        claim_expires_at           = NULL,
+        updated_at                 = excluded.updated_at
       `,
       input.txHash,
       input.relayPaymentId,
+      callerSuppliedPaymentId,
       input.expectedRecipient,
       input.minAmount,
       input.asset,
@@ -762,26 +778,28 @@ export class PaymentPollingDO extends DurableObject<Env> {
     this.sql.exec(
       `
       INSERT INTO tx_guard
-        (id, tx_hash, relay_payment_id, expected_recipient, min_amount, asset, network,
+        (id, tx_hash, relay_payment_id, caller_supplied_payment_id, expected_recipient, min_amount, asset, network,
          verified_payer, request_binding_hash, bound_at, claim_id, claim_expires_at,
          consumed, consumed_at, consumed_txid, updated_at)
-      VALUES (1, ?, ?, ?, ?, ?, ?, ?, NULL, ?, NULL, NULL, 1, ?, ?, ?)
+      VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, NULL, NULL, 1, ?, ?, ?)
       ON CONFLICT(id) DO UPDATE SET
-        relay_payment_id   = COALESCE(tx_guard.relay_payment_id, excluded.relay_payment_id),
-        expected_recipient = COALESCE(tx_guard.expected_recipient, excluded.expected_recipient),
-        min_amount         = COALESCE(tx_guard.min_amount, excluded.min_amount),
-        asset              = COALESCE(tx_guard.asset, excluded.asset),
-        network            = COALESCE(tx_guard.network, excluded.network),
-        verified_payer     = COALESCE(tx_guard.verified_payer, excluded.verified_payer),
-        claim_id           = NULL,
-        claim_expires_at   = NULL,
-        consumed           = 1,
-        consumed_at        = COALESCE(tx_guard.consumed_at, excluded.consumed_at),
-        consumed_txid      = COALESCE(tx_guard.consumed_txid, excluded.consumed_txid),
-        updated_at         = excluded.updated_at
+        relay_payment_id           = COALESCE(tx_guard.relay_payment_id, excluded.relay_payment_id),
+        caller_supplied_payment_id = COALESCE(tx_guard.caller_supplied_payment_id, excluded.caller_supplied_payment_id),
+        expected_recipient         = COALESCE(tx_guard.expected_recipient, excluded.expected_recipient),
+        min_amount                 = COALESCE(tx_guard.min_amount, excluded.min_amount),
+        asset                      = COALESCE(tx_guard.asset, excluded.asset),
+        network                    = COALESCE(tx_guard.network, excluded.network),
+        verified_payer             = COALESCE(tx_guard.verified_payer, excluded.verified_payer),
+        claim_id                   = NULL,
+        claim_expires_at           = NULL,
+        consumed                   = 1,
+        consumed_at                = COALESCE(tx_guard.consumed_at, excluded.consumed_at),
+        consumed_txid              = COALESCE(tx_guard.consumed_txid, excluded.consumed_txid),
+        updated_at                 = excluded.updated_at
       `,
       input.txHash,
       input.relayPaymentId ?? null,
+      input.callerSuppliedPaymentId ?? null,
       input.expectedRecipient ?? null,
       input.minAmount ?? null,
       input.asset ?? null,
@@ -802,6 +820,7 @@ export class PaymentPollingDO extends DurableObject<Env> {
     return {
       txHash: row.tx_hash as string,
       relayPaymentId: (row.relay_payment_id as string | null) ?? undefined,
+      callerSuppliedPaymentId: (row.caller_supplied_payment_id as string | null) ?? undefined,
       expectedRecipient: (row.expected_recipient as string | null) ?? undefined,
       minAmount: (row.min_amount as string | null) ?? undefined,
       asset: (row.asset as string | null) ?? undefined,

@@ -10,6 +10,7 @@ import {
   deriveRequestCorrelationId,
   extractCheckStatusUrl,
   extractVerifiedTransactionOrigin,
+  NOT_FOUND_ENQUEUE_GRACE_MS,
   x402Middleware,
 } from "../src/middleware/x402";
 import { computeDerivedHints } from "../src/utils/payment-hints";
@@ -2304,7 +2305,9 @@ describe("x402Middleware — RPC enqueue vs confirmed settlement, relay ID recov
     }
   });
 
-  test("post-grace not_found (>= 30s) clears DO tx_guard and returns 402 INVALID_TRANSACTION_STATE", async () => {
+  test("preserves DO tx_guard for 65s not_found within 90s KV grace and clears post-grace (>= 90s)", async () => {
+    expect(NOT_FOUND_ENQUEUE_GRACE_MS).toBeGreaterThanOrEqual(60_000);
+    expect(NOT_FOUND_ENQUEUE_GRACE_MS).toBeLessThanOrEqual(90_000);
     const txHex = await buildSignedTxHex({ sponsored: true, nonce: 90n });
     const relayId = "pay_expired_not_found_90";
     const clearedIds: string[] = [];
@@ -2326,7 +2329,13 @@ describe("x402Middleware — RPC enqueue vs confirmed settlement, relay ID recov
             if (existing?.relayPaymentId) return { status: "bound", record: existing };
             return {
               status: "claimed",
-              record: { txHash: input.txHash, claimId: input.claimId, consumed: false, updatedAt: Date.now() },
+              record: {
+                txHash: input.txHash,
+                claimId: input.claimId,
+                callerSuppliedPaymentId: input.callerSuppliedPaymentId,
+                consumed: false,
+                updatedAt: Date.now(),
+              },
             };
           },
           async releaseTxClaim() {},
@@ -2334,6 +2343,7 @@ describe("x402Middleware — RPC enqueue vs confirmed settlement, relay ID recov
             const rec: TxGuardRecord = {
               txHash: input.txHash,
               relayPaymentId: input.relayPaymentId,
+              callerSuppliedPaymentId: input.callerSuppliedPaymentId,
               expectedRecipient: input.expectedRecipient,
               minAmount: input.minAmount,
               asset: input.asset,
@@ -2407,9 +2417,27 @@ describe("x402Middleware — RPC enqueue vs confirmed settlement, relay ID recov
       iso1.env
     );
     expect(txGuardStore.size).toBe(1);
-    // Age boundAt past the 30s KV grace window
+
+    // Age boundAt to 65s: beyond old 30s limit, still within extended 90s KV propagation grace window
     for (const [k, v] of txGuardStore.entries()) {
-      txGuardStore.set(k, { ...v, boundAt: Date.now() - 35_000 });
+      txGuardStore.set(k, { ...v, boundAt: Date.now() - 65_000 });
+    }
+    const isoGrace = makeApp();
+    const stillGraceRes = await isoGrace.app.request(
+      "http://localhost/paid",
+      { method: "POST", headers: { [X402_HEADERS.PAYMENT_SIGNATURE]: sig } },
+      isoGrace.env
+    );
+    expect(stillGraceRes.status).toBe(402);
+    const stillGraceBody = (await stillGraceRes.json()) as Record<string, unknown>;
+    expect(stillGraceBody.code).toBe(X402_ERROR_CODES.TRANSACTION_PENDING);
+    expect(stillGraceBody.status).toBe("queued");
+    expect(clearedIds.length).toBe(0);
+    expect(txGuardStore.size).toBe(1);
+
+    // Age boundAt past the 90s KV grace window
+    for (const [k, v] of txGuardStore.entries()) {
+      txGuardStore.set(k, { ...v, boundAt: Date.now() - (NOT_FOUND_ENQUEUE_GRACE_MS + 5_000) });
     }
 
     const iso2 = makeApp();
@@ -2564,6 +2592,301 @@ describe("x402Middleware — RPC enqueue vs confirmed settlement, relay ID recov
         expect(body.retryable).toBe(true);
         expect(harness.getHandlerCount()).toBe(0);
       }
+    } finally {
+      X402PaymentVerifier.prototype.settle = originalSettle;
+    }
+  });
+
+  test("client with payment-identifier extension or X-PAYMENT-ID completes pending payment in warm and cold DO isolates", async () => {
+    // 1. Warm isolate: client supplies payment-identifier extension pay_client_warm_93, relay mints pay_relay_warm_93
+    const warmTxHex = await buildSignedTxHex({ sponsored: true, nonce: 93n });
+    const clientWarmId = "pay_client_warm_93";
+    const relayWarmId = "pay_relay_warm_93";
+    const confirmedWarmTxid = "0x9393939393939393939393939393939393939393939393939393939393939393";
+    let warmSubmitCount = 0;
+    let warmCheckCount = 0;
+    const warmHarness = createTestHarness({
+      async submitPayment(_tx, _opts, paymentIdentifier) {
+        warmSubmitCount += 1;
+        expect(paymentIdentifier).toBe(clientWarmId);
+        return { accepted: true, status: "queued", paymentId: relayWarmId };
+      },
+      async checkPayment(paymentId) {
+        warmCheckCount += 1;
+        expect(paymentId).toBe(relayWarmId);
+        if (warmCheckCount === 1) {
+          return { paymentId, status: "queued" };
+        }
+        return { paymentId, status: "confirmed", txid: confirmedWarmTxid };
+      },
+    });
+
+    const warmSig = encodePaymentSignature({
+      x402Version: 2,
+      extensions: { "payment-identifier": { info: { id: clientWarmId } } },
+      payload: { transaction: warmTxHex },
+    });
+
+    const warmPending = await warmHarness.app.request(
+      "http://localhost/paid",
+      { method: "POST", headers: { [X402_HEADERS.PAYMENT_SIGNATURE]: warmSig } },
+      warmHarness.env
+    );
+    expect(warmPending.status).toBe(402);
+    expect(warmPending.headers.get("X-PAYMENT-ID")).toBe(relayWarmId);
+
+    // Mismatched third X-PAYMENT-ID on warm byTxHash still fails closed with 400 SENDER_MISMATCH
+    const warmMismatch = await warmHarness.app.request(
+      "http://localhost/paid",
+      {
+        method: "POST",
+        headers: {
+          [X402_HEADERS.PAYMENT_SIGNATURE]: warmSig,
+          "X-PAYMENT-ID": "pay_wrong_warm_93",
+        },
+      },
+      warmHarness.env
+    );
+    expect(warmMismatch.status).toBe(400);
+    const warmMismatchBody = (await warmMismatch.json()) as Record<string, unknown>;
+    expect(warmMismatchBody.code).toBe(X402_ERROR_CODES.SENDER_MISMATCH);
+
+    // Retry with identical signed payload (still carrying clientWarmId in extension) confirms and serves 200
+    const warmOk = await warmHarness.app.request(
+      "http://localhost/paid",
+      { method: "POST", headers: { [X402_HEADERS.PAYMENT_SIGNATURE]: warmSig } },
+      warmHarness.env
+    );
+    expect(warmOk.status).toBe(200);
+    expect(warmOk.headers.get("X-PAYMENT-ID")).toBe(relayWarmId);
+    expect(warmSubmitCount).toBe(1);
+    expect(warmHarness.getHandlerCount()).toBe(1);
+
+    // 2. Cold isolate via DO: first isolate binds with callerSuppliedPaymentId, second cold isolate recovers cleanly
+    const coldTxHex = await buildSignedTxHex({ sponsored: true, nonce: 94n });
+    const clientColdId = "pay_client_cold_94";
+    const relayColdId = "pay_relay_cold_94";
+    const confirmedColdTxid = "0x9494949494949494949494949494949494949494949494949494949494949494";
+    const txGuardStore = new Map<string, TxGuardRecord>();
+    const sharedDO = {
+      idFromName(name: string) {
+        return name as unknown as DurableObjectId;
+      },
+      get(id: DurableObjectId) {
+        const key = String(id);
+        return {
+          async track() {},
+          async getTxGuard() {
+            return txGuardStore.get(key) ?? null;
+          },
+          async claimTx(input: ClaimTxInput): Promise<ClaimTxResult> {
+            const existing = txGuardStore.get(key);
+            if (existing?.consumed) return { status: "consumed", record: existing };
+            if (existing?.relayPaymentId) return { status: "bound", record: existing };
+            return {
+              status: "claimed",
+              record: {
+                txHash: input.txHash,
+                claimId: input.claimId,
+                callerSuppliedPaymentId: input.callerSuppliedPaymentId,
+                consumed: false,
+                updatedAt: Date.now(),
+              },
+            };
+          },
+          async releaseTxClaim() {},
+          async bindTxPayment(input: BindTxPaymentInput) {
+            const rec: TxGuardRecord = {
+              txHash: input.txHash,
+              relayPaymentId: input.relayPaymentId,
+              callerSuppliedPaymentId: input.callerSuppliedPaymentId,
+              expectedRecipient: input.expectedRecipient,
+              minAmount: input.minAmount,
+              asset: input.asset,
+              network: input.network,
+              verifiedPayer: input.verifiedPayer,
+              requestBindingHash: input.requestBindingHash,
+              boundAt: input.boundAt ?? Date.now(),
+              consumed: false,
+              updatedAt: Date.now(),
+            };
+            txGuardStore.set(key, rec);
+            return rec;
+          },
+          async clearBoundTx() {
+            txGuardStore.delete(key);
+          },
+          async markTxConsumed(input: MarkTxConsumedInput) {
+            const existing = txGuardStore.get(key);
+            const rec: TxGuardRecord = {
+              ...existing,
+              txHash: input.txHash,
+              relayPaymentId: input.relayPaymentId ?? existing?.relayPaymentId,
+              callerSuppliedPaymentId:
+                input.callerSuppliedPaymentId ?? existing?.callerSuppliedPaymentId,
+              consumed: true,
+              consumedAt: Date.now(),
+              consumedTxid: input.txid,
+              updatedAt: Date.now(),
+            };
+            txGuardStore.set(key, rec);
+            return { alreadyConsumed: false, record: rec };
+          },
+        };
+      },
+    } as unknown as Env["PAYMENT_POLLING_DO"];
+
+    let coldSubmitCount = 0;
+    let coldCheckCount = 0;
+    const makeColdIsolateApp = () => {
+      let handlers = 0;
+      const app = new Hono<{ Bindings: Env; Variables: AppVariables }>();
+      app.use("*", async (c, next) => {
+        c.set("logger", { debug() {}, info() {}, warn() {}, error() {} });
+        await next();
+      });
+      app.use("/paid", x402Middleware({ tier: "standard", rpcPollMaxAttempts: 1, rpcPollIntervalMs: 0 }));
+      app.post("/paid", (c) => {
+        handlers += 1;
+        return c.json({ ok: true });
+      });
+      const env = {
+        ENVIRONMENT: "development",
+        X402_FACILITATOR_URL: "https://facilitator.example",
+        X402_NETWORK: "testnet",
+        X402_SERVER_ADDRESS: TEST_SELLER_ADDRESS,
+        X402_RELAY: {
+          async submitPayment() {
+            coldSubmitCount += 1;
+            return { accepted: true, status: "queued", paymentId: relayColdId };
+          },
+          async checkPayment(paymentId: string) {
+            coldCheckCount += 1;
+            expect(paymentId).toBe(relayColdId);
+            if (coldCheckCount === 1) {
+              return { paymentId, status: "queued" };
+            }
+            return { paymentId, status: "confirmed", txid: confirmedColdTxid };
+          },
+        },
+        PAYMENT_POLLING_DO: sharedDO,
+      } as unknown as Env;
+      return { app, env, getHandlers: () => handlers };
+    };
+
+    const coldSig = encodePaymentSignature({
+      x402Version: 2,
+      extensions: { "payment-identifier": { info: { id: clientColdId } } },
+      payload: { transaction: coldTxHex },
+    });
+
+    const isoA = makeColdIsolateApp();
+    const resColdPending = await isoA.app.request(
+      "http://localhost/paid",
+      { method: "POST", headers: { [X402_HEADERS.PAYMENT_SIGNATURE]: coldSig } },
+      isoA.env
+    );
+    expect(resColdPending.status).toBe(402);
+    expect(resColdPending.headers.get("X-PAYMENT-ID")).toBe(relayColdId);
+
+    // Separate cold isolate rejects bogus caller id via hydrateFromDORecord
+    const isoBad = makeColdIsolateApp();
+    const resColdMismatch = await isoBad.app.request(
+      "http://localhost/paid",
+      {
+        method: "POST",
+        headers: {
+          [X402_HEADERS.PAYMENT_SIGNATURE]: coldSig,
+          "X-PAYMENT-ID": "pay_wrong_cold_94",
+        },
+      },
+      isoBad.env
+    );
+    expect(resColdMismatch.status).toBe(400);
+    expect(((await resColdMismatch.json()) as Record<string, unknown>).code).toBe(
+      X402_ERROR_CODES.SENDER_MISMATCH
+    );
+    expect(isoBad.getHandlers()).toBe(0);
+
+    // Separate cold isolate retries with identical payload (clientColdId) → hydrates from DO & confirms
+    const isoB = makeColdIsolateApp();
+    const resColdOk = await isoB.app.request(
+      "http://localhost/paid",
+      { method: "POST", headers: { [X402_HEADERS.PAYMENT_SIGNATURE]: coldSig } },
+      isoB.env
+    );
+    expect(resColdOk.status).toBe(200);
+    expect(resColdOk.headers.get("X-PAYMENT-ID")).toBe(relayColdId);
+    expect(coldSubmitCount).toBe(1);
+    expect(isoB.getHandlers()).toBe(1);
+  });
+
+  test("HTTP-only verifier.settle logs DO markTxConsumed failure and still serves with in-isolate guard", async () => {
+    const originalSettle = X402PaymentVerifier.prototype.settle;
+    X402PaymentVerifier.prototype.settle = async function () {
+      return {
+        success: true,
+        transaction: "0x9595959595959595959595959595959595959595959595959595959595959595",
+        network: "stacks:2147483648",
+        payer: TEST_BUYER_ADDRESS,
+        paymentId: "pay_http_settle_95",
+      } as never;
+    };
+
+    try {
+      const harness = createTestHarness({
+        async submitPayment() {
+          throw new Error("unused");
+        },
+        async checkPayment(paymentId) {
+          return { paymentId, status: "queued" };
+        },
+      });
+      (harness.env as unknown as Record<string, unknown>).X402_RELAY = undefined;
+      (harness.env as unknown as Record<string, unknown>).PAYMENT_POLLING_DO = {
+        idFromName(name: string) {
+          return name as unknown as DurableObjectId;
+        },
+        get() {
+          return {
+            async track() {},
+            async getTxGuard() {
+              return null;
+            },
+            async markTxConsumed() {
+              throw new Error("DO write failed after settle");
+            },
+          };
+        },
+      } as unknown as Env["PAYMENT_POLLING_DO"];
+
+      const txHex = await buildSignedTxHex({ sponsored: true, nonce: 95n });
+      const sig = encodePaymentSignature({ x402Version: 2, payload: { transaction: txHex } });
+
+      const res = await harness.app.request(
+        "http://localhost/paid",
+        { method: "POST", headers: { [X402_HEADERS.PAYMENT_SIGNATURE]: sig } },
+        harness.env
+      );
+      expect(res.status).toBe(200);
+      expect(res.headers.get("X-PAYMENT-ID")).toBe("pay_http_settle_95");
+      expect(harness.getHandlerCount()).toBe(1);
+      expect(
+        harness.events.some(
+          (e) => e.level === "warn" && e.message.includes("markTxConsumed failed after HTTP settlement")
+        )
+      ).toBe(true);
+
+      // In-isolate guard must still block replay in the same isolate even though DO failed
+      const replayRes = await harness.app.request(
+        "http://localhost/paid",
+        { method: "POST", headers: { [X402_HEADERS.PAYMENT_SIGNATURE]: sig } },
+        harness.env
+      );
+      expect(replayRes.status).toBe(402);
+      const replayBody = (await replayRes.json()) as Record<string, unknown>;
+      expect(replayBody.code).toBe(X402_ERROR_CODES.INVALID_TRANSACTION_STATE);
+      expect(harness.getHandlerCount()).toBe(1);
     } finally {
       X402PaymentVerifier.prototype.settle = originalSettle;
     }

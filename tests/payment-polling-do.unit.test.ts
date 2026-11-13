@@ -770,4 +770,121 @@ describe("PaymentPollingDO real tx_guard & alarm() lifecycle", () => {
       globalThis.fetch = originalFetch;
     }
   });
+
+  test("persists callerSuppliedPaymentId in tx_guard with first-writer-wins semantics", async () => {
+    const { instance, ready } = createInMemoryDO();
+    await ready();
+
+    const claimed = await instance.claimTx({
+      txHash: "tx_caller_1",
+      claimId: "claim_caller_1",
+      callerSuppliedPaymentId: "pay_client_first",
+      expectedRecipient: "ST_SELLER",
+      minAmount: "1000",
+      asset: "STX",
+      network: "stacks:2147483648",
+      verifiedPayer: "ST_BUYER",
+      requestBindingHash: "hash_caller",
+    });
+    expect(claimed.status).toBe("claimed");
+    expect(claimed.record.callerSuppliedPaymentId).toBe("pay_client_first");
+
+    const bound = await instance.bindTxPayment({
+      txHash: "tx_caller_1",
+      relayPaymentId: "pay_relay_minted_1",
+      callerSuppliedPaymentId: "pay_client_first",
+      expectedRecipient: "ST_SELLER",
+      minAmount: "1000",
+      asset: "STX",
+      network: "stacks:2147483648",
+      verifiedPayer: "ST_BUYER",
+      requestBindingHash: "hash_caller",
+      claimId: "claim_caller_1",
+    });
+    expect(bound.relayPaymentId).toBe("pay_relay_minted_1");
+    expect(bound.callerSuppliedPaymentId).toBe("pay_client_first");
+
+    // Second bind attempt with a different callerSuppliedPaymentId must NOT overwrite first binding
+    const overwritten = await instance.bindTxPayment({
+      txHash: "tx_caller_1",
+      relayPaymentId: "pay_relay_other",
+      callerSuppliedPaymentId: "pay_client_other",
+      expectedRecipient: "ST_SELLER",
+      minAmount: "1000",
+      asset: "STX",
+      network: "stacks:2147483648",
+      requestBindingHash: "hash_caller_2",
+    });
+    expect(overwritten.relayPaymentId).toBe("pay_relay_minted_1");
+    expect(overwritten.callerSuppliedPaymentId).toBe("pay_client_first");
+
+    const fetched = await instance.getTxGuard();
+    expect(fetched?.callerSuppliedPaymentId).toBe("pay_client_first");
+
+    // Verify ALTER TABLE migration adds caller_supplied_payment_id on pre-existing tx_guard tables
+    const legacyDb = new Database(":memory:");
+    legacyDb.exec(`
+      CREATE TABLE tx_guard (
+        id INTEGER PRIMARY KEY CHECK (id = 1),
+        tx_hash TEXT NOT NULL,
+        relay_payment_id TEXT,
+        expected_recipient TEXT,
+        min_amount TEXT,
+        asset TEXT,
+        network TEXT,
+        verified_payer TEXT,
+        request_binding_hash TEXT,
+        bound_at INTEGER,
+        consumed INTEGER NOT NULL DEFAULT 0,
+        consumed_at INTEGER,
+        consumed_txid TEXT,
+        updated_at INTEGER NOT NULL
+      );
+    `);
+    let legacyPending: Promise<unknown> | null = null;
+    const legacySql = {
+      exec(query: string, ...params: unknown[]) {
+        const trimmed = query.trim();
+        const withoutTrailingSemi = trimmed.replace(/;+s*$/, "");
+        if (withoutTrailingSemi.includes(";")) {
+          legacyDb.exec(trimmed);
+          return { toArray: () => [], [Symbol.iterator]: () => [][Symbol.iterator]() };
+        }
+        const stmt = legacyDb.query(trimmed);
+        const upper = trimmed.toUpperCase();
+        if (upper.startsWith("SELECT") || upper.startsWith("PRAGMA")) {
+          const rows = stmt.all(...(params as never[])) as Record<string, unknown>[];
+          return { toArray: () => rows, [Symbol.iterator]: () => rows[Symbol.iterator]() };
+        }
+        stmt.run(...(params as never[]));
+        return { toArray: () => [], [Symbol.iterator]: () => [][Symbol.iterator]() };
+      },
+    };
+    const legacyCtx = {
+      storage: {
+        sql: legacySql,
+        async getAlarm() { return null; },
+        async setAlarm() {},
+        async deleteAlarm() {},
+      },
+      blockConcurrencyWhile<T>(fn: () => Promise<T>): Promise<T> {
+        const p = fn();
+        legacyPending = p;
+        return p;
+      },
+    } as unknown as DurableObjectState;
+    const legacyInstance = new PaymentPollingDO(legacyCtx, { X402_FACILITATOR_URL: "https://relay.example" } as never);
+    await legacyPending;
+    const migrated = await legacyInstance.bindTxPayment({
+      txHash: "tx_migrated_1",
+      relayPaymentId: "pay_migrated_relay",
+      callerSuppliedPaymentId: "pay_migrated_client",
+      expectedRecipient: "ST_SELLER",
+      minAmount: "1000",
+      asset: "STX",
+      network: "stacks:2147483648",
+      requestBindingHash: "hash_migrated",
+    });
+    expect(migrated.callerSuppliedPaymentId).toBe("pay_migrated_client");
+  });
 });

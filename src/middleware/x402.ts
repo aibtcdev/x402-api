@@ -94,6 +94,7 @@ export interface VerifiedTransactionOrigin {
 
 interface BoundRpcPayment {
   relayPaymentId: string;
+  callerSuppliedPaymentId?: string;
   requestCorrelationId: string;
   requestBindingHash: string;
   txHash: string;
@@ -169,8 +170,9 @@ const BOUND_PAYMENT_TTL_MS = 10 * 60 * 1_000;
  * Grace window right after RPC enqueue where KV eventual-consistency `not_found`
  * from a remote edge POP is treated as still pending instead of deleting the
  * bound entry or telling the caller to rebuild (which would risk a double charge).
+ * Sized to 90s to cover Cloudflare KV's documented 60s propagation window with buffer.
  */
-const NOT_FOUND_ENQUEUE_GRACE_MS = 30_000;
+export const NOT_FOUND_ENQUEUE_GRACE_MS = 90_000;
 
 /**
  * Per-isolate bounded fast guard tracking payments that have already been
@@ -499,6 +501,17 @@ function validateBoundPaymentForRecovery(
     );
   }
   return null;
+}
+
+function matchesBoundPaymentId(
+  boundRelayPaymentId: string | undefined,
+  boundCallerPaymentId: string | undefined,
+  suppliedId: string
+): boolean {
+  return (
+    (Boolean(boundRelayPaymentId) && suppliedId === boundRelayPaymentId) ||
+    (Boolean(boundCallerPaymentId) && suppliedId === boundCallerPaymentId)
+  );
 }
 
 /**
@@ -1262,6 +1275,8 @@ export function x402Middleware(
       errorReason: "uninitialized",
     } as unknown as SettleResult;
     let canonicalPaymentId = settlementAttemptId;
+    let settledViaHttpVerifier = false;
+    let activeHeldClaimId: string | undefined;
 
     try {
       if (c.env.X402_RELAY) {
@@ -1293,7 +1308,11 @@ export function x402Middleware(
         let boundEntry: BoundRpcPayment | undefined;
 
         const hydrateFromDORecord = (rec: TxGuardRecord): { entry?: BoundRpcPayment; errorResponse?: Response } => {
-          if (callerSuppliedPaymentId && rec.relayPaymentId && rec.relayPaymentId !== callerSuppliedPaymentId) {
+          if (
+            callerSuppliedPaymentId &&
+            rec.relayPaymentId &&
+            !matchesBoundPaymentId(rec.relayPaymentId, rec.callerSuppliedPaymentId, callerSuppliedPaymentId)
+          ) {
             return {
               errorResponse: c.json(
                 {
@@ -1314,6 +1333,7 @@ export function x402Middleware(
           ) {
             const hydratedEntry: BoundRpcPayment = {
               relayPaymentId: rec.relayPaymentId,
+              callerSuppliedPaymentId: rec.callerSuppliedPaymentId,
               requestCorrelationId,
               requestBindingHash: rec.requestBindingHash,
               txHash: rec.txHash,
@@ -1373,7 +1393,14 @@ export function x402Middleware(
         if (!boundEntry) {
           const existingByTx = relayStore.byTxHash.get(txHash);
           if (existingByTx) {
-            if (callerSuppliedPaymentId && existingByTx.relayPaymentId !== callerSuppliedPaymentId) {
+            if (
+              callerSuppliedPaymentId &&
+              !matchesBoundPaymentId(
+                existingByTx.relayPaymentId,
+                existingByTx.callerSuppliedPaymentId,
+                callerSuppliedPaymentId
+              )
+            ) {
               return c.json(
                 {
                   error: "Provided X-PAYMENT-ID does not match transaction payment binding",
@@ -1427,6 +1454,7 @@ export function x402Middleware(
             {
               txHash,
               claimId,
+              callerSuppliedPaymentId,
               expectedRecipient: c.env.X402_SERVER_ADDRESS,
               minAmount: paymentRequirements.amount,
               asset,
@@ -1459,7 +1487,8 @@ export function x402Middleware(
               rec.requestBindingHash
             ) {
               const syntheticClaimEntry: BoundRpcPayment = {
-                relayPaymentId: callerSuppliedPaymentId ?? settlementAttemptId,
+                relayPaymentId: rec.relayPaymentId ?? callerSuppliedPaymentId ?? settlementAttemptId,
+                callerSuppliedPaymentId: rec.callerSuppliedPaymentId,
                 requestCorrelationId,
                 requestBindingHash: rec.requestBindingHash,
                 txHash: rec.txHash,
@@ -1536,6 +1565,7 @@ export function x402Middleware(
               return respondClaimInProgressOrConflict(claimRes.record);
             } else {
               heldClaimId = claimId;
+              activeHeldClaimId = claimId;
             }
           }
 
@@ -1617,6 +1647,7 @@ export function x402Middleware(
                 if (typeof httpRelayId === "string" && httpRelayId.startsWith("pay_")) {
                   canonicalPaymentId = httpRelayId;
                 }
+                settledViaHttpVerifier = true;
                 skipRpcPolling = true;
               } else {
                 if (heldClaimId) {
@@ -1699,6 +1730,7 @@ export function x402Middleware(
                 {
                   txHash,
                   relayPaymentId,
+                  callerSuppliedPaymentId,
                   expectedRecipient: c.env.X402_SERVER_ADDRESS,
                   minAmount: paymentRequirements.amount,
                   asset,
@@ -1754,6 +1786,7 @@ export function x402Middleware(
                 } else {
                   const boundFromDO: BoundRpcPayment = {
                     relayPaymentId: rec.relayPaymentId ?? relayPaymentId,
+                    callerSuppliedPaymentId: rec.callerSuppliedPaymentId ?? callerSuppliedPaymentId,
                     requestCorrelationId,
                     requestBindingHash: rec.requestBindingHash ?? requestBindingHash,
                     txHash,
@@ -1785,6 +1818,7 @@ export function x402Middleware(
               } else {
                 boundEntry = {
                   relayPaymentId,
+                  callerSuppliedPaymentId,
                   requestCorrelationId,
                   requestBindingHash,
                   txHash,
@@ -2017,6 +2051,7 @@ export function x402Middleware(
         }
       } else {
         // HTTP facilitator path (when X402_RELAY is not bound)
+        settledViaHttpVerifier = true;
         settleResult = (await verifier.settle(paymentPayload, {
           paymentRequirements,
         })) as unknown as SettleResult;
@@ -2241,6 +2276,7 @@ export function x402Middleware(
       {
         txHash,
         relayPaymentId: canonicalPaymentId,
+        ...(callerSuppliedPaymentId ? { callerSuppliedPaymentId } : {}),
         txid: confirmedTxid,
         expectedRecipient: c.env.X402_SERVER_ADDRESS,
         minAmount: paymentRequirements.amount,
@@ -2251,17 +2287,28 @@ export function x402Middleware(
       log
     );
     if ("error" in consumeDOResult) {
-      c.header("Retry-After", "5");
-      return c.json(
-        {
-          error: "Payment state store temporarily unavailable, please retry",
-          code: X402_ERROR_CODES.UNEXPECTED_SETTLE_ERROR,
-          retryable: true,
-          retryAfter: 5,
-          nextSteps: "retry_later",
-        },
-        503
-      );
+      if (settledViaHttpVerifier) {
+        log.warn("PaymentPollingDO.markTxConsumed failed after HTTP settlement; serving response with in-isolate guard", {
+          txHash,
+          paymentId: canonicalPaymentId,
+          confirmedTxid,
+        });
+        if (activeHeldClaimId) {
+          await releaseTxClaimInDO(c, txHash, activeHeldClaimId, log);
+        }
+      } else {
+        c.header("Retry-After", "5");
+        return c.json(
+          {
+            error: "Payment state store temporarily unavailable, please retry",
+            code: X402_ERROR_CODES.UNEXPECTED_SETTLE_ERROR,
+            retryable: true,
+            retryAfter: 5,
+            nextSteps: "retry_later",
+          },
+          503
+        );
+      }
     }
     if (consumeDOResult.available && consumeDOResult.alreadyConsumed) {
       markPaymentConsumed(txHash, canonicalPaymentId, confirmedTxid);
