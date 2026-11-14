@@ -1,5 +1,15 @@
 import { InFlightPaymentStateSchema } from "@aibtc/tx-schemas/core";
 
+/**
+ * Grace window after enqueue where KV eventual-consistency `not_found` from a
+ * remote edge POP is treated as still pending instead of marking a payment
+ * terminal or clearing its bound state.
+ * Cloudflare KV docs note: "Changes may take up to 60 seconds or more to be
+ * visible in other global network locations as their cached versions of the
+ * data time out." Sized to 90s as a practical buffer above typical propagation.
+ */
+export const NOT_FOUND_ENQUEUE_GRACE_MS = 90_000;
+
 // =============================================================================
 // Retry Decision Context
 // =============================================================================

@@ -597,8 +597,23 @@ export async function makeX402RequestWithRetry(
   let paymentReqBody: PaymentRequiredV2 | null = null;
   let paymentPayload: PaymentPayloadV2 | null = null;
   let paymentSignature: string | null = null;
+  let inFlightPaymentId: string | null = null;
+  let nonPendingRetryCount = 0;
+  let pendingRetryCount = 0;
+  let hasPendingRetry = false;
+  let lastResult: X402RequestResult | null = null;
+  const effectiveMaxRetries = Math.max(0, maxRetries);
+  const maxPendingRetries = Math.max(effectiveMaxRetries, 6);
 
-  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+  for (
+    let attempt = 0;
+    nonPendingRetryCount <= effectiveMaxRetries || (hasPendingRetry && pendingRetryCount <= maxPendingRetries);
+    attempt++
+  ) {
+    if (nonPendingRetryCount > effectiveMaxRetries && !hasPendingRetry) {
+      break;
+    }
+    hasPendingRetry = false;
     if (!paymentReqBody || !paymentPayload || !paymentSignature) {
       log(`Attempt ${attempt + 1}/${maxRetries + 1}: fetching payment requirements...`);
 
@@ -614,20 +629,22 @@ export async function makeX402RequestWithRetry(
         });
       } catch (error) {
         log(`Network error during initial request: ${error instanceof Error ? error.message : String(error)}`);
-        if (attempt < maxRetries) {
-          retryCount++;
-          const backoffMs = Math.min(baseDelayMs * Math.pow(2, attempt), maxDelayMs);
-          log(`Waiting ${backoffMs}ms before retry...`);
-          await sleep(backoffMs);
-          continue;
-        }
-        return {
+        lastResult = {
           status: 0,
           data: { error: "network_error", message: error instanceof Error ? error.message : String(error) },
           headers: new Headers(),
           retryCount,
           wasNonceConflict,
         };
+        if (nonPendingRetryCount < effectiveMaxRetries) {
+          retryCount++;
+          nonPendingRetryCount++;
+          const backoffMs = Math.min(baseDelayMs * Math.pow(2, attempt), maxDelayMs);
+          log(`Waiting ${backoffMs}ms before retry...`);
+          await sleep(backoffMs);
+          continue;
+        }
+        return lastResult;
       }
 
       if (initialRes.status !== 402) {
@@ -712,6 +729,7 @@ export async function makeX402RequestWithRetry(
           ...(body ? { "Content-Type": "application/json" } : {}),
           ...extraHeaders,
           [X402_HEADERS.PAYMENT_SIGNATURE]: paymentSignature,
+          ...(inFlightPaymentId ? { "X-PAYMENT-ID": inFlightPaymentId } : {}),
           "X-PAYMENT-TOKEN-TYPE": tokenType,
         },
         body: body ? JSON.stringify(body) : undefined,
@@ -719,25 +737,28 @@ export async function makeX402RequestWithRetry(
     } catch (error) {
       // Network-level fetch error on paid request - treat as retryable
       log(`Network error during paid request: ${error instanceof Error ? error.message : String(error)}`);
-      if (attempt < maxRetries) {
-        retryCount++;
-        const backoffMs = Math.min(baseDelayMs * Math.pow(2, attempt), maxDelayMs);
-        log(`Waiting ${backoffMs}ms before retry...`);
-        await sleep(backoffMs);
-        paymentReqBody = null;
-        paymentPayload = null;
-        paymentSignature = null;
-        nonceTracker.reset();
-        continue;
-      }
-      // Max retries exceeded - return synthetic error response
-      return {
+      lastResult = {
         status: 0,
         data: { error: "network_error", message: error instanceof Error ? error.message : String(error) },
         headers: new Headers(),
         retryCount,
         wasNonceConflict,
       };
+      if (nonPendingRetryCount < effectiveMaxRetries) {
+        retryCount++;
+        nonPendingRetryCount++;
+        const backoffMs = Math.min(baseDelayMs * Math.pow(2, attempt), maxDelayMs);
+        log(`Waiting ${backoffMs}ms before retry...`);
+        await sleep(backoffMs);
+        paymentReqBody = null;
+        paymentPayload = null;
+        paymentSignature = null;
+        inFlightPaymentId = null;
+        nonceTracker.reset();
+        continue;
+      }
+      // Max retries exceeded - return synthetic error response
+      return lastResult;
     }
 
     // Success or expected terminal status
@@ -761,8 +782,21 @@ export async function makeX402RequestWithRetry(
     );
     const fullErrorText = `${parsedError.errorCode || ""} ${parsedError.errorMessage || ""} ${errText}`;
 
-    if (parsedError.status && isInFlightPaymentState(parsedError.status) && attempt < maxRetries) {
+    lastResult = {
+      status: paidRes.status,
+      data: parseResponseData(errText),
+      headers: paidRes.headers,
+      retryCount,
+      wasNonceConflict,
+    };
+
+    if (parsedError.status && isInFlightPaymentState(parsedError.status) && pendingRetryCount < maxPendingRetries) {
       retryCount++;
+      pendingRetryCount++;
+      hasPendingRetry = true;
+      if (parsedError.paymentId) {
+        inFlightPaymentId = parsedError.paymentId;
+      }
       const delayMs = Math.min(calculateBackoff(attempt, parsedError.retryAfterSecs), maxDelayMs);
       log(
         `Payment ${parsedError.paymentId || "unknown"} still ${parsedError.status}, waiting ${delayMs}ms before reusing the same payment...`
@@ -771,8 +805,13 @@ export async function makeX402RequestWithRetry(
       continue;
     }
 
-    if (parsedError.terminalReason && isSenderRebuildTerminalReason(parsedError.terminalReason) && attempt < maxRetries) {
+    if (
+      parsedError.terminalReason &&
+      isSenderRebuildTerminalReason(parsedError.terminalReason) &&
+      nonPendingRetryCount < effectiveMaxRetries
+    ) {
       retryCount++;
+      nonPendingRetryCount++;
       wasNonceConflict = parsedError.terminalReason === "sender_nonce_duplicate" || isNonceConflict(fullErrorText);
       const delayMs = wasNonceConflict
         ? nonceConflictDelayMs
@@ -782,25 +821,29 @@ export async function makeX402RequestWithRetry(
       paymentReqBody = null;
       paymentPayload = null;
       paymentSignature = null;
+      inFlightPaymentId = null;
       nonceTracker.reset();
       continue;
     }
 
     // Check for nonce conflict specifically (handled differently from other retryable errors)
-    if (isNonceConflict(fullErrorText) && attempt < maxRetries) {
+    if (isNonceConflict(fullErrorText) && nonPendingRetryCount < effectiveMaxRetries) {
       wasNonceConflict = true;
       retryCount++;
+      nonPendingRetryCount++;
       log(`Nonce conflict detected, waiting ${nonceConflictDelayMs}ms for mempool to clear...`);
       await sleep(nonceConflictDelayMs);
       paymentReqBody = null;
       paymentPayload = null;
       paymentSignature = null;
+      inFlightPaymentId = null;
       nonceTracker.reset();
       continue;
     }
 
-    // Check for other retryable errors (mutually exclusive with nonce conflict)
+    // Check for other retryable errors (mutually exclusive with nonce conflict and exhausted pending states)
     if (
+      !(parsedError.status && isInFlightPaymentState(parsedError.status)) &&
       !isNonceConflict(fullErrorText) &&
       isRetryableError(
         paidRes.status,
@@ -808,31 +851,38 @@ export async function makeX402RequestWithRetry(
         parsedError.errorMessage || errText,
         parsedError.parsedBody
       ) &&
-      attempt < maxRetries
+      nonPendingRetryCount < effectiveMaxRetries
     ) {
       retryCount++;
+      nonPendingRetryCount++;
       const delayMs = Math.min(calculateBackoff(attempt, parsedError.retryAfterSecs), maxDelayMs);
       log(`Retryable error (${paidRes.status}), waiting ${delayMs}ms...`);
       await sleep(delayMs);
-      if (!parsedError.status || !isInFlightPaymentState(parsedError.status)) {
-        paymentReqBody = null;
-        paymentPayload = null;
-        paymentSignature = null;
-        nonceTracker.reset();
-      }
+      paymentReqBody = null;
+      paymentPayload = null;
+      paymentSignature = null;
+      inFlightPaymentId = null;
+      nonceTracker.reset();
       continue;
     }
 
     // Non-retryable error or max retries exceeded
+    return lastResult;
+  }
+
+  if (lastResult) {
     return {
-      status: paidRes.status,
-      data: parseResponseData(errText),
-      headers: paidRes.headers,
+      ...lastResult,
       retryCount,
       wasNonceConflict,
     };
   }
 
-  // Should not reach here, but TypeScript needs a return
-  throw new Error("Unexpected end of retry loop");
+  return {
+    status: 0,
+    data: { error: "retry_exhausted", message: "Retry loop ended without a response" },
+    headers: new Headers(),
+    retryCount,
+    wasNonceConflict,
+  };
 }
