@@ -109,6 +109,8 @@ export interface MarkTxConsumedInput {
   verifiedPayer?: string;
 }
 
+export type ClearBoundTxReason = "terminal_failure" | "payer_mismatch";
+
 // Re-export shared helpers/constants for callers that import from this module
 export type { DerivedHints } from "../utils/payment-hints";
 export { computeDerivedHints } from "../utils/payment-hints";
@@ -572,7 +574,15 @@ export class PaymentPollingDO extends DurableObject<Env> {
     }
   }
 
+  private _pruneExpiredTxRetryGuard(now = Date.now()): void {
+    this.sql.exec(
+      "DELETE FROM tx_retry_guard WHERE id = 1 AND updated_at <= ?",
+      now - TX_BOUND_TTL_MS
+    );
+  }
+
   private async _cleanupExpiredTxGuard(now = Date.now()): Promise<boolean> {
+    this._pruneExpiredTxRetryGuard(now);
     const existing = this._readTxGuard();
     if (!existing) {
       return false;
@@ -594,9 +604,11 @@ export class PaymentPollingDO extends DurableObject<Env> {
 
   /** Read bound + consumed state for this txHash DO instance, pruning expired rows. */
   async getTxGuard(): Promise<TxGuardRecord | null> {
+    const now = Date.now();
+    this._pruneExpiredTxRetryGuard(now);
     const existing = this._readTxGuard();
     if (!existing) return null;
-    if (Date.now() >= this._getTxGuardExpiresAt(existing)) {
+    if (now >= this._getTxGuardExpiresAt(existing)) {
       this.sql.exec("DELETE FROM tx_guard WHERE id = 1");
       await this._clearAlarmIfNoActivePoll();
       return null;
@@ -611,6 +623,7 @@ export class PaymentPollingDO extends DurableObject<Env> {
    */
   async claimTx(input: ClaimTxInput): Promise<ClaimTxResult> {
     const now = Date.now();
+    this._pruneExpiredTxRetryGuard(now);
     let existing = this._readTxGuard();
     if (existing && now >= this._getTxGuardExpiresAt(existing)) {
       this.sql.exec("DELETE FROM tx_guard WHERE id = 1");
@@ -784,30 +797,41 @@ export class PaymentPollingDO extends DurableObject<Env> {
   /**
    * Clear pending bound metadata after a terminal non-grace failure or payer mismatch.
    * Strict no-op if consumed=1 or if relay_payment_id does not match expectedRelayPaymentId.
+   * Only increments tx_retry_guard.failed_attempts when reason === "terminal_failure".
    */
-  async clearBoundTx(expectedRelayPaymentId: string): Promise<void> {
+  async clearBoundTx(
+    expectedRelayPaymentId: string,
+    reason: ClearBoundTxReason = "terminal_failure"
+  ): Promise<void> {
     if (!expectedRelayPaymentId) return;
     const existing = this._readTxGuard();
     if (!existing || existing.consumed) return;
     if (existing.relayPaymentId !== expectedRelayPaymentId) return;
     const now = Date.now();
-    this.sql.exec(
-      `
-      INSERT INTO tx_retry_guard (id, tx_hash, failed_attempts, last_failed_id, updated_at)
-      VALUES (1, ?, 1, ?, ?)
-      ON CONFLICT(id) DO UPDATE SET
-        failed_attempts = CASE
-          WHEN tx_retry_guard.tx_hash = excluded.tx_hash THEN tx_retry_guard.failed_attempts + 1
-          ELSE 1
-        END,
-        tx_hash         = excluded.tx_hash,
-        last_failed_id  = excluded.last_failed_id,
-        updated_at      = excluded.updated_at
-      `,
-      existing.txHash,
-      expectedRelayPaymentId,
-      now
-    );
+    this._pruneExpiredTxRetryGuard(now);
+    if (reason === "terminal_failure") {
+      this.sql.exec(
+        `
+        INSERT INTO tx_retry_guard (id, tx_hash, failed_attempts, last_failed_id, updated_at)
+        VALUES (1, ?, 1, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+          failed_attempts = CASE
+            WHEN tx_retry_guard.tx_hash = excluded.tx_hash
+                 AND COALESCE(tx_retry_guard.last_failed_id, '') != excluded.last_failed_id
+              THEN tx_retry_guard.failed_attempts + 1
+            WHEN tx_retry_guard.tx_hash = excluded.tx_hash
+              THEN tx_retry_guard.failed_attempts
+            ELSE 1
+          END,
+          tx_hash         = excluded.tx_hash,
+          last_failed_id  = excluded.last_failed_id,
+          updated_at      = excluded.updated_at
+        `,
+        existing.txHash,
+        expectedRelayPaymentId,
+        now
+      );
+    }
     this.sql.exec(
       "DELETE FROM tx_guard WHERE id = 1 AND consumed = 0 AND relay_payment_id = ?",
       expectedRelayPaymentId
@@ -828,6 +852,7 @@ export class PaymentPollingDO extends DurableObject<Env> {
     }
 
     const now = Date.now();
+    this.sql.exec("DELETE FROM tx_retry_guard WHERE id = 1");
     this.sql.exec(
       `
       INSERT INTO tx_guard

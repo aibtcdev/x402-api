@@ -1125,4 +1125,65 @@ describe("PaymentPollingDO real tx_guard & alarm() lifecycle", () => {
       expect(otherTxClaim.record.failedAttempts).toBeUndefined();
     }
   });
+
+  test("clearBoundTx with reason='payer_mismatch' clears tx_guard without incrementing failedAttempts, and tx_retry_guard prunes on consume or TTL expiry", async () => {
+    const { instance, db, ready } = createInMemoryDO();
+    await ready();
+
+    await instance.bindTxPayment({
+      txHash: "tx_payer_mismatch_1",
+      relayPaymentId: "pay_confirmed_unverified_1",
+      expectedRecipient: "ST_SELLER",
+      minAmount: "1000",
+      asset: "STX",
+      network: "stacks:2147483648",
+      requestBindingHash: "hash_pm1",
+    });
+
+    await instance.clearBoundTx("pay_confirmed_unverified_1", "payer_mismatch");
+    expect(await instance.getTxGuard()).toBeNull();
+
+    const retryAfterMismatch = await instance.claimTx({
+      txHash: "tx_payer_mismatch_1",
+      claimId: "claim_pm_retry",
+      expectedRecipient: "ST_SELLER",
+      minAmount: "1000",
+      asset: "STX",
+      network: "stacks:2147483648",
+      requestBindingHash: "hash_pm1",
+    });
+    expect(retryAfterMismatch.status).toBe("claimed");
+    if (retryAfterMismatch.status === "claimed") {
+      expect(retryAfterMismatch.record.failedAttempts).toBeUndefined();
+    }
+
+    // Now bind and clear with terminal_failure, then verify markTxConsumed prunes tx_retry_guard
+    await instance.bindTxPayment({
+      txHash: "tx_payer_mismatch_1",
+      relayPaymentId: "pay_fail_once",
+      expectedRecipient: "ST_SELLER",
+      minAmount: "1000",
+      asset: "STX",
+      network: "stacks:2147483648",
+      requestBindingHash: "hash_pm1",
+      claimId: "claim_pm_retry",
+    });
+    await instance.clearBoundTx("pay_fail_once", "terminal_failure");
+
+    const retryRowsBeforeConsume = db
+      .query("SELECT failed_attempts FROM tx_retry_guard WHERE id = 1")
+      .all() as Array<{ failed_attempts: number }>;
+    expect(retryRowsBeforeConsume.length).toBe(1);
+    expect(retryRowsBeforeConsume[0].failed_attempts).toBe(1);
+
+    await instance.markTxConsumed({
+      txHash: "tx_payer_mismatch_1",
+      relayPaymentId: "pay_confirmed_final",
+      txid: "0xconfirmedfinal",
+    });
+    const retryRowsAfterConsume = db
+      .query("SELECT failed_attempts FROM tx_retry_guard WHERE id = 1")
+      .all();
+    expect(retryRowsAfterConsume.length).toBe(0);
+  });
 });

@@ -39,6 +39,7 @@ import type {
   ClaimTxInput,
   ClaimTxResult,
   BindTxPaymentInput,
+  ClearBoundTxReason,
   MarkTxConsumedInput,
 } from "../durable-objects/PaymentPollingDO";
 import type {
@@ -182,34 +183,46 @@ const CONSUMED_PAYMENTS = {
   relayIdByTxHash: new Map<string, string>(),
 };
 
-const FAILED_TX_ATTEMPTS = new Map<string, number>();
+const FAILED_TX_ATTEMPTS = new Map<string, { count: number; lastFailedPaymentId?: string }>();
 
 function getFailedAttemptCount(txHash: string): number {
-  return txHash ? (FAILED_TX_ATTEMPTS.get(txHash) ?? 0) : 0;
+  return txHash ? (FAILED_TX_ATTEMPTS.get(txHash)?.count ?? 0) : 0;
 }
 
-function setFailedAttemptCount(txHash: string, count: number): void {
+function setFailedAttemptCount(
+  txHash: string,
+  count: number,
+  lastFailedPaymentId?: string
+): void {
   if (!txHash || count <= 0) {
     return;
   }
-  if (!FAILED_TX_ATTEMPTS.has(txHash) && FAILED_TX_ATTEMPTS.size >= MAX_BOUND_PAYMENTS_PER_STORE) {
+  const existing = FAILED_TX_ATTEMPTS.get(txHash);
+  if (!existing && FAILED_TX_ATTEMPTS.size >= MAX_BOUND_PAYMENTS_PER_STORE) {
     const oldest = FAILED_TX_ATTEMPTS.keys().next().value;
     if (oldest !== undefined) {
       FAILED_TX_ATTEMPTS.delete(oldest);
     }
   }
-  FAILED_TX_ATTEMPTS.set(txHash, count);
+  FAILED_TX_ATTEMPTS.set(txHash, {
+    count,
+    lastFailedPaymentId: lastFailedPaymentId ?? existing?.lastFailedPaymentId,
+  });
 }
 
-function recordTerminalFailure(txHash: string): void {
-  setFailedAttemptCount(txHash, getFailedAttemptCount(txHash) + 1);
+function recordTerminalFailure(txHash: string, relayPaymentId?: string): void {
+  if (!txHash) {
+    return;
+  }
+  const existing = FAILED_TX_ATTEMPTS.get(txHash);
+  if (relayPaymentId && existing?.lastFailedPaymentId === relayPaymentId) {
+    return;
+  }
+  setFailedAttemptCount(txHash, (existing?.count ?? 0) + 1, relayPaymentId);
 }
 
 function syncFailedAttemptCount(txHash: string, count: number): void {
-  const current = getFailedAttemptCount(txHash);
-  if (count > current) {
-    setFailedAttemptCount(txHash, count);
-  }
+  setFailedAttemptCount(txHash, count);
 }
 
 async function resolveSettlementAttemptId(
@@ -697,7 +710,7 @@ interface TxGuardDOStub {
   claimTx?: (input: ClaimTxInput) => Promise<ClaimTxResult>;
   releaseTxClaim?: (claimId: string) => Promise<void>;
   bindTxPayment?: (input: BindTxPaymentInput) => Promise<TxGuardRecord>;
-  clearBoundTx?: (expectedRelayPaymentId: string) => Promise<void>;
+  clearBoundTx?: (expectedRelayPaymentId: string, reason?: ClearBoundTxReason) => Promise<void>;
   markTxConsumed?: (input: MarkTxConsumedInput) => Promise<{
     alreadyConsumed: boolean;
     record: TxGuardRecord;
@@ -812,20 +825,24 @@ async function clearBoundTxInDO(
   c: { env: Env },
   txHash: string,
   expectedRelayPaymentId: string,
+  reason: ClearBoundTxReason,
   log: Logger
-): Promise<void> {
+): Promise<{ available: boolean; error?: unknown }> {
   try {
     const stub = getTxGuardStub(c, txHash);
     if (!stub || typeof stub.clearBoundTx !== "function") {
-      return;
+      return { available: false };
     }
-    await stub.clearBoundTx(expectedRelayPaymentId);
+    await stub.clearBoundTx(expectedRelayPaymentId, reason);
+    return { available: true };
   } catch (err) {
-    log.warn("PaymentPollingDO.clearBoundTx failed (non-blocking)", {
+    log.error("PaymentPollingDO.clearBoundTx failed", {
       txHash,
       expectedRelayPaymentId,
+      reason,
       err: String(err),
     });
+    return { available: true, error: err };
   }
 }
 
@@ -1396,35 +1413,93 @@ export function x402Middleware(
           return {};
         };
 
+        let warmEntryFromByRelayId = false;
         if (callerSuppliedPaymentId) {
-          boundEntry = relayStore.byRelayId.get(callerSuppliedPaymentId);
-          if (boundEntry) {
-            const mismatchResponse = validateBoundPaymentForRecovery(c, boundEntry, {
-              verifiedPayer,
-              txHash,
-              requireTxHashMatch: true,
-              expectedRecipient: c.env.X402_SERVER_ADDRESS,
-              asset,
-              network: networkV2,
-              minAmount: paymentRequirements.amount,
-              allowDynamicBoundAmount: dynamic,
-              requestBindingHash,
-              requestCorrelationId,
-            });
-            if (mismatchResponse) {
-              return mismatchResponse;
+          const byIdEntry = relayStore.byRelayId.get(callerSuppliedPaymentId);
+          if (byIdEntry) {
+            if (byIdEntry.txHash !== txHash) {
+              const mismatchResponse = validateBoundPaymentForRecovery(c, byIdEntry, {
+                verifiedPayer,
+                txHash,
+                requireTxHashMatch: true,
+                expectedRecipient: c.env.X402_SERVER_ADDRESS,
+                asset,
+                network: networkV2,
+                minAmount: paymentRequirements.amount,
+                allowDynamicBoundAmount: dynamic,
+                requestBindingHash,
+                requestCorrelationId,
+              });
+              if (mismatchResponse) {
+                return mismatchResponse;
+              }
             }
+            boundEntry = byIdEntry;
+            warmEntryFromByRelayId = true;
           }
         }
 
         if (!boundEntry) {
-          const existingByTx = relayStore.byTxHash.get(txHash);
-          if (existingByTx) {
+          boundEntry = relayStore.byTxHash.get(txHash);
+        }
+
+        if (boundEntry) {
+          // Treat PaymentPollingDO as authoritative for warm bound entries:
+          // verify not consumed, drop stale warm entry if cleared in DO, or adopt DO's re-bound relayPaymentId.
+          const warmGuardLookup = await readTxGuardFromDO(c, txHash, log);
+          if ("error" in warmGuardLookup) {
+            return respondPaymentStoreUnavailable(c);
+          }
+          const doSupportsBinding = Boolean(getTxGuardStub(c, txHash)?.bindTxPayment);
+          let hydratedFromDO = false;
+
+          if (warmGuardLookup.available) {
+            const doRec = warmGuardLookup.record;
+            if (doRec?.consumed) {
+              removeBoundPayment(c.env.X402_RELAY, boundEntry);
+              markPaymentConsumed(
+                txHash,
+                doRec.relayPaymentId,
+                doRec.consumedTxid,
+                Boolean(doRec.relayPaymentId && doRec.boundAt != null)
+              );
+              return respondConsumedPayment(c, {
+                paymentId: doRec.relayPaymentId ?? boundEntry.relayPaymentId,
+                requestCorrelationId,
+                asset,
+                network: networkV2,
+              });
+            }
+            if (!doRec || !doRec.relayPaymentId) {
+              if (doSupportsBinding) {
+                removeBoundPayment(c.env.X402_RELAY, boundEntry);
+                boundEntry = undefined;
+                if ((doRec?.failedAttempts ?? 0) > 0) {
+                  syncFailedAttemptCount(txHash, doRec!.failedAttempts!);
+                }
+              }
+            } else if (doRec.relayPaymentId !== boundEntry.relayPaymentId) {
+              removeBoundPayment(c.env.X402_RELAY, boundEntry);
+              boundEntry = undefined;
+              const hydrated = hydrateFromDORecord(doRec);
+              if (hydrated.errorResponse) {
+                return hydrated.errorResponse;
+              }
+              if (hydrated.entry) {
+                saveBoundPayment(c.env.X402_RELAY, hydrated.entry);
+                boundEntry = hydrated.entry;
+                hydratedFromDO = true;
+              }
+            }
+          }
+
+          if (boundEntry && !hydratedFromDO) {
             if (
+              !warmEntryFromByRelayId &&
               callerSuppliedPaymentId &&
               !matchesBoundPaymentId(
-                existingByTx.relayPaymentId,
-                existingByTx.callerSuppliedPaymentId,
+                boundEntry.relayPaymentId,
+                boundEntry.callerSuppliedPaymentId,
                 callerSuppliedPaymentId
               )
             ) {
@@ -1436,10 +1511,10 @@ export function x402Middleware(
                 400
               );
             }
-            const mismatchResponse = validateBoundPaymentForRecovery(c, existingByTx, {
+            const mismatchResponse = validateBoundPaymentForRecovery(c, boundEntry, {
               verifiedPayer,
               txHash,
-              requireTxHashMatch: false,
+              requireTxHashMatch: warmEntryFromByRelayId,
               expectedRecipient: c.env.X402_SERVER_ADDRESS,
               asset,
               network: networkV2,
@@ -1451,31 +1526,9 @@ export function x402Middleware(
             if (mismatchResponse) {
               return mismatchResponse;
             }
-            boundEntry = existingByTx;
           }
-        }
 
-        if (boundEntry) {
-          // Verify warm bound entry has not already been consumed in another isolate before polling/serving
-          const warmGuardLookup = await readTxGuardFromDO(c, txHash, log);
-          if ("error" in warmGuardLookup) {
-            return respondPaymentStoreUnavailable(c);
-          }
-          if (warmGuardLookup.available && warmGuardLookup.record?.consumed) {
-            markPaymentConsumed(
-              txHash,
-              warmGuardLookup.record.relayPaymentId,
-              warmGuardLookup.record.consumedTxid,
-              Boolean(warmGuardLookup.record.relayPaymentId && warmGuardLookup.record.boundAt != null)
-            );
-            return respondConsumedPayment(c, {
-              paymentId: warmGuardLookup.record.relayPaymentId ?? boundEntry.relayPaymentId,
-              requestCorrelationId,
-              asset,
-              network: networkV2,
-            });
-          }
-          if (dynamic && boundEntry.requestBindingHash === requestBindingHash) {
+          if (boundEntry && dynamic && boundEntry.requestBindingHash === requestBindingHash) {
             paymentRequirements.amount = boundEntry.minAmount;
           }
         }
@@ -1959,7 +2012,16 @@ export function x402Middleware(
                 if (typeof checkReturnedPayer === "string" && checkReturnedPayer.length > 0) {
                   if (verifiedPayer && checkReturnedPayer !== verifiedPayer) {
                     removeBoundPayment(c.env.X402_RELAY, boundEntry);
-                    await clearBoundTxInDO(c, txHash, relayPaymentId, log);
+                    const clearRes = await clearBoundTxInDO(
+                      c,
+                      txHash,
+                      relayPaymentId,
+                      "payer_mismatch",
+                      log
+                    );
+                    if ("error" in clearRes) {
+                      return respondPaymentStoreUnavailable(c);
+                    }
                     return c.json(
                       {
                         error: "Relay payer does not match verified transaction origin",
@@ -2019,7 +2081,16 @@ export function x402Middleware(
               const resolvedPayer = verifiedPayer || boundEntry.verifiedPayer;
               if (!resolvedPayer || resolvedPayer === c.env.X402_SERVER_ADDRESS) {
                 removeBoundPayment(c.env.X402_RELAY, boundEntry);
-                await clearBoundTxInDO(c, txHash, relayPaymentId, log);
+                const clearRes = await clearBoundTxInDO(
+                  c,
+                  txHash,
+                  relayPaymentId,
+                  "payer_mismatch",
+                  log
+                );
+                if ("error" in clearRes) {
+                  return respondPaymentStoreUnavailable(c);
+                }
                 return c.json(
                   {
                     error: "Could not verify transaction origin payer for confirmed payment",
@@ -2048,9 +2119,18 @@ export function x402Middleware(
             Date.now() - boundEntry.createdAt < NOT_FOUND_ENQUEUE_GRACE_MS;
 
           if (TERMINAL_FAILURE_RPC_STATUSES.has(lastStatus) && !isNotFoundWithinGraceWindow) {
-            recordTerminalFailure(txHash);
             removeBoundPayment(c.env.X402_RELAY, boundEntry);
-            await clearBoundTxInDO(c, txHash, relayPaymentId, log);
+            const clearRes = await clearBoundTxInDO(
+              c,
+              txHash,
+              relayPaymentId,
+              "terminal_failure",
+              log
+            );
+            if ("error" in clearRes) {
+              return respondPaymentStoreUnavailable(c);
+            }
+            recordTerminalFailure(txHash, relayPaymentId);
             const checkRetryable = (latestCheck as { retryable?: boolean } | undefined)?.retryable;
             settleResult = {
               success: false,

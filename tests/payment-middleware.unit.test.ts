@@ -3795,4 +3795,405 @@ describe("x402Middleware — RPC enqueue vs confirmed settlement, relay ID recov
     expect(bodyInvalid.retryable).toBe(false);
     expect(bodyInvalid.nextSteps).toBe("fix_and_resend");
   });
+
+  test("reconciles stale warm BOUND_RPC_STORES entry against authoritative DO when another isolate cleared or rebound the tx", async () => {
+    const txHex = await buildSignedTxHex({ sponsored: true, nonce: 7901n });
+    const checkedIds: string[] = [];
+    const store = new Map<string, TxGuardRecord>();
+
+    const harness = createTestHarness({
+      async submitPayment(_txHex: string, _settle?: unknown) {
+        return {
+          accepted: true,
+          paymentId: "pay_A_stale",
+          status: "queued",
+        };
+      },
+      async checkPayment(paymentId: string) {
+        checkedIds.push(paymentId);
+        if (paymentId === "pay_A_stale") {
+          return {
+            paymentId,
+            status: "queued",
+          };
+        }
+        return {
+          paymentId,
+          status: "confirmed",
+          txid: "0x" + "ab".repeat(32),
+          payer: TEST_BUYER_ADDRESS,
+        };
+      },
+    });
+
+    (harness.env as unknown as Record<string, unknown>).PAYMENT_POLLING_DO = {
+      idFromName(name: string) {
+        return name as unknown as DurableObjectId;
+      },
+      get(id: DurableObjectId) {
+        const key = String(id);
+        return {
+          async track() {},
+          async getTxGuard() {
+            return store.get(key) ?? null;
+          },
+          async claimTx(input: ClaimTxInput): Promise<ClaimTxResult> {
+            const existing = store.get(key);
+            if (existing?.consumed) return { status: "consumed", record: existing };
+            if (existing?.relayPaymentId) return { status: "bound", record: existing };
+            const rec: TxGuardRecord = {
+              txHash: input.txHash,
+              claimId: input.claimId,
+              claimedAt: Date.now(),
+              consumed: false,
+              expectedRecipient: input.expectedRecipient,
+              minAmount: input.minAmount,
+              asset: input.asset,
+              network: input.network,
+              verifiedPayer: input.verifiedPayer,
+              requestBindingHash: input.requestBindingHash,
+              updatedAt: Date.now(),
+            };
+            store.set(key, rec);
+            return { status: "claimed", record: rec };
+          },
+          async bindTxPayment(input: BindTxPaymentInput) {
+            const rec: TxGuardRecord = {
+              txHash: input.txHash,
+              relayPaymentId: input.relayPaymentId,
+              consumed: false,
+              expectedRecipient: input.expectedRecipient,
+              minAmount: input.minAmount,
+              asset: input.asset,
+              network: input.network,
+              verifiedPayer: input.verifiedPayer,
+              requestBindingHash: input.requestBindingHash,
+              boundAt: input.boundAt ?? Date.now(),
+              updatedAt: Date.now(),
+            };
+            store.set(key, rec);
+            return rec;
+          },
+          async clearBoundTx(expectedId: string) {
+            const existing = store.get(key);
+            if (existing && existing.relayPaymentId === expectedId) {
+              store.delete(key);
+              return true;
+            }
+            return false;
+          },
+          async markTxConsumed(input: MarkTxConsumedInput) {
+            const existing = store.get(key);
+            const rec: TxGuardRecord = {
+              ...(existing ?? {}),
+              txHash: input.txHash,
+              relayPaymentId: input.relayPaymentId,
+              consumed: true,
+              consumedTxid: input.txid,
+              updatedAt: Date.now(),
+            };
+            store.set(key, rec);
+            return { alreadyConsumed: false, record: rec };
+          },
+        };
+      },
+    } as unknown as Env["PAYMENT_POLLING_DO"];
+
+    const sigHeader = encodePaymentSignature({
+      x402Version: 2,
+      payload: { transaction: txHex },
+    });
+
+    // 1. Seed this isolate's warm BOUND_RPC_STORES with pay_A_stale (returns 402 pending)
+    const res1 = await harness.app.request(
+      "http://localhost/paid",
+      {
+        method: "POST",
+        headers: { [X402_HEADERS.PAYMENT_SIGNATURE]: sigHeader },
+      },
+      harness.env
+    );
+    expect(res1.status).toBe(402);
+    expect(checkedIds).toEqual(["pay_A_stale"]);
+
+    // 2. Simulate another isolate clearing pay_A_stale and re-binding pay_B_live in the DO
+    for (const [k, v] of store.entries()) {
+      store.set(k, {
+        ...v,
+        relayPaymentId: "pay_B_live",
+        boundAt: Date.now(),
+        updatedAt: Date.now(),
+      });
+    }
+
+    // Next retry hits this isolate with warm pay_A_stale in memory; it must adopt pay_B_live from DO
+    const res2 = await harness.app.request(
+      "http://localhost/paid",
+      {
+        method: "POST",
+        headers: { [X402_HEADERS.PAYMENT_SIGNATURE]: sigHeader },
+      },
+      harness.env
+    );
+    expect(res2.status).toBe(200);
+    expect(checkedIds).toEqual(["pay_A_stale", "pay_B_live"]);
+  });
+
+  test("surfaces 503 with Retry-After: 5 when clearBoundTxInDO fails and does not advance failed_attempts until DO clear succeeds", async () => {
+    const txHex = await buildSignedTxHex({ sponsored: true, nonce: 7902n });
+    let clearShouldThrow = true;
+    const clearReasons: string[] = [];
+    let failedAttemptsInDO = 0;
+    const store = new Map<string, TxGuardRecord>();
+
+    const harness = createTestHarness({
+      async submitPayment() {
+        return {
+          accepted: true,
+          paymentId: "pay_fail_503",
+          status: "queued",
+        };
+      },
+      async checkPayment(paymentId: string) {
+        return {
+          paymentId,
+          status: "failed",
+          terminalReason: "broadcast_failure",
+        };
+      },
+    });
+
+    (harness.env as unknown as Record<string, unknown>).PAYMENT_POLLING_DO = {
+      idFromName(name: string) {
+        return name as unknown as DurableObjectId;
+      },
+      get(id: DurableObjectId) {
+        const key = String(id);
+        return {
+          async track() {},
+          async getTxGuard() {
+            return store.get(key) ?? null;
+          },
+          async claimTx(input: ClaimTxInput): Promise<ClaimTxResult> {
+            const existing = store.get(key);
+            if (existing?.relayPaymentId) return { status: "bound", record: existing };
+            const rec: TxGuardRecord = {
+              txHash: input.txHash,
+              claimId: input.claimId,
+              claimedAt: Date.now(),
+              failedAttempts: failedAttemptsInDO,
+              consumed: false,
+              expectedRecipient: input.expectedRecipient,
+              minAmount: input.minAmount,
+              asset: input.asset,
+              network: input.network,
+              verifiedPayer: input.verifiedPayer,
+              requestBindingHash: input.requestBindingHash,
+              updatedAt: Date.now(),
+            };
+            store.set(key, rec);
+            return { status: "claimed", record: rec };
+          },
+          async bindTxPayment(input: BindTxPaymentInput) {
+            const rec: TxGuardRecord = {
+              txHash: input.txHash,
+              relayPaymentId: input.relayPaymentId,
+              failedAttempts: failedAttemptsInDO,
+              consumed: false,
+              expectedRecipient: input.expectedRecipient,
+              minAmount: input.minAmount,
+              asset: input.asset,
+              network: input.network,
+              verifiedPayer: input.verifiedPayer,
+              requestBindingHash: input.requestBindingHash,
+              boundAt: input.boundAt ?? Date.now(),
+              updatedAt: Date.now(),
+            };
+            store.set(key, rec);
+            return rec;
+          },
+          async clearBoundTx(_expectedId: string, reason: string) {
+            if (clearShouldThrow) {
+              throw new Error("DO storage transient failure on clearBoundTx");
+            }
+            clearReasons.push(reason);
+            store.delete(key);
+            if (reason === "terminal_failure") {
+              failedAttemptsInDO += 1;
+            }
+            return true;
+          },
+          async markTxConsumed(input: MarkTxConsumedInput) {
+            const rec: TxGuardRecord = {
+              txHash: input.txHash,
+              relayPaymentId: input.relayPaymentId,
+              consumed: true,
+              consumedTxid: input.txid,
+              updatedAt: Date.now(),
+            };
+            store.set(key, rec);
+            return { alreadyConsumed: false, record: rec };
+          },
+        };
+      },
+    } as unknown as Env["PAYMENT_POLLING_DO"];
+
+    const sigHeader = encodePaymentSignature({
+      x402Version: 2,
+      payload: { transaction: txHex },
+    });
+
+    // 1. DO clearBoundTx throws -> must surface 503 with Retry-After: 5 instead of swallowing
+    const res503 = await harness.app.request(
+      "http://localhost/paid",
+      {
+        method: "POST",
+        headers: { [X402_HEADERS.PAYMENT_SIGNATURE]: sigHeader },
+      },
+      harness.env
+    );
+    expect(res503.status).toBe(503);
+    expect(res503.headers.get("Retry-After")).toBe("5");
+    expect(failedAttemptsInDO).toBe(0);
+
+    // 2. DO recovers -> next retry clears bound tx with reason="terminal_failure" and returns 402
+    clearShouldThrow = false;
+    const res402 = await harness.app.request(
+      "http://localhost/paid",
+      {
+        method: "POST",
+        headers: { [X402_HEADERS.PAYMENT_SIGNATURE]: sigHeader },
+      },
+      harness.env
+    );
+    expect(res402.status).toBe(402);
+    expect(clearReasons).toEqual(["terminal_failure"]);
+    expect(failedAttemptsInDO).toBe(1);
+  });
+
+  test("passes reason='payer_mismatch' on SENDER_MISMATCH so failed_attempts is not incremented", async () => {
+    const txHex = await buildSignedTxHex({ sponsored: true, nonce: 7903n });
+    const clearCalls: Array<{ expectedId: string; reason: string }> = [];
+    const seenPaymentIds: string[] = [];
+    const store = new Map<string, TxGuardRecord>();
+
+    const harness = createTestHarness({
+      async submitPayment(_txHex: string, _settle?: unknown, paymentId?: string) {
+        if (paymentId) seenPaymentIds.push(paymentId);
+        return {
+          accepted: true,
+          paymentId: paymentId ?? "pay_mismatch",
+          status: "queued",
+        };
+      },
+      async checkPayment(paymentId: string) {
+        return {
+          paymentId,
+          status: "confirmed",
+          txid: "0x" + "cd".repeat(32),
+          payer: TEST_SELLER_ADDRESS, // Mismatched payer vs verified buyer address
+        } as never;
+      },
+    });
+
+    (harness.env as unknown as Record<string, unknown>).PAYMENT_POLLING_DO = {
+      idFromName(name: string) {
+        return name as unknown as DurableObjectId;
+      },
+      get(id: DurableObjectId) {
+        const key = String(id);
+        return {
+          async track() {},
+          async getTxGuard() {
+            return store.get(key) ?? null;
+          },
+          async claimTx(input: ClaimTxInput): Promise<ClaimTxResult> {
+            const existing = store.get(key);
+            if (existing?.relayPaymentId) return { status: "bound", record: existing };
+            const rec: TxGuardRecord = {
+              txHash: input.txHash,
+              claimId: input.claimId,
+              claimedAt: Date.now(),
+              failedAttempts: 0,
+              consumed: false,
+              expectedRecipient: input.expectedRecipient,
+              minAmount: input.minAmount,
+              asset: input.asset,
+              network: input.network,
+              verifiedPayer: input.verifiedPayer,
+              requestBindingHash: input.requestBindingHash,
+              updatedAt: Date.now(),
+            };
+            store.set(key, rec);
+            return { status: "claimed", record: rec };
+          },
+          async bindTxPayment(input: BindTxPaymentInput) {
+            const rec: TxGuardRecord = {
+              txHash: input.txHash,
+              relayPaymentId: input.relayPaymentId,
+              failedAttempts: 0,
+              consumed: false,
+              expectedRecipient: input.expectedRecipient,
+              minAmount: input.minAmount,
+              asset: input.asset,
+              network: input.network,
+              verifiedPayer: input.verifiedPayer,
+              requestBindingHash: input.requestBindingHash,
+              boundAt: input.boundAt ?? Date.now(),
+              updatedAt: Date.now(),
+            };
+            store.set(key, rec);
+            return rec;
+          },
+          async clearBoundTx(expectedId: string, reason: string) {
+            clearCalls.push({ expectedId, reason });
+            store.delete(key);
+            return true;
+          },
+          async markTxConsumed(input: MarkTxConsumedInput) {
+            const rec: TxGuardRecord = {
+              txHash: input.txHash,
+              relayPaymentId: input.relayPaymentId,
+              consumed: true,
+              consumedTxid: input.txid,
+              updatedAt: Date.now(),
+            };
+            store.set(key, rec);
+            return { alreadyConsumed: false, record: rec };
+          },
+        };
+      },
+    } as unknown as Env["PAYMENT_POLLING_DO"];
+
+    const sigHeader = encodePaymentSignature({
+      x402Version: 2,
+      payload: { transaction: txHex },
+    });
+
+    const res1 = await harness.app.request(
+      "http://localhost/paid",
+      {
+        method: "POST",
+        headers: { [X402_HEADERS.PAYMENT_SIGNATURE]: sigHeader },
+      },
+      harness.env
+    );
+    expect(res1.status).toBe(400);
+    expect(clearCalls.length).toBe(1);
+    expect(clearCalls[0].reason).toBe("payer_mismatch");
+
+    // Subsequent retry must still use the base settlementAttemptId (failedAttempts = 0 -> no retry suffix rotation)
+    const res2 = await harness.app.request(
+      "http://localhost/paid",
+      {
+        method: "POST",
+        headers: { [X402_HEADERS.PAYMENT_SIGNATURE]: sigHeader },
+      },
+      harness.env
+    );
+    expect(res2.status).toBe(400);
+    expect(clearCalls.length).toBe(2);
+    expect(seenPaymentIds.length).toBe(2);
+    expect(seenPaymentIds[1]).toBe(seenPaymentIds[0]);
+  });
 });
