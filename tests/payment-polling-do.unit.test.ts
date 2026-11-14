@@ -994,4 +994,135 @@ describe("PaymentPollingDO real tx_guard & alarm() lifecycle", () => {
     expect((await instance.derivedHints())?.nextSteps).toBe("start_new_payment");
     expect(await instance.poll()).toBeNull();
   });
+
+  test("markTxConsumed leaves bound_at NULL on HTTP path without bindTxPayment and preserves boundAt when bound", async () => {
+    const { instance, db, ready } = createInMemoryDO();
+    await ready();
+
+    const httpConsumed = await instance.markTxConsumed({
+      txHash: "tx_http_no_bind",
+      relayPaymentId: "pay_caller_chosen_1",
+      callerSuppliedPaymentId: "pay_caller_chosen_1",
+      txid: "0xhttp1",
+    });
+    expect(httpConsumed.alreadyConsumed).toBe(false);
+    expect(httpConsumed.record.consumed).toBe(true);
+    expect(httpConsumed.record.boundAt).toBeUndefined();
+
+    const rawHttpRow = db
+      .query("SELECT bound_at FROM tx_guard WHERE id = 1")
+      .get() as { bound_at: number | null };
+    expect(rawHttpRow.bound_at).toBeNull();
+
+    const { instance: rpcInstance, db: rpcDb, ready: rpcReady } = createInMemoryDO();
+    await rpcReady();
+    await rpcInstance.bindTxPayment({
+      txHash: "tx_rpc_bound",
+      relayPaymentId: "pay_relay_minted_1",
+      expectedRecipient: "ST_SELLER",
+      minAmount: "1000",
+      asset: "STX",
+      network: "stacks:2147483648",
+      requestBindingHash: "hash_rpc",
+      boundAt: 1_700_000_000_000,
+    });
+    const rpcConsumed = await rpcInstance.markTxConsumed({
+      txHash: "tx_rpc_bound",
+      relayPaymentId: "pay_relay_minted_1",
+      txid: "0xrpc1",
+    });
+    expect(rpcConsumed.record.boundAt).toBe(1_700_000_000_000);
+    const rawRpcRow = rpcDb
+      .query("SELECT bound_at FROM tx_guard WHERE id = 1")
+      .get() as { bound_at: number | null };
+    expect(rawRpcRow.bound_at).toBe(1_700_000_000_000);
+  });
+
+  test("clearBoundTx increments failedAttempts on subsequent claimTx for the same txHash while keeping getTxGuard null", async () => {
+    const { instance, ready } = createInMemoryDO();
+    await ready();
+
+    const initialClaim = await instance.claimTx({
+      txHash: "tx_retry_1",
+      claimId: "claim_r1",
+      expectedRecipient: "ST_SELLER",
+      minAmount: "1000",
+      asset: "STX",
+      network: "stacks:2147483648",
+      requestBindingHash: "hash_r1",
+    });
+    expect(initialClaim.status).toBe("claimed");
+    if (initialClaim.status === "claimed") {
+      expect(initialClaim.record.failedAttempts).toBeUndefined();
+    }
+
+    await instance.bindTxPayment({
+      txHash: "tx_retry_1",
+      relayPaymentId: "pay_dead_1",
+      expectedRecipient: "ST_SELLER",
+      minAmount: "1000",
+      asset: "STX",
+      network: "stacks:2147483648",
+      requestBindingHash: "hash_r1",
+      claimId: "claim_r1",
+    });
+    await instance.clearBoundTx("pay_dead_1");
+    expect(await instance.getTxGuard()).toBeNull();
+
+    const secondClaim = await instance.claimTx({
+      txHash: "tx_retry_1",
+      claimId: "claim_r2",
+      expectedRecipient: "ST_SELLER",
+      minAmount: "1000",
+      asset: "STX",
+      network: "stacks:2147483648",
+      requestBindingHash: "hash_r1",
+    });
+    expect(secondClaim.status).toBe("claimed");
+    if (secondClaim.status === "claimed") {
+      expect(secondClaim.record.failedAttempts).toBe(1);
+    }
+
+    await instance.bindTxPayment({
+      txHash: "tx_retry_1",
+      relayPaymentId: "pay_dead_2",
+      expectedRecipient: "ST_SELLER",
+      minAmount: "1000",
+      asset: "STX",
+      network: "stacks:2147483648",
+      requestBindingHash: "hash_r1",
+      claimId: "claim_r2",
+    });
+    await instance.clearBoundTx("pay_dead_2");
+
+    const thirdClaim = await instance.claimTx({
+      txHash: "tx_retry_1",
+      claimId: "claim_r3",
+      expectedRecipient: "ST_SELLER",
+      minAmount: "1000",
+      asset: "STX",
+      network: "stacks:2147483648",
+      requestBindingHash: "hash_r1",
+    });
+    expect(thirdClaim.status).toBe("claimed");
+    if (thirdClaim.status === "claimed") {
+      expect(thirdClaim.record.failedAttempts).toBe(2);
+    }
+
+    // Release and claim with a different txHash resets failedAttempts tracking to 0
+    await instance.releaseTxClaim("claim_r3");
+    const otherTxClaim = await instance.claimTx({
+      txHash: "tx_retry_other",
+      claimId: "claim_other",
+      expectedRecipient: "ST_SELLER",
+      minAmount: "1000",
+      asset: "STX",
+      network: "stacks:2147483648",
+      requestBindingHash: "hash_other",
+    });
+    expect(otherTxClaim.status).toBe("claimed");
+    if (otherTxClaim.status === "claimed") {
+      expect(otherTxClaim.record.failedAttempts).toBeUndefined();
+    }
+  });
 });

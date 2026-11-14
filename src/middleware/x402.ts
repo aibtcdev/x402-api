@@ -182,6 +182,47 @@ const CONSUMED_PAYMENTS = {
   relayIdByTxHash: new Map<string, string>(),
 };
 
+const FAILED_TX_ATTEMPTS = new Map<string, number>();
+
+function getFailedAttemptCount(txHash: string): number {
+  return txHash ? (FAILED_TX_ATTEMPTS.get(txHash) ?? 0) : 0;
+}
+
+function setFailedAttemptCount(txHash: string, count: number): void {
+  if (!txHash || count <= 0) {
+    return;
+  }
+  if (!FAILED_TX_ATTEMPTS.has(txHash) && FAILED_TX_ATTEMPTS.size >= MAX_BOUND_PAYMENTS_PER_STORE) {
+    const oldest = FAILED_TX_ATTEMPTS.keys().next().value;
+    if (oldest !== undefined) {
+      FAILED_TX_ATTEMPTS.delete(oldest);
+    }
+  }
+  FAILED_TX_ATTEMPTS.set(txHash, count);
+}
+
+function recordTerminalFailure(txHash: string): void {
+  setFailedAttemptCount(txHash, getFailedAttemptCount(txHash) + 1);
+}
+
+function syncFailedAttemptCount(txHash: string, count: number): void {
+  const current = getFailedAttemptCount(txHash);
+  if (count > current) {
+    setFailedAttemptCount(txHash, count);
+  }
+}
+
+async function resolveSettlementAttemptId(
+  baseAttemptId: string,
+  failedAttempts: number
+): Promise<string> {
+  if (failedAttempts <= 0) {
+    return baseAttemptId;
+  }
+  const digest = await sha256Hex(`${baseAttemptId}|retry:${failedAttempts}`);
+  return `pay_${digest.slice(0, 28)}`;
+}
+
 function addBoundedSetEntry(set: Set<string>, value: string): void {
   if (set.has(value)) {
     return;
@@ -257,6 +298,7 @@ function markPaymentConsumed(
   isRelayMintedPaymentId = true
 ): void {
   if (txHash) {
+    FAILED_TX_ATTEMPTS.delete(txHash);
     addBoundedSetEntry(CONSUMED_PAYMENTS.byTxHash, txHash);
   }
   if (relayPaymentId && relayPaymentId.startsWith("pay_")) {
@@ -1204,8 +1246,12 @@ export function x402Middleware(
       paymentRequirements.amount,
       asset
     );
-    const settlementAttemptId = callerSuppliedPaymentId ?? requestCorrelationId;
+    const baseSettlementAttemptId = callerSuppliedPaymentId ?? requestCorrelationId;
     const txHash = await sha256Hex(cleanTxHex.toLowerCase());
+    let settlementAttemptId = await resolveSettlementAttemptId(
+      baseSettlementAttemptId,
+      getFailedAttemptCount(txHash)
+    );
 
     // Refuse replay of an already-confirmed and served payment immediately (keyed by txHash; cross-isolate DO is checked below)
     if (isPaymentConsumed(txHash)) {
@@ -1547,6 +1593,18 @@ export function x402Middleware(
             } else {
               heldClaimId = claimId;
               activeHeldClaimId = claimId;
+              if ((claimRes.record.failedAttempts ?? 0) > 0) {
+                syncFailedAttemptCount(txHash, claimRes.record.failedAttempts!);
+                settlementAttemptId = await resolveSettlementAttemptId(
+                  baseSettlementAttemptId,
+                  getFailedAttemptCount(txHash)
+                );
+                canonicalPaymentId = settlementAttemptId;
+                paymentPayload.extensions = {
+                  ...(paymentPayload.extensions ?? {}),
+                  "payment-identifier": { info: { id: settlementAttemptId } },
+                };
+              }
             }
           } else if (c.env.PAYMENT_POLLING_DO) {
             // Fallback for partial mock DO stubs that implement getTxGuard() without claimTx()
@@ -1772,7 +1830,11 @@ export function x402Middleware(
                   markPaymentConsumed(
                     txHash,
                     bindResult.record.relayPaymentId,
-                    bindResult.record.consumedTxid
+                    bindResult.record.consumedTxid,
+                    Boolean(
+                      bindResult.record.relayPaymentId &&
+                      bindResult.record.boundAt != null
+                    )
                   );
                   return respondConsumedPayment(c, {
                     paymentId: bindResult.record.relayPaymentId ?? relayPaymentId,
@@ -1986,6 +2048,7 @@ export function x402Middleware(
             Date.now() - boundEntry.createdAt < NOT_FOUND_ENQUEUE_GRACE_MS;
 
           if (TERMINAL_FAILURE_RPC_STATUSES.has(lastStatus) && !isNotFoundWithinGraceWindow) {
+            recordTerminalFailure(txHash);
             removeBoundPayment(c.env.X402_RELAY, boundEntry);
             await clearBoundTxInDO(c, txHash, relayPaymentId, log);
             const checkRetryable = (latestCheck as { retryable?: boolean } | undefined)?.retryable;
@@ -2218,25 +2281,29 @@ export function x402Middleware(
         ? computeDerivedHints(canonicalStatus ?? "failed", terminalReason)
         : null;
       const settleHints: DerivedHints =
-        derivedHints ??
-        (typeof explicitRetryable === "boolean"
-          ? explicitRetryable
-            ? {
-                retryable: true,
-                retryAfter: classified.retryAfter ?? 5,
-                nextSteps: "retry_later",
-              }
+        explicitRetryable === false
+          ? derivedHints && !derivedHints.retryable
+            ? derivedHints
             : {
                 retryable: false,
                 nextSteps: "start_new_payment",
               }
-          : computeDerivedHints(canonicalStatus ?? "failed", terminalReason) ??
-            hintsFromClassifiedCode(classified));
+          : derivedHints ??
+            (typeof explicitRetryable === "boolean"
+              ? {
+                  retryable: true,
+                  retryAfter: classified.retryAfter ?? 5,
+                  nextSteps: "retry_later",
+                }
+              : computeDerivedHints(canonicalStatus ?? "failed", terminalReason) ??
+                hintsFromClassifiedCode(classified));
 
-      if (settleHints.retryAfter !== undefined) {
-        c.header("Retry-After", String(settleHints.retryAfter));
-      } else if (classified.retryAfter) {
-        c.header("Retry-After", String(classified.retryAfter));
+      if (settleHints.retryable) {
+        if (settleHints.retryAfter !== undefined) {
+          c.header("Retry-After", String(settleHints.retryAfter));
+        } else if (classified.retryAfter) {
+          c.header("Retry-After", String(classified.retryAfter));
+        }
       }
 
       c.header(X402_HEADERS.PAYMENT_RESPONSE, encodeBase64Json(settleHints));

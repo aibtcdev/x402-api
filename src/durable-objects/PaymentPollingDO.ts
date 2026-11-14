@@ -57,6 +57,7 @@ export interface TxGuardRecord {
   boundAt?: number;
   claimId?: string;
   claimExpiresAt?: number;
+  failedAttempts?: number;
   consumed: boolean;
   consumedAt?: number;
   consumedTxid?: string;
@@ -183,6 +184,14 @@ const SCHEMA_SQL = `
     consumed_at                INTEGER,
     consumed_txid              TEXT,
     updated_at                 INTEGER NOT NULL
+  );
+
+  CREATE TABLE IF NOT EXISTS tx_retry_guard (
+    id              INTEGER PRIMARY KEY CHECK (id = 1),
+    tx_hash         TEXT NOT NULL,
+    failed_attempts INTEGER NOT NULL DEFAULT 0,
+    last_failed_id  TEXT,
+    updated_at      INTEGER NOT NULL
   );
 `;
 
@@ -659,7 +668,21 @@ export class PaymentPollingDO extends DurableObject<Env> {
       now
     );
 
-    const record = this._readTxGuard()!;
+    const retryRows = [
+      ...this.sql.exec(
+        "SELECT failed_attempts FROM tx_retry_guard WHERE id = 1 AND tx_hash = ? LIMIT 1",
+        input.txHash
+      ),
+    ];
+    const failedAttempts =
+      retryRows.length > 0
+        ? Number((retryRows[0] as Record<string, unknown>).failed_attempts ?? 0)
+        : 0;
+    const baseRecord = this._readTxGuard()!;
+    const record: TxGuardRecord = {
+      ...baseRecord,
+      ...(failedAttempts > 0 ? { failedAttempts } : {}),
+    };
     await this._scheduleTxGuardAlarm(claimExpiresAt);
     return { status: "claimed", record };
   }
@@ -767,6 +790,24 @@ export class PaymentPollingDO extends DurableObject<Env> {
     const existing = this._readTxGuard();
     if (!existing || existing.consumed) return;
     if (existing.relayPaymentId !== expectedRelayPaymentId) return;
+    const now = Date.now();
+    this.sql.exec(
+      `
+      INSERT INTO tx_retry_guard (id, tx_hash, failed_attempts, last_failed_id, updated_at)
+      VALUES (1, ?, 1, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET
+        failed_attempts = CASE
+          WHEN tx_retry_guard.tx_hash = excluded.tx_hash THEN tx_retry_guard.failed_attempts + 1
+          ELSE 1
+        END,
+        tx_hash         = excluded.tx_hash,
+        last_failed_id  = excluded.last_failed_id,
+        updated_at      = excluded.updated_at
+      `,
+      existing.txHash,
+      expectedRelayPaymentId,
+      now
+    );
     this.sql.exec(
       "DELETE FROM tx_guard WHERE id = 1 AND consumed = 0 AND relay_payment_id = ?",
       expectedRelayPaymentId
@@ -817,7 +858,7 @@ export class PaymentPollingDO extends DurableObject<Env> {
       input.asset ?? null,
       input.network ?? null,
       input.verifiedPayer ?? null,
-      existing?.boundAt ?? now,
+      existing?.boundAt ?? null,
       now,
       input.txid ?? null,
       now

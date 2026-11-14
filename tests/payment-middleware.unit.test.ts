@@ -3407,4 +3407,392 @@ describe("x402Middleware — RPC enqueue vs confirmed settlement, relay ID recov
     expect(bindTxPaymentCalls).toBe(1);
     expect(markTxConsumedCalls).toBe(1);
   });
+
+  test("retry after terminal RPC failure uses a fresh settlementAttemptId and bypasses relay PaymentIdService 300s cache", async () => {
+    const txHex = await buildSignedTxHex({ sponsored: true, nonce: 912n });
+    const clientStickyId = "pay_client_sticky_912";
+    const seenPaymentIds: string[] = [];
+    const relayCache = new Map<string, string>();
+    let nextRelaySeq = 0;
+
+    const harness = createTestHarness({
+      async submitPayment(_tx, _opts, paymentIdentifier) {
+        expect(paymentIdentifier).toBeDefined();
+        seenPaymentIds.push(paymentIdentifier!);
+        const existing = relayCache.get(paymentIdentifier!);
+        if (existing) {
+          return { accepted: true, status: "queued", paymentId: existing };
+        }
+        nextRelaySeq += 1;
+        const relayId = nextRelaySeq === 1 ? "pay_dead_912" : `pay_fresh_${nextRelaySeq}`;
+        relayCache.set(paymentIdentifier!, relayId);
+        return { accepted: true, status: "queued", paymentId: relayId };
+      },
+      async checkPayment(paymentId: string) {
+        if (paymentId === "pay_dead_912") {
+          return {
+            paymentId,
+            status: "failed",
+            terminalReason: "internal_error",
+          };
+        }
+        return {
+          paymentId,
+          status: "confirmed",
+          txid: "0x9120912091209120912091209120912091209120912091209120912091209120",
+          payer: TEST_BUYER_ADDRESS,
+        };
+      },
+    });
+
+    const sig = encodePaymentSignature({
+      x402Version: 2,
+      extensions: { "payment-identifier": { info: { id: clientStickyId } } },
+      payload: { transaction: txHex },
+    });
+
+    // Attempt 1 fails terminally after enqueue (internal_error hints retry_later)
+    const failRes = await harness.app.request(
+      "http://localhost/paid",
+      {
+        method: "POST",
+        headers: {
+          [X402_HEADERS.PAYMENT_SIGNATURE]: sig,
+          "X-PAYMENT-ID": clientStickyId,
+        },
+      },
+      harness.env
+    );
+    expect(failRes.status).toBe(402);
+    expect(seenPaymentIds[0]).toBe(clientStickyId);
+
+    // Retry with exact same signed tx + caller X-PAYMENT-ID must mint a fresh settlementAttemptId (not cached pay_dead_912)
+    const retryRes = await harness.app.request(
+      "http://localhost/paid",
+      {
+        method: "POST",
+        headers: {
+          [X402_HEADERS.PAYMENT_SIGNATURE]: sig,
+          "X-PAYMENT-ID": clientStickyId,
+        },
+      },
+      harness.env
+    );
+    expect(retryRes.status).toBe(200);
+    expect(seenPaymentIds.length).toBe(2);
+    expect(seenPaymentIds[1]).toMatch(/^pay_[0-9a-f]{28}$/);
+    expect(seenPaymentIds[1]).not.toBe(seenPaymentIds[0]);
+    expect(retryRes.headers.get("X-PAYMENT-ID")).toBe("pay_fresh_2");
+    expect(harness.getHandlerCount()).toBe(1);
+
+    // Cold-isolate sync via DO claimTx.failedAttempts: when DO reports failedAttempts > isolate count, middleware refreshes attempt ID
+    const freshTxHex = await buildSignedTxHex({ sponsored: true, nonce: 913n });
+    const coldSeenIds: string[] = [];
+    const coldHarness = createTestHarness({
+      async submitPayment(_tx, _opts, paymentIdentifier) {
+        if (paymentIdentifier) coldSeenIds.push(paymentIdentifier);
+        return { accepted: true, status: "queued", paymentId: "pay_cold_fresh_913" };
+      },
+      async checkPayment(paymentId: string) {
+        return {
+          paymentId,
+          status: "confirmed",
+          txid: "0x9130913091309130913091309130913091309130913091309130913091309130",
+          payer: TEST_BUYER_ADDRESS,
+        };
+      },
+    });
+    (coldHarness.env as unknown as Record<string, unknown>).PAYMENT_POLLING_DO = {
+      idFromName(name: string) {
+        return name as unknown as DurableObjectId;
+      },
+      get() {
+        return {
+          async track() {},
+          async claimTx(input: ClaimTxInput): Promise<ClaimTxResult> {
+            return {
+              status: "claimed",
+              record: {
+                txHash: input.txHash,
+                claimId: input.claimId,
+                failedAttempts: 1,
+                consumed: false,
+                updatedAt: Date.now(),
+              },
+            };
+          },
+          async bindTxPayment(input: BindTxPaymentInput) {
+            return {
+              ...input,
+              boundAt: Date.now(),
+              consumed: false,
+              updatedAt: Date.now(),
+            };
+          },
+          async markTxConsumed(input: MarkTxConsumedInput) {
+            return {
+              alreadyConsumed: false,
+              record: { txHash: input.txHash, relayPaymentId: input.relayPaymentId, consumed: true, updatedAt: Date.now() },
+            };
+          },
+        };
+      },
+    } as unknown as Env["PAYMENT_POLLING_DO"];
+
+    const baseCorrId = await deriveRequestCorrelationId(
+      freshTxHex.replace(/^0x/, ""),
+      TEST_SELLER_ADDRESS,
+      "1000",
+      "STX"
+    );
+    const coldSig = encodePaymentSignature({ x402Version: 2, payload: { transaction: freshTxHex } });
+    const coldRes = await coldHarness.app.request(
+      "http://localhost/paid",
+      { method: "POST", headers: { [X402_HEADERS.PAYMENT_SIGNATURE]: coldSig } },
+      coldHarness.env
+    );
+    expect(coldRes.status).toBe(200);
+    expect(coldSeenIds.length).toBe(1);
+    expect(coldSeenIds[0]).toMatch(/^pay_[0-9a-f]{28}$/);
+    expect(coldSeenIds[0]).not.toBe(baseCorrId);
+  });
+
+  test("HTTP markTxConsumed with undefined boundAt does not poison CONSUMED_PAYMENTS.byRelayId during cross-isolate hydration", async () => {
+    const originalSettle = X402PaymentVerifier.prototype.settle;
+    let settleSeq = 0;
+    X402PaymentVerifier.prototype.settle = async function () {
+      settleSeq += 1;
+      return {
+        success: true,
+        transaction: `0x914${settleSeq}`.padEnd(66, "c"),
+        network: "stacks:2147483648",
+        payer: TEST_BUYER_ADDRESS,
+      } as never;
+    };
+
+    try {
+      const store = new Map<string, TxGuardRecord>();
+      const doNamespace = {
+        idFromName(name: string) {
+          return name as unknown as DurableObjectId;
+        },
+        get(id: DurableObjectId) {
+          const key = String(id);
+          return {
+            async track() {},
+            async getTxGuard() {
+              return store.get(key) ?? null;
+            },
+            async claimTx(input: ClaimTxInput): Promise<ClaimTxResult> {
+              const existing = store.get(key);
+              if (existing?.consumed) return { status: "consumed", record: existing };
+              return {
+                status: "claimed",
+                record: { txHash: input.txHash, claimId: input.claimId, consumed: false, updatedAt: Date.now() },
+              };
+            },
+            async bindTxPayment() {
+              throw new Error("unused");
+            },
+            async markTxConsumed(input: MarkTxConsumedInput) {
+              const existing = store.get(key);
+              const rec: TxGuardRecord = {
+                ...existing,
+                txHash: input.txHash,
+                relayPaymentId: input.relayPaymentId,
+                callerSuppliedPaymentId: input.callerSuppliedPaymentId,
+                boundAt: existing?.boundAt,
+                consumed: true,
+                consumedTxid: input.txid,
+                consumedAt: Date.now(),
+                updatedAt: Date.now(),
+              };
+              store.set(key, rec);
+              return { alreadyConsumed: false, record: rec };
+            },
+          };
+        },
+      } as unknown as Env["PAYMENT_POLLING_DO"];
+
+      const callerChosenId = "pay_caller_http_hydrate_914";
+      const tx1Hex = await buildSignedTxHex({ sponsored: true, nonce: 914n });
+      const sig1 = encodePaymentSignature({ x402Version: 2, payload: { transaction: tx1Hex } });
+
+      // Isolate 1 settles tx1 on HTTP path -> markTxConsumed records boundAt=undefined
+      const iso1 = createTestHarness();
+      (iso1.env as unknown as Record<string, unknown>).X402_RELAY = undefined;
+      (iso1.env as unknown as Record<string, unknown>).PAYMENT_POLLING_DO = doNamespace;
+
+      const res1 = await iso1.app.request(
+        "http://localhost/paid",
+        {
+          method: "POST",
+          headers: {
+            [X402_HEADERS.PAYMENT_SIGNATURE]: sig1,
+            "X-PAYMENT-ID": callerChosenId,
+          },
+        },
+        iso1.env
+      );
+      expect(res1.status).toBe(200);
+
+      // Replay tx1 with a different tx hash check bypassed only via new nonce? Wait: replay tx1 via another route/RPC
+      // Force cross-isolate DO hydration of consumed tx1 on iso2
+      const iso2 = createTestHarness({
+        async submitPayment() {
+          throw new Error("should stop at DO consumed check");
+        },
+        async checkPayment(paymentId: string) {
+          return { paymentId, status: "queued" };
+        },
+      });
+      (iso2.env as unknown as Record<string, unknown>).PAYMENT_POLLING_DO = doNamespace;
+
+      const replayRes = await iso2.app.request(
+        "http://localhost/paid",
+        {
+          method: "POST",
+          headers: {
+            [X402_HEADERS.PAYMENT_SIGNATURE]: sig1,
+            "X-PAYMENT-ID": callerChosenId,
+          },
+        },
+        iso2.env
+      );
+      expect(replayRes.status).toBe(402);
+
+      // Brand-new tx2 reusing the same callerChosenId must NOT be rejected by entry CONSUMED_PAYMENTS.byRelayId check
+      const tx2Hex = await buildSignedTxHex({ sponsored: true, nonce: 915n });
+      const sig2 = encodePaymentSignature({ x402Version: 2, payload: { transaction: tx2Hex } });
+      const res2 = await iso1.app.request(
+        "http://localhost/paid",
+        {
+          method: "POST",
+          headers: {
+            [X402_HEADERS.PAYMENT_SIGNATURE]: sig2,
+            "X-PAYMENT-ID": callerChosenId,
+          },
+        },
+        iso1.env
+      );
+      expect(res2.status).toBe(200);
+      expect(iso1.getHandlerCount()).toBe(2);
+    } finally {
+      X402PaymentVerifier.prototype.settle = originalSettle;
+    }
+  });
+
+  test("explicit retryable=false from relay overrides retryable computeDerivedHints defaults and omits Retry-After", async () => {
+    // 1. Pre-enqueue rejection with INTERNAL_ERROR and retryable: false
+    const tx1Hex = await buildSignedTxHex({ sponsored: true, nonce: 916n });
+    const submitRejectHarness = createTestHarness({
+      async submitPayment() {
+        return {
+          accepted: false,
+          code: "INTERNAL_ERROR",
+          retryable: false,
+          error: "Permanent internal error",
+        } as never;
+      },
+      async checkPayment(paymentId: string) {
+        return { paymentId, status: "not_found" };
+      },
+    });
+    const resPre = await submitRejectHarness.app.request(
+      "http://localhost/paid",
+      {
+        method: "POST",
+        headers: {
+          [X402_HEADERS.PAYMENT_SIGNATURE]: encodePaymentSignature({
+            x402Version: 2,
+            payload: { transaction: tx1Hex },
+          }),
+        },
+      },
+      submitRejectHarness.env
+    );
+    expect(resPre.status).toBe(402);
+    expect(resPre.headers.get("Retry-After")).toBeNull();
+    const bodyPre = (await resPre.json()) as Record<string, unknown>;
+    expect(bodyPre.code).toBe(X402_ERROR_CODES.TRANSACTION_FAILED);
+    expect(bodyPre.terminalReason).toBe("internal_error");
+    expect(bodyPre.retryable).toBe(false);
+    expect(bodyPre.nextSteps).toBe("start_new_payment");
+    expect(bodyPre.retryAfter).toBeUndefined();
+
+    // 2. Post-enqueue terminal failure from checkPayment with terminalReason: internal_error and retryable: false
+    const tx2Hex = await buildSignedTxHex({ sponsored: true, nonce: 917n });
+    const pollRejectHarness = createTestHarness({
+      async submitPayment() {
+        return {
+          accepted: true,
+          status: "queued",
+          paymentId: "pay_nonretry_poll_917",
+        };
+      },
+      async checkPayment(paymentId: string) {
+        return {
+          paymentId,
+          status: "failed",
+          terminalReason: "internal_error",
+          retryable: false,
+        } as never;
+      },
+    });
+    const resPoll = await pollRejectHarness.app.request(
+      "http://localhost/paid",
+      {
+        method: "POST",
+        headers: {
+          [X402_HEADERS.PAYMENT_SIGNATURE]: encodePaymentSignature({
+            x402Version: 2,
+            payload: { transaction: tx2Hex },
+          }),
+        },
+      },
+      pollRejectHarness.env
+    );
+    expect(resPoll.status).toBe(402);
+    expect(resPoll.headers.get("Retry-After")).toBeNull();
+    const bodyPoll = (await resPoll.json()) as Record<string, unknown>;
+    expect(bodyPoll.code).toBe(X402_ERROR_CODES.TRANSACTION_FAILED);
+    expect(bodyPoll.terminalReason).toBe("internal_error");
+    expect(bodyPoll.retryable).toBe(false);
+    expect(bodyPoll.nextSteps).toBe("start_new_payment");
+    expect(bodyPoll.retryAfter).toBeUndefined();
+
+    // 3. Preserves non-retryable specific nextSteps (fix_and_resend) when derivedHints already has retryable=false
+    const tx3Hex = await buildSignedTxHex({ sponsored: true, nonce: 918n });
+    const invalidHarness = createTestHarness({
+      async submitPayment() {
+        return {
+          accepted: false,
+          code: "INVALID_TRANSACTION",
+          retryable: false,
+          error: "Bad signature",
+        } as never;
+      },
+      async checkPayment(paymentId: string) {
+        return { paymentId, status: "not_found" };
+      },
+    });
+    const resInvalid = await invalidHarness.app.request(
+      "http://localhost/paid",
+      {
+        method: "POST",
+        headers: {
+          [X402_HEADERS.PAYMENT_SIGNATURE]: encodePaymentSignature({
+            x402Version: 2,
+            payload: { transaction: tx3Hex },
+          }),
+        },
+      },
+      invalidHarness.env
+    );
+    expect(resInvalid.status).toBe(402);
+    expect(resInvalid.headers.get("Retry-After")).toBeNull();
+    const bodyInvalid = (await resInvalid.json()) as Record<string, unknown>;
+    expect(bodyInvalid.retryable).toBe(false);
+    expect(bodyInvalid.nextSteps).toBe("fix_and_resend");
+  });
 });
