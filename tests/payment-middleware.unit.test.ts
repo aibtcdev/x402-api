@@ -4274,35 +4274,38 @@ describe("x402Middleware — RPC enqueue vs confirmed settlement, relay ID recov
     expect(bodyPoll.nextSteps).toBe("rebuild_and_resign");
   });
 
-  test("preserves bound paymentId and does not bump failed_attempts when checkPayment reports failed with retryable: true", async () => {
+  test("clears dead bound paymentId, rotates settlementAttemptId on resubmit when checkPayment reports failed with retryable: true, and never overrides non-retryable derived hints", async () => {
     const txHex = await buildSignedTxHex({ sponsored: true, nonce: 7906n });
     const clientStickyId = "pay_client_sticky_7906";
     const submitCalls: string[] = [];
     const checkCalls: string[] = [];
     let clearBoundCount = 0;
-    let checkAttempt = 0;
+    let failedAttemptsInDO = 0;
+    let submitAttempt = 0;
     const store = new Map<string, TxGuardRecord>();
 
     const harness = createTestHarness({
       async submitPayment(_tx, _opts, paymentIdentifier) {
+        submitAttempt += 1;
         submitCalls.push(paymentIdentifier ?? "");
         return {
           accepted: true,
-          paymentId: "pay_live_kv_blip_7906",
+          paymentId: submitAttempt === 1 ? "pay_exhausted_dead_7906" : "pay_resubmitted_fresh_7906",
           status: "queued",
         };
       },
       async checkPayment(paymentId: string) {
         checkCalls.push(paymentId);
-        checkAttempt += 1;
-        if (checkAttempt === 1) {
-          // Relay KV briefly unavailable during checkPayment -> retryable: true
+        if (paymentId === "pay_exhausted_dead_7906") {
+          // Matches relay `finalizeExhaustedPayment`: terminal failed + retryable: true
+          // ("releases that dedup so the agent can cleanly resubmit").
           return {
             paymentId,
             status: "failed",
             terminalReason: "internal_error",
+            errorCode: "BROADCAST_EXHAUSTED",
             retryable: true,
-            error: "Storage not configured",
+            error: "Broadcast exhausted",
           };
         }
         return {
@@ -4323,7 +4326,18 @@ describe("x402Middleware — RPC enqueue vs confirmed settlement, relay ID recov
         return {
           async track() {},
           async getTxGuard() {
-            return store.get(key) ?? null;
+            const existing = store.get(key);
+            if (!existing) {
+              return failedAttemptsInDO > 0
+                ? ({
+                    txHash: key.replace(/^tx:/, ""),
+                    failedAttempts: failedAttemptsInDO,
+                    consumed: false,
+                    updatedAt: Date.now(),
+                  } as TxGuardRecord)
+                : null;
+            }
+            return existing;
           },
           async claimTx(input: ClaimTxInput): Promise<ClaimTxResult> {
             const existing = store.get(key);
@@ -4332,8 +4346,7 @@ describe("x402Middleware — RPC enqueue vs confirmed settlement, relay ID recov
             const rec: TxGuardRecord = {
               txHash: input.txHash,
               claimId: input.claimId,
-              claimedAt: Date.now(),
-              failedAttempts: 0,
+              failedAttempts: failedAttemptsInDO,
               consumed: false,
               expectedRecipient: input.expectedRecipient,
               minAmount: input.minAmount,
@@ -4351,7 +4364,7 @@ describe("x402Middleware — RPC enqueue vs confirmed settlement, relay ID recov
               txHash: input.txHash,
               relayPaymentId: input.relayPaymentId,
               callerSuppliedPaymentId: input.callerSuppliedPaymentId,
-              failedAttempts: 0,
+              failedAttempts: failedAttemptsInDO,
               consumed: false,
               expectedRecipient: input.expectedRecipient,
               minAmount: input.minAmount,
@@ -4365,8 +4378,11 @@ describe("x402Middleware — RPC enqueue vs confirmed settlement, relay ID recov
             store.set(key, rec);
             return rec;
           },
-          async clearBoundTx() {
+          async clearBoundTx(_relayPaymentId: string, reason?: string) {
             clearBoundCount += 1;
+            if (reason !== "payer_mismatch") {
+              failedAttemptsInDO += 1;
+            }
             store.delete(key);
             return true;
           },
@@ -4393,8 +4409,8 @@ describe("x402Middleware — RPC enqueue vs confirmed settlement, relay ID recov
       payload: { transaction: txHex },
     });
 
-    // Attempt 1: checkPayment reports failed + internal_error + retryable: true
-    // Must preserve bound paymentId (clearBoundTx NOT called) and guide bounded same-payment retry
+    // Attempt 1: checkPayment reports terminal failed + internal_error + BROADCAST_EXHAUSTED + retryable: true
+    // Middleware MUST clear the dead bound paymentId, record terminal failure, and log start_new_payment (never reuse_same_payment)
     const res1 = await harness.app.request(
       "http://localhost/paid",
       {
@@ -4408,37 +4424,77 @@ describe("x402Middleware — RPC enqueue vs confirmed settlement, relay ID recov
     );
     expect(res1.status).toBe(402);
     expect(res1.headers.get("Retry-After")).toBe("30");
-    expect(res1.headers.get("X-PAYMENT-ID")).toBe("pay_live_kv_blip_7906");
+    expect(res1.headers.get("X-PAYMENT-ID")).toBe("pay_exhausted_dead_7906");
     const body1 = (await res1.json()) as Record<string, unknown>;
-    expect(body1.paymentId).toBe("pay_live_kv_blip_7906");
+    expect(body1.paymentId).toBe("pay_exhausted_dead_7906");
     expect(body1.terminalReason).toBe("internal_error");
     expect(body1.retryable).toBe(true);
     expect(body1.nextSteps).toBe("retry_later");
-    expect(clearBoundCount).toBe(0);
+    expect(clearBoundCount).toBe(1);
+    expect(failedAttemptsInDO).toBe(1);
     expect(submitCalls).toEqual([clientStickyId]);
+    const failedEvent = harness.events.find((e) => e.message === "payment.failed");
+    expect(failedEvent?.data?.action).toBe("start_new_payment");
 
-    // Attempt 2: bounded retry reuses the EXACT same bound paymentId without calling submitPayment under retry:1
+    // Attempt 2: client resubmits cleanly -> settlementAttemptId rotates (`|retry:1`) and mints a fresh relayPaymentId
     const res2 = await harness.app.request(
       "http://localhost/paid",
       {
         method: "POST",
         headers: {
           [X402_HEADERS.PAYMENT_SIGNATURE]: sig,
-          "X-PAYMENT-ID": "pay_live_kv_blip_7906",
+          "X-PAYMENT-ID": clientStickyId,
         },
       },
       harness.env
     );
     expect(res2.status).toBe(200);
-    expect(submitCalls.length).toBe(1); // Zero resubmit under retry:1!
-    expect(checkCalls).toEqual(["pay_live_kv_blip_7906", "pay_live_kv_blip_7906"]);
+    expect(submitCalls.length).toBe(2);
+    expect(submitCalls[1]).not.toBe(clientStickyId);
+    expect(submitCalls[1].startsWith("pay_")).toBe(true);
+    expect(checkCalls).toEqual(["pay_exhausted_dead_7906", "pay_resubmitted_fresh_7906"]);
     expect(harness.getHandlerCount()).toBe(1);
 
-    // Also verify explicit retryable: true without terminalReason overrides non-retryable default hints
-    const untypedTx = await buildSignedTxHex({ sponsored: true, nonce: 7907n });
+    // Non-retryable derived hints (e.g. invalid_transaction -> fix_and_resend) MUST win even if retryable: true is erroneously passed
+    const invalidTx = await buildSignedTxHex({ sponsored: true, nonce: 7907n });
+    const invalidHarness = createTestHarness({
+      async submitPayment() {
+        return {
+          accepted: false,
+          code: "INVALID_TRANSACTION",
+          retryable: true,
+          error: "Malformed signature despite erroneous retryable=true",
+        };
+      },
+      async checkPayment(paymentId: string) {
+        return { paymentId, status: "not_found" };
+      },
+    });
+    const resInvalid = await invalidHarness.app.request(
+      "http://localhost/paid",
+      {
+        method: "POST",
+        headers: {
+          [X402_HEADERS.PAYMENT_SIGNATURE]: encodePaymentSignature({
+            x402Version: 2,
+            payload: { transaction: invalidTx },
+          }),
+        },
+      },
+      invalidHarness.env
+    );
+    expect(resInvalid.status).toBe(402);
+    expect(resInvalid.headers.get("Retry-After")).toBeNull();
+    const bodyInvalid = (await resInvalid.json()) as Record<string, unknown>;
+    expect(bodyInvalid.terminalReason).toBe("invalid_transaction");
+    expect(bodyInvalid.retryable).toBe(false);
+    expect(bodyInvalid.nextSteps).toBe("fix_and_resend");
+
+    // Explicit retryable: true without a terminalReason still overrides non-retryable default hints
+    const untypedTx = await buildSignedTxHex({ sponsored: true, nonce: 7920n });
     const untypedHarness = createTestHarness({
       async submitPayment() {
-        return { accepted: true, paymentId: "pay_untyped_retry_7907", status: "queued" };
+        return { accepted: true, paymentId: "pay_untyped_retry_7920", status: "queued" };
       },
       async checkPayment(paymentId: string) {
         return { paymentId, status: "failed", retryable: true, error: "Temporary KV timeout" };

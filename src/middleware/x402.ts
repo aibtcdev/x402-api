@@ -32,8 +32,11 @@ import {
   AuthType,
 } from "@stacks/transactions";
 import { stripHexPrefix } from "../utils/encoding";
-import { TERMINAL_REASON_TO_CATEGORY } from "../services/payment-contract";
-import type { SettleResult, TerminalReason } from "../services/payment-contract";
+import type {
+  RpcErrorCode,
+  SettleResult,
+  TerminalReason,
+} from "../services/payment-contract";
 import type {
   TxGuardRecord,
   ClaimTxInput,
@@ -68,7 +71,10 @@ import {
 } from "../utils/payment-observability";
 import { computeDerivedHints } from "../utils/payment-hints";
 import type { DerivedHints } from "../utils/payment-hints";
-import { NOT_FOUND_ENQUEUE_GRACE_MS } from "../utils/payment-status";
+import {
+  isRelayRetryableTerminalReason,
+  NOT_FOUND_ENQUEUE_GRACE_MS,
+} from "../utils/payment-status";
 
 export { NOT_FOUND_ENQUEUE_GRACE_MS };
 
@@ -144,39 +150,49 @@ const TERMINAL_FAILURE_RPC_STATUSES = new Set([
   "not_found",
 ]);
 
-const RPC_CODE_TO_TERMINAL_REASON: Partial<Record<string, TerminalReason>> = {
+const RPC_CODE_TO_TERMINAL_REASON: Record<RpcErrorCode, TerminalReason | null> = {
   INVALID_TRANSACTION: "invalid_transaction",
-  PAYMENT_MISMATCH: "invalid_transaction",
   NOT_SPONSORED: "not_sponsored",
   SENDER_NONCE_STALE: "sender_nonce_stale",
   SENDER_NONCE_DUPLICATE: "sender_nonce_duplicate",
-  SENDER_NONCE_CONFLICT: "sender_nonce_duplicate",
-  CLIENT_NONCE_CONFLICT: "sender_nonce_duplicate",
-  CLIENT_BAD_NONCE: "sender_nonce_stale",
-  NONCE_OCCUPIED: "sender_nonce_duplicate",
   SENDER_NONCE_GAP: "sender_nonce_gap",
-  ORIGIN_CHAINING_LIMIT: "origin_chaining_limit",
-  TOO_MUCH_CHAINING: "origin_chaining_limit",
-  QUEUE_UNAVAILABLE: "queue_unavailable",
-  SPONSOR_FAILURE: "sponsor_failure",
-  SERVICE_DEGRADED: "sponsor_failure",
-  NONCE_DO_UNAVAILABLE: "sponsor_failure",
-  LOW_HEADROOM: "sponsor_failure",
-  SPONSOR_EXHAUSTED: "sponsor_exhausted",
-  SPONSOR_NONCE_CONFLICT: "sponsor_nonce_conflict",
+  NONCE_CONFLICT: "sponsor_nonce_conflict",
   SPONSOR_NONCE_STALE: "sponsor_nonce_conflict",
   SPONSOR_NONCE_DUPLICATE: "sponsor_nonce_conflict",
-  NONCE_CONFLICT: "sponsor_nonce_conflict",
-  INTERNAL_ERROR: "internal_error",
   BROADCAST_FAILED: "broadcast_failure",
   TX_BROADCAST_ERROR: "broadcast_failure",
-  BROADCAST_RATE_LIMITED: "broadcast_rate_limited",
-  RATE_LIMITED: "broadcast_rate_limited",
-  RATE_LIMIT_EXCEEDED: "broadcast_rate_limited",
   SETTLEMENT_FAILED: "chain_abort",
-  PAYMENT_IDENTIFIER_CONFLICT: "unknown_payment_identity",
+  INTERNAL_ERROR: "internal_error",
+  // Wallet balance rejection maps directly to 402 X402_ERROR_CODES.INSUFFICIENT_FUNDS rather than a TerminalReason.
+  INSUFFICIENT_FUNDS: null,
+  CLIENT_NONCE_CONFLICT: "sender_nonce_duplicate",
+  CLIENT_BAD_NONCE: "sender_nonce_stale",
+  TOO_MUCH_CHAINING: "origin_chaining_limit",
+  SPONSOR_EXHAUSTED: "sponsor_exhausted",
+  ORIGIN_CHAINING_LIMIT: "origin_chaining_limit",
+  BROADCAST_RATE_LIMITED: "broadcast_rate_limited",
   SENDER_HAND_EXPIRED: "sender_hand_expired",
+  NONCE_OCCUPIED: "sender_nonce_duplicate",
+  PAYMENT_IDENTIFIER_CONFLICT: "unknown_payment_identity",
 };
+
+/**
+ * Compatibility fallback for relay error codes emitted before they are added to
+ * `@aibtc/tx-schemas` `RPC_ERROR_CODES` (e.g. `QUEUE_UNAVAILABLE` pre-enqueue
+ * backpressure or `BROADCAST_EXHAUSTED` from `finalizeExhaustedPayment`).
+ */
+const COMPAT_RELAY_CODE_TO_TERMINAL_REASON: Partial<Record<string, TerminalReason>> = {
+  QUEUE_UNAVAILABLE: "queue_unavailable",
+  BROADCAST_EXHAUSTED: "broadcast_failure",
+};
+
+function mapRelayErrorCodeToTerminalReason(code: string | undefined): TerminalReason | undefined {
+  if (!code) return undefined;
+  if (Object.hasOwn(RPC_CODE_TO_TERMINAL_REASON, code)) {
+    return RPC_CODE_TO_TERMINAL_REASON[code as RpcErrorCode] ?? undefined;
+  }
+  return COMPAT_RELAY_CODE_TO_TERMINAL_REASON[code];
+}
 
 const BOUND_RPC_STORES = new WeakMap<object, RelayBoundStore>();
 
@@ -929,10 +945,7 @@ export function classifyPaymentError(error: unknown, settleResult?: Partial<Sett
         (settleResult as { errorReason?: string }).errorReason)
     : undefined;
   const normalizedCode = rawErrorCode?.toUpperCase();
-  if (
-    normalizedCode === "INSUFFICIENT_FUNDS" ||
-    normalizedCode === "CLIENT_INSUFFICIENT_FUNDS"
-  ) {
+  if (normalizedCode === "INSUFFICIENT_FUNDS") {
     return {
       code: X402_ERROR_CODES.INSUFFICIENT_FUNDS,
       message: "Insufficient funds in wallet",
@@ -956,16 +969,17 @@ export function classifyPaymentError(error: unknown, settleResult?: Partial<Sett
   const settleRetryable = settleResult && "retryable" in settleResult
     ? (settleResult as { retryable?: boolean }).retryable
     : undefined;
-  if (settleTerminalReason && settleRetryable !== false) {
-    const category = TERMINAL_REASON_TO_CATEGORY[settleTerminalReason];
-    if (category === "relay" || category === "settlement") {
-      return {
-        code: X402_ERROR_CODES.UNEXPECTED_SETTLE_ERROR,
-        message: "Settlement relay temporarily unavailable, please retry",
-        httpStatus: 503,
-        retryAfter: 30,
-      };
-    }
+  if (
+    settleTerminalReason &&
+    settleRetryable !== false &&
+    isRelayRetryableTerminalReason(settleTerminalReason)
+  ) {
+    return {
+      code: X402_ERROR_CODES.UNEXPECTED_SETTLE_ERROR,
+      message: "Settlement relay temporarily unavailable, please retry",
+      httpStatus: 503,
+      retryAfter: 30,
+    };
   }
 
   // Legacy string-heuristic fallback — used when relay does not return canonical status.
@@ -1810,15 +1824,10 @@ export function x402Middleware(
                 if (heldClaimId) {
                   await releaseTxClaimInDO(c, txHash, heldClaimId, log);
                 }
-                const mappedTerminalReason = rpcResult.code
-                  ? RPC_CODE_TO_TERMINAL_REASON[rpcResult.code]
-                  : undefined;
-                const mappedCategory = mappedTerminalReason
-                  ? TERMINAL_REASON_TO_CATEGORY[mappedTerminalReason]
-                  : undefined;
+                const mappedTerminalReason = mapRelayErrorCodeToTerminalReason(rpcResult.code);
                 const isRetryableRelayRejection =
                   rpcResult.retryable !== false &&
-                  (mappedCategory === "relay" || mappedCategory === "settlement");
+                  isRelayRetryableTerminalReason(mappedTerminalReason);
                 settleResult = {
                   success: false,
                   transaction: "",
@@ -2152,36 +2161,26 @@ export function x402Middleware(
             const checkErrorCode = latestCheck?.errorCode;
             const checkTerminalReason =
               latestCheck?.terminalReason ??
-              (checkErrorCode ? RPC_CODE_TO_TERMINAL_REASON[checkErrorCode] : undefined);
+              mapRelayErrorCodeToTerminalReason(checkErrorCode);
             const checkRetryable = latestCheck?.retryable;
-            const checkCategory = checkTerminalReason
-              ? TERMINAL_REASON_TO_CATEGORY[checkTerminalReason as TerminalReason]
-              : undefined;
-            // Bounded same-payment retry: when the relay explicitly reports retryable: true
-            // on a relay/settlement (or untyped) failure (e.g. KV briefly unavailable ->
-            // { status: "failed", terminalReason: "internal_error", retryable: true }),
-            // keep the bound paymentId intact rather than clearing tx_guard or rotating to retry:1.
-            const isSamePaymentRetryableFailure =
-              lastStatus === "failed" &&
-              checkRetryable === true &&
-              (checkCategory === undefined ||
-                checkCategory === "relay" ||
-                checkCategory === "settlement");
 
-            if (!isSamePaymentRetryableFailure) {
-              removeBoundPayment(c.env.X402_RELAY, boundEntry);
-              const clearRes = await clearBoundTxInDO(
-                c,
-                txHash,
-                relayPaymentId,
-                "terminal_failure",
-                log
-              );
-              if ("error" in clearRes) {
-                return respondPaymentStoreUnavailable(c);
-              }
-              recordTerminalFailure(txHash, relayPaymentId);
+            // Terminal failure on the relay (`failed`, `replaced`, or post-grace `not_found`)
+            // permanently ends this `relayPaymentId` — including `failed` + `retryable: true`
+            // (e.g. `BROADCAST_EXHAUSTED`), where `retryable: true` signals that relay dedup
+            // was released so the caller may cleanly resubmit under a rotated attempt ID.
+            removeBoundPayment(c.env.X402_RELAY, boundEntry);
+            const clearRes = await clearBoundTxInDO(
+              c,
+              txHash,
+              relayPaymentId,
+              "terminal_failure",
+              log
+            );
+            if ("error" in clearRes) {
+              return respondPaymentStoreUnavailable(c);
             }
+            recordTerminalFailure(txHash, relayPaymentId);
+
             settleResult = {
               success: false,
               transaction: latestCheck?.txid ?? "",
@@ -2191,7 +2190,6 @@ export function x402Middleware(
               ...(checkTerminalReason ? { terminalReason: checkTerminalReason } : {}),
               ...(checkErrorCode ? { errorCode: checkErrorCode } : {}),
               ...(typeof checkRetryable === "boolean" ? { retryable: checkRetryable } : {}),
-              ...(isSamePaymentRetryableFailure ? { samePaymentRetry: true } : {}),
               errorReason: checkErrorCode ?? checkTerminalReason ?? latestCheck?.error ?? lastStatus,
               checkStatusUrl: relayCheckStatusUrl,
             } as unknown as SettleResult;
@@ -2362,9 +2360,6 @@ export function x402Middleware(
         resultPaymentId
       );
 
-      const samePaymentRetry = Boolean(
-        (settleResult as { samePaymentRetry?: boolean }).samePaymentRetry
-      );
       const derivedHints = terminalReason
         ? computeDerivedHints(canonicalStatus ?? "failed", terminalReason)
         : null;
@@ -2376,15 +2371,14 @@ export function x402Middleware(
                 retryable: false,
                 nextSteps: "start_new_payment",
               }
-          : explicitRetryable === true
-            ? derivedHints && derivedHints.retryable
-              ? derivedHints
-              : {
+          : derivedHints ??
+            (explicitRetryable === true
+              ? {
                   retryable: true,
                   retryAfter: classified.retryAfter ?? 5,
                   nextSteps: "retry_later",
                 }
-            : derivedHints ?? hintsFromClassifiedCode(classified);
+              : hintsFromClassifiedCode(classified));
 
       if (classified.code === X402_ERROR_CODES.TRANSACTION_PENDING) {
         logPaymentEvent(log, "info", "payment.pending", {
@@ -2422,7 +2416,7 @@ export function x402Middleware(
           paymentId: resultPaymentId,
           status: "failed",
           checkStatusUrl,
-          action: samePaymentRetry ? "reuse_same_payment" : getRetryAction(classified.code),
+          action: getRetryAction(classified.code),
         }, {
           requestCorrelationId,
           classification_code: classified.code,

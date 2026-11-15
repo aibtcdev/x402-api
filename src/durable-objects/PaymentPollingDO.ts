@@ -19,9 +19,7 @@ import type { Env } from "../types";
 import {
   HttpPaymentStatusResponseSchema,
   RpcCheckPaymentResultSchema,
-  TERMINAL_REASON_TO_CATEGORY,
 } from "../services/payment-contract";
-import type { TerminalReason } from "../services/payment-contract";
 import { computeDerivedHints } from "../utils/payment-hints";
 import type { DerivedHints } from "../utils/payment-hints";
 import { NOT_FOUND_ENQUEUE_GRACE_MS } from "../utils/payment-status";
@@ -344,32 +342,29 @@ export class PaymentPollingDO extends DurableObject<Env> {
           pollCount,
           issues: err.issues,
         });
+        return this._markTerminal(
+          paymentId,
+          "failed",
+          "internal_error",
+          undefined,
+          now,
+          pollCount,
+          checkStatusUrl
+        );
       }
-      // Reschedule alarm and return cached state
+      // Transient transport error: reschedule alarm and return cached state
       await this._reschedule(pollCount);
       return this._readSnapshot(paymentId);
     }
 
-    const { status, terminalReason, txid, confirmedAt, retryable } = statusData;
+    const { status, terminalReason, txid, confirmedAt } = statusData;
     // Treat early `not_found` as non-terminal until KV propagation grace expires
     // so remote edge colos do not freeze an in-flight payment as not_found.
     const withinNotFoundGrace =
       status === "not_found" &&
       Number.isFinite(createdAtMs) &&
       ageMs <= NOT_FOUND_ENQUEUE_GRACE_MS;
-    const reasonCategory = terminalReason
-      ? TERMINAL_REASON_TO_CATEGORY[terminalReason as TerminalReason]
-      : undefined;
-    // When the relay explicitly marks a relay/settlement (or untyped) failure as
-    // retryable: true (e.g. KV briefly unavailable), keep polling the same paymentId
-    // rather than freezing payment_state as terminal.
-    const isRetryableRelayFailure =
-      status === "failed" &&
-      retryable === true &&
-      (reasonCategory === undefined ||
-        reasonCategory === "relay" ||
-        reasonCategory === "settlement");
-    const keepNonTerminal = withinNotFoundGrace || isRetryableRelayFailure;
+    const keepNonTerminal = withinNotFoundGrace;
     const persistedStatus = keepNonTerminal ? ((row.status as string) || "queued") : status;
     const persistedTerminalReason = keepNonTerminal ? undefined : terminalReason;
     const isTerminal = !keepNonTerminal && TERMINAL_STATUSES.has(status) ? 1 : 0;
@@ -482,22 +477,42 @@ export class PaymentPollingDO extends DurableObject<Env> {
     if (this.env.X402_RELAY) {
       const rpcStatus = await this.env.X402_RELAY.checkPayment(paymentId);
       const parsedRpc = RpcCheckPaymentResultSchema.safeParse(rpcStatus);
-      if (!parsedRpc.success) {
-        throw new RelaySchemaMismatchError(
-          "rpc",
-          paymentId,
-          (rpcStatus as { status?: unknown } | null | undefined)?.status,
-          parsedRpc.error.message,
-          parsedRpc.error.issues
-        );
+      if (parsedRpc.success) {
+        return {
+          status: parsedRpc.data.status,
+          terminalReason: parsedRpc.data.terminalReason,
+          txid: parsedRpc.data.txid,
+          confirmedAt: parsedRpc.data.confirmedAt,
+          retryable: parsedRpc.data.retryable,
+        };
       }
-      return {
-        status: parsedRpc.data.status,
-        terminalReason: parsedRpc.data.terminalReason,
-        txid: parsedRpc.data.txid,
-        confirmedAt: parsedRpc.data.confirmedAt,
-        retryable: parsedRpc.data.retryable,
-      };
+
+      // Looser HTTP status schema fallback: preserves confirmed / terminal-failed state
+      // when peripheral RPC fields drift ahead of `@aibtc/tx-schemas` (e.g. a new `errorCode`
+      // such as `BROADCAST_EXHAUSTED` or a non-URL `checkStatusUrl`), while still validating
+      // `paymentId`, `status`, `terminalReason`, and `txid`.
+      const parsedFallback = HttpPaymentStatusResponseSchema.safeParse(rpcStatus);
+      if (parsedFallback.success) {
+        console.warn("[PaymentPollingDO] relay RPC status fell back to HTTP schema:", {
+          paymentId,
+          issues: parsedRpc.error.issues,
+        });
+        return {
+          status: parsedFallback.data.status,
+          terminalReason: parsedFallback.data.terminalReason,
+          txid: parsedFallback.data.txid,
+          confirmedAt: parsedFallback.data.confirmedAt,
+          retryable: parsedFallback.data.retryable,
+        };
+      }
+
+      throw new RelaySchemaMismatchError(
+        "rpc",
+        paymentId,
+        (rpcStatus as { status?: unknown } | null | undefined)?.status,
+        parsedRpc.error.message,
+        parsedRpc.error.issues
+      );
     }
 
     const response = await fetch(checkStatusUrl, {
