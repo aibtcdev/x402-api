@@ -61,6 +61,26 @@ export type {
 } from "@aibtc/tx-schemas/http";
 
 // =============================================================================
+// RPC schemas and types for the X402_RELAY service binding
+// =============================================================================
+
+import type { RPC_ERROR_CODES } from "@aibtc/tx-schemas/rpc";
+
+export {
+  RPC_ERROR_CODES,
+  RpcErrorCodeSchema,
+  RpcSubmitPaymentResultSchema,
+  RpcCheckPaymentResultSchema,
+} from "@aibtc/tx-schemas/rpc";
+
+export type RpcErrorCode = (typeof RPC_ERROR_CODES)[number];
+
+export type {
+  RpcSubmitPaymentResult,
+  RpcCheckPaymentResult,
+} from "@aibtc/tx-schemas/rpc";
+
+// =============================================================================
 // Type alias used by middleware and X402Context
 //
 // HttpSettleResponse is the tx-schemas equivalent of x402-stacks SettlementResponseV2.

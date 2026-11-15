@@ -1,4 +1,6 @@
 import { InFlightPaymentStateSchema } from "@aibtc/tx-schemas/core";
+import { TERMINAL_REASON_TO_CATEGORY } from "../services/payment-contract";
+import type { TerminalReason } from "../services/payment-contract";
 
 /**
  * Grace window after enqueue where KV eventual-consistency `not_found` from a
@@ -64,19 +66,12 @@ export function isInFlightPaymentState(
 }
 
 export function isSenderRebuildTerminalReason(reason: string | undefined): boolean {
-  return (
-    reason === "sender_nonce_stale" ||
-    reason === "sender_nonce_gap" ||
-    reason === "sender_nonce_duplicate"
-  );
+  if (!reason) return false;
+  return TERMINAL_REASON_TO_CATEGORY[reason as TerminalReason] === "sender";
 }
 
 export function isRelayRetryableTerminalReason(reason: string | undefined): boolean {
-  return (
-    reason === "queue_unavailable" ||
-    reason === "sponsor_failure" ||
-    reason === "broadcast_failure" ||
-    reason === "chain_abort" ||
-    reason === "internal_error"
-  );
+  if (!reason) return false;
+  const category = TERMINAL_REASON_TO_CATEGORY[reason as TerminalReason];
+  return category === "relay" || category === "settlement";
 }

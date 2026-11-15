@@ -4196,4 +4196,345 @@ describe("x402Middleware — RPC enqueue vs confirmed settlement, relay ID recov
     expect(seenPaymentIds.length).toBe(2);
     expect(seenPaymentIds[1]).toBe(seenPaymentIds[0]);
   });
+
+  test("maps SENDER_HAND_EXPIRED to canonical sender_hand_expired reason with rebuild_and_resign hints", async () => {
+    // 1. Pre-enqueue rejection with code: SENDER_HAND_EXPIRED
+    const tx1Hex = await buildSignedTxHex({ sponsored: true, nonce: 7904n });
+    const preHarness = createTestHarness({
+      async submitPayment() {
+        return {
+          accepted: false,
+          code: "SENDER_HAND_EXPIRED",
+          retryable: true,
+          error: "Held sender hand entry expired before gap was filled",
+        };
+      },
+      async checkPayment(paymentId: string) {
+        return { paymentId, status: "not_found" };
+      },
+    });
+    const resPre = await preHarness.app.request(
+      "http://localhost/paid",
+      {
+        method: "POST",
+        headers: {
+          [X402_HEADERS.PAYMENT_SIGNATURE]: encodePaymentSignature({
+            x402Version: 2,
+            payload: { transaction: tx1Hex },
+          }),
+        },
+      },
+      preHarness.env
+    );
+    expect(resPre.status).toBe(402);
+    const bodyPre = (await resPre.json()) as Record<string, unknown>;
+    expect(bodyPre.status).toBe("failed");
+    expect(bodyPre.terminalReason).toBe("sender_hand_expired");
+    expect(bodyPre.retryable).toBe(true);
+    expect(bodyPre.nextSteps).toBe("rebuild_and_resign");
+    expect(bodyPre.retryAfter).toBeUndefined();
+
+    // 2. Post-enqueue checkPayment failure with errorCode: SENDER_HAND_EXPIRED (terminalReason derived from code)
+    const tx2Hex = await buildSignedTxHex({ sponsored: true, nonce: 7905n });
+    const pollHarness = createTestHarness({
+      async submitPayment() {
+        return {
+          accepted: true,
+          paymentId: "pay_hand_expired_7905",
+          status: "queued",
+        };
+      },
+      async checkPayment(paymentId: string) {
+        return {
+          paymentId,
+          status: "failed",
+          errorCode: "SENDER_HAND_EXPIRED",
+          error: "Sender hand expired",
+        };
+      },
+    });
+    const resPoll = await pollHarness.app.request(
+      "http://localhost/paid",
+      {
+        method: "POST",
+        headers: {
+          [X402_HEADERS.PAYMENT_SIGNATURE]: encodePaymentSignature({
+            x402Version: 2,
+            payload: { transaction: tx2Hex },
+          }),
+        },
+      },
+      pollHarness.env
+    );
+    expect(resPoll.status).toBe(402);
+    const bodyPoll = (await resPoll.json()) as Record<string, unknown>;
+    expect(bodyPoll.status).toBe("failed");
+    expect(bodyPoll.terminalReason).toBe("sender_hand_expired");
+    expect(bodyPoll.retryable).toBe(true);
+    expect(bodyPoll.nextSteps).toBe("rebuild_and_resign");
+  });
+
+  test("preserves bound paymentId and does not bump failed_attempts when checkPayment reports failed with retryable: true", async () => {
+    const txHex = await buildSignedTxHex({ sponsored: true, nonce: 7906n });
+    const clientStickyId = "pay_client_sticky_7906";
+    const submitCalls: string[] = [];
+    const checkCalls: string[] = [];
+    let clearBoundCount = 0;
+    let checkAttempt = 0;
+    const store = new Map<string, TxGuardRecord>();
+
+    const harness = createTestHarness({
+      async submitPayment(_tx, _opts, paymentIdentifier) {
+        submitCalls.push(paymentIdentifier ?? "");
+        return {
+          accepted: true,
+          paymentId: "pay_live_kv_blip_7906",
+          status: "queued",
+        };
+      },
+      async checkPayment(paymentId: string) {
+        checkCalls.push(paymentId);
+        checkAttempt += 1;
+        if (checkAttempt === 1) {
+          // Relay KV briefly unavailable during checkPayment -> retryable: true
+          return {
+            paymentId,
+            status: "failed",
+            terminalReason: "internal_error",
+            retryable: true,
+            error: "Storage not configured",
+          };
+        }
+        return {
+          paymentId,
+          status: "confirmed",
+          txid: "0x" + "79".repeat(32),
+          payer: TEST_BUYER_ADDRESS,
+        };
+      },
+    });
+
+    (harness.env as unknown as Record<string, unknown>).PAYMENT_POLLING_DO = {
+      idFromName(name: string) {
+        return name as unknown as DurableObjectId;
+      },
+      get(id: DurableObjectId) {
+        const key = String(id);
+        return {
+          async track() {},
+          async getTxGuard() {
+            return store.get(key) ?? null;
+          },
+          async claimTx(input: ClaimTxInput): Promise<ClaimTxResult> {
+            const existing = store.get(key);
+            if (existing?.consumed) return { status: "consumed", record: existing };
+            if (existing?.relayPaymentId) return { status: "bound", record: existing };
+            const rec: TxGuardRecord = {
+              txHash: input.txHash,
+              claimId: input.claimId,
+              claimedAt: Date.now(),
+              failedAttempts: 0,
+              consumed: false,
+              expectedRecipient: input.expectedRecipient,
+              minAmount: input.minAmount,
+              asset: input.asset,
+              network: input.network,
+              verifiedPayer: input.verifiedPayer,
+              requestBindingHash: input.requestBindingHash,
+              updatedAt: Date.now(),
+            };
+            store.set(key, rec);
+            return { status: "claimed", record: rec };
+          },
+          async bindTxPayment(input: BindTxPaymentInput) {
+            const rec: TxGuardRecord = {
+              txHash: input.txHash,
+              relayPaymentId: input.relayPaymentId,
+              callerSuppliedPaymentId: input.callerSuppliedPaymentId,
+              failedAttempts: 0,
+              consumed: false,
+              expectedRecipient: input.expectedRecipient,
+              minAmount: input.minAmount,
+              asset: input.asset,
+              network: input.network,
+              verifiedPayer: input.verifiedPayer,
+              requestBindingHash: input.requestBindingHash,
+              boundAt: input.boundAt ?? Date.now(),
+              updatedAt: Date.now(),
+            };
+            store.set(key, rec);
+            return rec;
+          },
+          async clearBoundTx() {
+            clearBoundCount += 1;
+            store.delete(key);
+            return true;
+          },
+          async markTxConsumed(input: MarkTxConsumedInput) {
+            const existing = store.get(key);
+            const rec: TxGuardRecord = {
+              ...(existing ?? {}),
+              txHash: input.txHash,
+              relayPaymentId: input.relayPaymentId,
+              consumed: true,
+              consumedTxid: input.txid,
+              updatedAt: Date.now(),
+            };
+            store.set(key, rec);
+            return { alreadyConsumed: false, record: rec };
+          },
+        };
+      },
+    } as unknown as Env["PAYMENT_POLLING_DO"];
+
+    const sig = encodePaymentSignature({
+      x402Version: 2,
+      extensions: { "payment-identifier": { info: { id: clientStickyId } } },
+      payload: { transaction: txHex },
+    });
+
+    // Attempt 1: checkPayment reports failed + internal_error + retryable: true
+    // Must preserve bound paymentId (clearBoundTx NOT called) and guide bounded same-payment retry
+    const res1 = await harness.app.request(
+      "http://localhost/paid",
+      {
+        method: "POST",
+        headers: {
+          [X402_HEADERS.PAYMENT_SIGNATURE]: sig,
+          "X-PAYMENT-ID": clientStickyId,
+        },
+      },
+      harness.env
+    );
+    expect(res1.status).toBe(402);
+    expect(res1.headers.get("Retry-After")).toBe("30");
+    expect(res1.headers.get("X-PAYMENT-ID")).toBe("pay_live_kv_blip_7906");
+    const body1 = (await res1.json()) as Record<string, unknown>;
+    expect(body1.paymentId).toBe("pay_live_kv_blip_7906");
+    expect(body1.terminalReason).toBe("internal_error");
+    expect(body1.retryable).toBe(true);
+    expect(body1.nextSteps).toBe("retry_later");
+    expect(clearBoundCount).toBe(0);
+    expect(submitCalls).toEqual([clientStickyId]);
+
+    // Attempt 2: bounded retry reuses the EXACT same bound paymentId without calling submitPayment under retry:1
+    const res2 = await harness.app.request(
+      "http://localhost/paid",
+      {
+        method: "POST",
+        headers: {
+          [X402_HEADERS.PAYMENT_SIGNATURE]: sig,
+          "X-PAYMENT-ID": "pay_live_kv_blip_7906",
+        },
+      },
+      harness.env
+    );
+    expect(res2.status).toBe(200);
+    expect(submitCalls.length).toBe(1); // Zero resubmit under retry:1!
+    expect(checkCalls).toEqual(["pay_live_kv_blip_7906", "pay_live_kv_blip_7906"]);
+    expect(harness.getHandlerCount()).toBe(1);
+
+    // Also verify explicit retryable: true without terminalReason overrides non-retryable default hints
+    const untypedTx = await buildSignedTxHex({ sponsored: true, nonce: 7907n });
+    const untypedHarness = createTestHarness({
+      async submitPayment() {
+        return { accepted: true, paymentId: "pay_untyped_retry_7907", status: "queued" };
+      },
+      async checkPayment(paymentId: string) {
+        return { paymentId, status: "failed", retryable: true, error: "Temporary KV timeout" };
+      },
+    });
+    const resUntyped = await untypedHarness.app.request(
+      "http://localhost/paid",
+      {
+        method: "POST",
+        headers: {
+          [X402_HEADERS.PAYMENT_SIGNATURE]: encodePaymentSignature({
+            x402Version: 2,
+            payload: { transaction: untypedTx },
+          }),
+        },
+      },
+      untypedHarness.env
+    );
+    expect(resUntyped.status).toBe(402);
+    expect(resUntyped.headers.get("Retry-After")).toBe("5");
+    const bodyUntyped = (await resUntyped.json()) as Record<string, unknown>;
+    expect(bodyUntyped.retryable).toBe(true);
+    expect(bodyUntyped.nextSteps).toBe("retry_later");
+  });
+
+  test("maps INSUFFICIENT_FUNDS to 402 insufficient_funds and SPONSOR_NONCE_STALE / SPONSOR_NONCE_DUPLICATE to 503 retry", async () => {
+    // 1. INSUFFICIENT_FUNDS rejection -> 402 INSUFFICIENT_FUNDS (not generic TRANSACTION_FAILED)
+    const txInsuff = await buildSignedTxHex({ sponsored: true, nonce: 7908n });
+    const insuffHarness = createTestHarness({
+      async submitPayment() {
+        return {
+          accepted: false,
+          code: "INSUFFICIENT_FUNDS",
+          retryable: false,
+          error: "Sender token balance below required payment amount",
+        };
+      },
+      async checkPayment(paymentId: string) {
+        return { paymentId, status: "not_found" };
+      },
+    });
+    const resInsuff = await insuffHarness.app.request(
+      "http://localhost/paid",
+      {
+        method: "POST",
+        headers: {
+          [X402_HEADERS.PAYMENT_SIGNATURE]: encodePaymentSignature({
+            x402Version: 2,
+            payload: { transaction: txInsuff },
+          }),
+        },
+      },
+      insuffHarness.env
+    );
+    expect(resInsuff.status).toBe(402);
+    expect(resInsuff.headers.get("Retry-After")).toBeNull();
+    const bodyInsuff = (await resInsuff.json()) as Record<string, unknown>;
+    expect(bodyInsuff.code).toBe(X402_ERROR_CODES.INSUFFICIENT_FUNDS);
+    expect(bodyInsuff.retryable).toBe(false);
+    expect(bodyInsuff.nextSteps).toBe("start_new_payment");
+
+    // 2. SPONSOR_NONCE_STALE & SPONSOR_NONCE_DUPLICATE -> 503 with Retry-After: 30
+    for (const [idx, sponsorCode] of ["SPONSOR_NONCE_STALE", "SPONSOR_NONCE_DUPLICATE"].entries()) {
+      const txSponsor = await buildSignedTxHex({ sponsored: true, nonce: BigInt(7909 + idx) });
+      const sponsorHarness = createTestHarness({
+        async submitPayment() {
+          return {
+            accepted: false,
+            code: sponsorCode,
+            retryable: true,
+            error: `Sponsor wallet ${sponsorCode}`,
+          };
+        },
+        async checkPayment(paymentId: string) {
+          return { paymentId, status: "not_found" };
+        },
+      });
+      const resSponsor = await sponsorHarness.app.request(
+        "http://localhost/paid",
+        {
+          method: "POST",
+          headers: {
+            [X402_HEADERS.PAYMENT_SIGNATURE]: encodePaymentSignature({
+              x402Version: 2,
+              payload: { transaction: txSponsor },
+            }),
+          },
+        },
+        sponsorHarness.env
+      );
+      expect(resSponsor.status).toBe(503);
+      expect(resSponsor.headers.get("Retry-After")).toBe("30");
+      const bodySponsor = (await resSponsor.json()) as Record<string, unknown>;
+      expect(bodySponsor.terminalReason).toBe("sponsor_nonce_conflict");
+      expect(bodySponsor.retryable).toBe(true);
+      expect(bodySponsor.nextSteps).toBe("retry_later");
+    }
+  });
 });

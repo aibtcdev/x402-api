@@ -10,14 +10,21 @@ describe("payment-status classifier predicates", () => {
     expect(isSenderRebuildTerminalReason("sender_nonce_stale")).toBe(true);
     expect(isSenderRebuildTerminalReason("sender_nonce_gap")).toBe(true);
     expect(isSenderRebuildTerminalReason("sender_nonce_duplicate")).toBe(true);
+    expect(isSenderRebuildTerminalReason("sender_hand_expired")).toBe(true);
+    expect(isSenderRebuildTerminalReason("origin_chaining_limit")).toBe(true);
+    expect(isSenderRebuildTerminalReason("expired")).toBe(false);
     expect(isSenderRebuildTerminalReason("queue_unavailable")).toBe(false);
     expect(isSenderRebuildTerminalReason(undefined)).toBe(false);
 
     expect(isRelayRetryableTerminalReason("queue_unavailable")).toBe(true);
     expect(isRelayRetryableTerminalReason("sponsor_failure")).toBe(true);
+    expect(isRelayRetryableTerminalReason("sponsor_exhausted")).toBe(true);
+    expect(isRelayRetryableTerminalReason("sponsor_nonce_conflict")).toBe(true);
     expect(isRelayRetryableTerminalReason("broadcast_failure")).toBe(true);
+    expect(isRelayRetryableTerminalReason("broadcast_rate_limited")).toBe(true);
     expect(isRelayRetryableTerminalReason("internal_error")).toBe(true);
     expect(isRelayRetryableTerminalReason("sender_nonce_stale")).toBe(false);
+    expect(isRelayRetryableTerminalReason("sender_hand_expired")).toBe(false);
     expect(isRelayRetryableTerminalReason(undefined)).toBe(false);
   });
 

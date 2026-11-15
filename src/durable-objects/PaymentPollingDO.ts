@@ -16,10 +16,37 @@
 
 import { DurableObject } from "cloudflare:workers";
 import type { Env } from "../types";
-import { HttpPaymentStatusResponseSchema } from "../services/payment-contract";
+import {
+  HttpPaymentStatusResponseSchema,
+  RpcCheckPaymentResultSchema,
+  TERMINAL_REASON_TO_CATEGORY,
+} from "../services/payment-contract";
+import type { TerminalReason } from "../services/payment-contract";
 import { computeDerivedHints } from "../utils/payment-hints";
 import type { DerivedHints } from "../utils/payment-hints";
 import { NOT_FOUND_ENQUEUE_GRACE_MS } from "../utils/payment-status";
+
+export class RelaySchemaMismatchError extends Error {
+  readonly transport: "rpc" | "http";
+  readonly paymentId: string;
+  readonly rawStatus: unknown;
+  readonly issues: unknown;
+
+  constructor(
+    transport: "rpc" | "http",
+    paymentId: string,
+    rawStatus: unknown,
+    message: string,
+    issues: unknown
+  ) {
+    super(`relay ${transport.toUpperCase()} status schema mismatch for ${paymentId}: ${message}`);
+    this.name = "RelaySchemaMismatchError";
+    this.transport = transport;
+    this.paymentId = paymentId;
+    this.rawStatus = rawStatus;
+    this.issues = issues;
+  }
+}
 
 // =============================================================================
 // Public Types
@@ -308,22 +335,44 @@ export class PaymentPollingDO extends DurableObject<Env> {
     let statusData: Awaited<ReturnType<typeof this._fetchStatus>>;
     try {
       statusData = await this._fetchStatus(paymentId, checkStatusUrl);
-    } catch {
-      // Transient network error — reschedule and return cached state
+    } catch (err) {
+      if (err instanceof RelaySchemaMismatchError) {
+        console.error("[PaymentPollingDO] relay status schema mismatch:", {
+          paymentId: err.paymentId,
+          transport: err.transport,
+          rawStatus: err.rawStatus,
+          pollCount,
+          issues: err.issues,
+        });
+      }
+      // Reschedule alarm and return cached state
       await this._reschedule(pollCount);
       return this._readSnapshot(paymentId);
     }
 
-    const { status, terminalReason, txid, confirmedAt } = statusData;
+    const { status, terminalReason, txid, confirmedAt, retryable } = statusData;
     // Treat early `not_found` as non-terminal until KV propagation grace expires
     // so remote edge colos do not freeze an in-flight payment as not_found.
     const withinNotFoundGrace =
       status === "not_found" &&
       Number.isFinite(createdAtMs) &&
       ageMs <= NOT_FOUND_ENQUEUE_GRACE_MS;
-    const persistedStatus = withinNotFoundGrace ? ((row.status as string) || "queued") : status;
-    const persistedTerminalReason = withinNotFoundGrace ? undefined : terminalReason;
-    const isTerminal = !withinNotFoundGrace && TERMINAL_STATUSES.has(status) ? 1 : 0;
+    const reasonCategory = terminalReason
+      ? TERMINAL_REASON_TO_CATEGORY[terminalReason as TerminalReason]
+      : undefined;
+    // When the relay explicitly marks a relay/settlement (or untyped) failure as
+    // retryable: true (e.g. KV briefly unavailable), keep polling the same paymentId
+    // rather than freezing payment_state as terminal.
+    const isRetryableRelayFailure =
+      status === "failed" &&
+      retryable === true &&
+      (reasonCategory === undefined ||
+        reasonCategory === "relay" ||
+        reasonCategory === "settlement");
+    const keepNonTerminal = withinNotFoundGrace || isRetryableRelayFailure;
+    const persistedStatus = keepNonTerminal ? ((row.status as string) || "queued") : status;
+    const persistedTerminalReason = keepNonTerminal ? undefined : terminalReason;
+    const isTerminal = !keepNonTerminal && TERMINAL_STATUSES.has(status) ? 1 : 0;
 
     this.sql.exec(
       `
@@ -428,18 +477,26 @@ export class PaymentPollingDO extends DurableObject<Env> {
     terminalReason?: string;
     txid?: string;
     confirmedAt?: string;
+    retryable?: boolean;
   }> {
     if (this.env.X402_RELAY) {
       const rpcStatus = await this.env.X402_RELAY.checkPayment(paymentId);
-      const parsedRpc = HttpPaymentStatusResponseSchema.safeParse(rpcStatus);
+      const parsedRpc = RpcCheckPaymentResultSchema.safeParse(rpcStatus);
       if (!parsedRpc.success) {
-        throw new Error(`relay RPC returned invalid status payload: ${parsedRpc.error.message}`);
+        throw new RelaySchemaMismatchError(
+          "rpc",
+          paymentId,
+          (rpcStatus as { status?: unknown } | null | undefined)?.status,
+          parsedRpc.error.message,
+          parsedRpc.error.issues
+        );
       }
       return {
         status: parsedRpc.data.status,
         terminalReason: parsedRpc.data.terminalReason,
         txid: parsedRpc.data.txid,
         confirmedAt: parsedRpc.data.confirmedAt,
+        retryable: parsedRpc.data.retryable,
       };
     }
 
@@ -455,7 +512,13 @@ export class PaymentPollingDO extends DurableObject<Env> {
     const parsed = HttpPaymentStatusResponseSchema.safeParse(raw);
 
     if (!parsed.success) {
-      throw new Error(`relay returned invalid status payload: ${parsed.error.message}`);
+      throw new RelaySchemaMismatchError(
+        "http",
+        paymentId,
+        (raw as Record<string, unknown> | null | undefined)?.status,
+        parsed.error.message,
+        parsed.error.issues
+      );
     }
 
     const data = parsed.data;
@@ -464,6 +527,7 @@ export class PaymentPollingDO extends DurableObject<Env> {
       terminalReason: data.terminalReason,
       txid: data.txid,
       confirmedAt: data.confirmedAt,
+      retryable: data.retryable,
     };
   }
 

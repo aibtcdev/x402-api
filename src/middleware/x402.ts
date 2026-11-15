@@ -146,23 +146,36 @@ const TERMINAL_FAILURE_RPC_STATUSES = new Set([
 
 const RPC_CODE_TO_TERMINAL_REASON: Partial<Record<string, TerminalReason>> = {
   INVALID_TRANSACTION: "invalid_transaction",
+  PAYMENT_MISMATCH: "invalid_transaction",
   NOT_SPONSORED: "not_sponsored",
   SENDER_NONCE_STALE: "sender_nonce_stale",
   SENDER_NONCE_DUPLICATE: "sender_nonce_duplicate",
+  SENDER_NONCE_CONFLICT: "sender_nonce_duplicate",
+  CLIENT_NONCE_CONFLICT: "sender_nonce_duplicate",
+  CLIENT_BAD_NONCE: "sender_nonce_stale",
+  NONCE_OCCUPIED: "sender_nonce_duplicate",
   SENDER_NONCE_GAP: "sender_nonce_gap",
   ORIGIN_CHAINING_LIMIT: "origin_chaining_limit",
   TOO_MUCH_CHAINING: "origin_chaining_limit",
   QUEUE_UNAVAILABLE: "queue_unavailable",
   SPONSOR_FAILURE: "sponsor_failure",
+  SERVICE_DEGRADED: "sponsor_failure",
+  NONCE_DO_UNAVAILABLE: "sponsor_failure",
+  LOW_HEADROOM: "sponsor_failure",
   SPONSOR_EXHAUSTED: "sponsor_exhausted",
   SPONSOR_NONCE_CONFLICT: "sponsor_nonce_conflict",
+  SPONSOR_NONCE_STALE: "sponsor_nonce_conflict",
+  SPONSOR_NONCE_DUPLICATE: "sponsor_nonce_conflict",
+  NONCE_CONFLICT: "sponsor_nonce_conflict",
   INTERNAL_ERROR: "internal_error",
   BROADCAST_FAILED: "broadcast_failure",
   TX_BROADCAST_ERROR: "broadcast_failure",
   BROADCAST_RATE_LIMITED: "broadcast_rate_limited",
+  RATE_LIMITED: "broadcast_rate_limited",
+  RATE_LIMIT_EXCEEDED: "broadcast_rate_limited",
   SETTLEMENT_FAILED: "chain_abort",
   PAYMENT_IDENTIFIER_CONFLICT: "unknown_payment_identity",
-  SENDER_HAND_EXPIRED: "expired",
+  SENDER_HAND_EXPIRED: "sender_hand_expired",
 };
 
 const BOUND_RPC_STORES = new WeakMap<object, RelayBoundStore>();
@@ -909,6 +922,21 @@ export function classifyPaymentError(error: unknown, settleResult?: Partial<Sett
       message: "Transaction pending in settlement relay, please retry",
       httpStatus: 402,
       retryAfter: 10,
+    };
+  }
+  const rawErrorCode = settleResult
+    ? ((settleResult as { errorCode?: string; errorReason?: string }).errorCode ??
+        (settleResult as { errorReason?: string }).errorReason)
+    : undefined;
+  const normalizedCode = rawErrorCode?.toUpperCase();
+  if (
+    normalizedCode === "INSUFFICIENT_FUNDS" ||
+    normalizedCode === "CLIENT_INSUFFICIENT_FUNDS"
+  ) {
+    return {
+      code: X402_ERROR_CODES.INSUFFICIENT_FUNDS,
+      message: "Insufficient funds in wallet",
+      httpStatus: 402,
     };
   }
   if (canonicalStatus === "failed") {
@@ -1782,7 +1810,9 @@ export function x402Middleware(
                 if (heldClaimId) {
                   await releaseTxClaimInDO(c, txHash, heldClaimId, log);
                 }
-                const mappedTerminalReason = RPC_CODE_TO_TERMINAL_REASON[rpcResult.code];
+                const mappedTerminalReason = rpcResult.code
+                  ? RPC_CODE_TO_TERMINAL_REASON[rpcResult.code]
+                  : undefined;
                 const mappedCategory = mappedTerminalReason
                   ? TERMINAL_REASON_TO_CATEGORY[mappedTerminalReason]
                   : undefined;
@@ -1793,9 +1823,9 @@ export function x402Middleware(
                   success: false,
                   transaction: "",
                   network: networkV2,
-                  errorReason: rpcResult.code,
+                  errorReason: rpcResult.code ?? "settlement_failed",
                   ...(mappedTerminalReason ? { terminalReason: mappedTerminalReason } : {}),
-                  retryable: rpcResult.retryable,
+                  ...(typeof rpcResult.retryable === "boolean" ? { retryable: rpcResult.retryable } : {}),
                   // Omit canonical "failed" status on transient pre-enqueue relay rejections
                   // so classifyPaymentError surfaces HTTP 503 + Retry-After instead of 402 TRANSACTION_FAILED.
                   ...(!isRetryableRelayRejection ? { status: "failed" } : {}),
@@ -2119,28 +2149,50 @@ export function x402Middleware(
             Date.now() - boundEntry.createdAt < NOT_FOUND_ENQUEUE_GRACE_MS;
 
           if (TERMINAL_FAILURE_RPC_STATUSES.has(lastStatus) && !isNotFoundWithinGraceWindow) {
-            removeBoundPayment(c.env.X402_RELAY, boundEntry);
-            const clearRes = await clearBoundTxInDO(
-              c,
-              txHash,
-              relayPaymentId,
-              "terminal_failure",
-              log
-            );
-            if ("error" in clearRes) {
-              return respondPaymentStoreUnavailable(c);
+            const checkErrorCode = latestCheck?.errorCode;
+            const checkTerminalReason =
+              latestCheck?.terminalReason ??
+              (checkErrorCode ? RPC_CODE_TO_TERMINAL_REASON[checkErrorCode] : undefined);
+            const checkRetryable = latestCheck?.retryable;
+            const checkCategory = checkTerminalReason
+              ? TERMINAL_REASON_TO_CATEGORY[checkTerminalReason as TerminalReason]
+              : undefined;
+            // Bounded same-payment retry: when the relay explicitly reports retryable: true
+            // on a relay/settlement (or untyped) failure (e.g. KV briefly unavailable ->
+            // { status: "failed", terminalReason: "internal_error", retryable: true }),
+            // keep the bound paymentId intact rather than clearing tx_guard or rotating to retry:1.
+            const isSamePaymentRetryableFailure =
+              lastStatus === "failed" &&
+              checkRetryable === true &&
+              (checkCategory === undefined ||
+                checkCategory === "relay" ||
+                checkCategory === "settlement");
+
+            if (!isSamePaymentRetryableFailure) {
+              removeBoundPayment(c.env.X402_RELAY, boundEntry);
+              const clearRes = await clearBoundTxInDO(
+                c,
+                txHash,
+                relayPaymentId,
+                "terminal_failure",
+                log
+              );
+              if ("error" in clearRes) {
+                return respondPaymentStoreUnavailable(c);
+              }
+              recordTerminalFailure(txHash, relayPaymentId);
             }
-            recordTerminalFailure(txHash, relayPaymentId);
-            const checkRetryable = (latestCheck as { retryable?: boolean } | undefined)?.retryable;
             settleResult = {
               success: false,
               transaction: latestCheck?.txid ?? "",
               network: networkV2,
               paymentId: relayPaymentId,
               status: lastStatus,
-              terminalReason: latestCheck?.terminalReason,
+              ...(checkTerminalReason ? { terminalReason: checkTerminalReason } : {}),
+              ...(checkErrorCode ? { errorCode: checkErrorCode } : {}),
               ...(typeof checkRetryable === "boolean" ? { retryable: checkRetryable } : {}),
-              errorReason: latestCheck?.terminalReason ?? latestCheck?.error ?? lastStatus,
+              ...(isSamePaymentRetryableFailure ? { samePaymentRetry: true } : {}),
+              errorReason: checkErrorCode ?? checkTerminalReason ?? latestCheck?.error ?? lastStatus,
               checkStatusUrl: relayCheckStatusUrl,
             } as unknown as SettleResult;
           } else if (lastStatus !== "confirmed") {
@@ -2310,6 +2362,30 @@ export function x402Middleware(
         resultPaymentId
       );
 
+      const samePaymentRetry = Boolean(
+        (settleResult as { samePaymentRetry?: boolean }).samePaymentRetry
+      );
+      const derivedHints = terminalReason
+        ? computeDerivedHints(canonicalStatus ?? "failed", terminalReason)
+        : null;
+      const settleHints: DerivedHints =
+        explicitRetryable === false
+          ? derivedHints && !derivedHints.retryable
+            ? derivedHints
+            : {
+                retryable: false,
+                nextSteps: "start_new_payment",
+              }
+          : explicitRetryable === true
+            ? derivedHints && derivedHints.retryable
+              ? derivedHints
+              : {
+                  retryable: true,
+                  retryAfter: classified.retryAfter ?? 5,
+                  nextSteps: "retry_later",
+                }
+            : derivedHints ?? hintsFromClassifiedCode(classified);
+
       if (classified.code === X402_ERROR_CODES.TRANSACTION_PENDING) {
         logPaymentEvent(log, "info", "payment.pending", {
           route: c.req.path,
@@ -2346,37 +2422,16 @@ export function x402Middleware(
           paymentId: resultPaymentId,
           status: "failed",
           checkStatusUrl,
-          action: getRetryAction(classified.code),
+          action: samePaymentRetry ? "reuse_same_payment" : getRetryAction(classified.code),
         }, {
           requestCorrelationId,
           classification_code: classified.code,
           http_status: classified.httpStatus,
-          retry_after: classified.retryAfter ?? null,
+          retry_after: settleHints.retryAfter ?? classified.retryAfter ?? null,
           errorReason: errorReason ?? null,
           instability,
         });
       }
-
-      const derivedHints = terminalReason
-        ? computeDerivedHints(canonicalStatus ?? "failed", terminalReason)
-        : null;
-      const settleHints: DerivedHints =
-        explicitRetryable === false
-          ? derivedHints && !derivedHints.retryable
-            ? derivedHints
-            : {
-                retryable: false,
-                nextSteps: "start_new_payment",
-              }
-          : derivedHints ??
-            (typeof explicitRetryable === "boolean"
-              ? {
-                  retryable: true,
-                  retryAfter: classified.retryAfter ?? 5,
-                  nextSteps: "retry_later",
-                }
-              : computeDerivedHints(canonicalStatus ?? "failed", terminalReason) ??
-                hintsFromClassifiedCode(classified));
 
       if (settleHints.retryable) {
         if (settleHints.retryAfter !== undefined) {

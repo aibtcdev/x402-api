@@ -23,6 +23,9 @@
       { "name": "PAYMENT_POLLING_DO", "class_name": "PaymentPollingDO" }
     ]
   },
+  // X402_RELAY is intentionally omitted at top level so standalone `wrangler dev`
+  // exercises the HTTP facilitator path without requiring a local relay worker;
+  // staging and production bind X402_RELAY explicitly below.
   "services": [
     { "binding": "LOGS", "service": "worker-logs-staging", "entrypoint": "LogsRPC" }
   ],

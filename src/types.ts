@@ -38,13 +38,22 @@ export type RelaySubmitPaymentResult =
       status: string;
       checkStatusUrl?: string;
       senderNonce?: { provided: number; expected: number; healthy: boolean; warning?: string };
+      warning?: {
+        code: string;
+        detail: string;
+        senderNonce: { provided: number; expected: number; lastSeen: number };
+        help: string;
+        action: string;
+      };
     }
   | {
       accepted: false;
       error: string;
-      code: string;
-      retryable: boolean;
-      senderNonce?: { provided: number; expected: number; healthy: boolean };
+      code?: string;
+      retryable?: boolean;
+      help?: string;
+      action?: string;
+      senderNonce?: { provided: number; expected: number; healthy: boolean; warning?: string };
     };
 
 export interface RelayCheckPaymentResult {
@@ -52,9 +61,14 @@ export interface RelayCheckPaymentResult {
   status: string;
   terminalReason?: string;
   txid?: string;
+  blockHeight?: number;
   confirmedAt?: string;
+  explorerUrl?: string;
   checkStatusUrl?: string;
   error?: string;
+  errorCode?: string;
+  retryable?: boolean;
+  senderNonceInfo?: { provided: number; expected: number; healthy: boolean; warning?: string };
 }
 
 export interface RelayRPC {
