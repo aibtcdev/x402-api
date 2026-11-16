@@ -1,8 +1,10 @@
 import { describe, expect, test } from "bun:test";
 import {
+  MAX_SAME_PAYMENT_RETRY_ATTEMPTS,
   isInFlightPaymentState,
   isRelayRetryableTerminalReason,
   isSenderRebuildTerminalReason,
+  shouldKeepSamePaymentForBoundedRetry,
 } from "../src/utils/payment-status";
 
 describe("payment-status classifier predicates", () => {
@@ -35,5 +37,53 @@ describe("payment-status classifier predicates", () => {
     expect(isInFlightPaymentState("submitted")).toBe(false);
     expect(isInFlightPaymentState("confirmed")).toBe(false);
     expect(isInFlightPaymentState(undefined)).toBe(false);
+  });
+
+  test("distinguishes dead BROADCAST_EXHAUSTED from bounded same-payment retry", () => {
+    expect(
+      shouldKeepSamePaymentForBoundedRetry({
+        status: "failed",
+        retryable: true,
+        terminalReason: "internal_error",
+        errorCode: "BROADCAST_EXHAUSTED",
+        attemptCount: 1,
+      })
+    ).toBe(false);
+
+    expect(
+      shouldKeepSamePaymentForBoundedRetry({
+        status: "failed",
+        retryable: true,
+        terminalReason: "internal_error",
+        attemptCount: 1,
+      })
+    ).toBe(true);
+
+    expect(
+      shouldKeepSamePaymentForBoundedRetry({
+        status: "failed",
+        retryable: true,
+        terminalReason: "internal_error",
+        attemptCount: MAX_SAME_PAYMENT_RETRY_ATTEMPTS - 1,
+      })
+    ).toBe(true);
+
+    expect(
+      shouldKeepSamePaymentForBoundedRetry({
+        status: "failed",
+        retryable: true,
+        terminalReason: "internal_error",
+        attemptCount: MAX_SAME_PAYMENT_RETRY_ATTEMPTS,
+      })
+    ).toBe(false);
+
+    expect(
+      shouldKeepSamePaymentForBoundedRetry({
+        status: "failed",
+        retryable: true,
+        terminalReason: "invalid_transaction",
+        attemptCount: 1,
+      })
+    ).toBe(false);
   });
 });

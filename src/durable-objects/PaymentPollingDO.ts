@@ -22,7 +22,11 @@ import {
 } from "../services/payment-contract";
 import { computeDerivedHints } from "../utils/payment-hints";
 import type { DerivedHints } from "../utils/payment-hints";
-import { NOT_FOUND_ENQUEUE_GRACE_MS } from "../utils/payment-status";
+import {
+  MAX_CONSECUTIVE_SCHEMA_MISMATCHES,
+  NOT_FOUND_ENQUEUE_GRACE_MS,
+  shouldKeepSamePaymentForBoundedRetry,
+} from "../utils/payment-status";
 
 export class RelaySchemaMismatchError extends Error {
   readonly transport: "rpc" | "http";
@@ -82,6 +86,7 @@ export interface TxGuardRecord {
   boundAt?: number;
   claimId?: string;
   claimExpiresAt?: number;
+  samePaymentRetries?: number;
   failedAttempts?: number;
   consumed: boolean;
   consumedAt?: number;
@@ -139,7 +144,7 @@ export type ClearBoundTxReason = "terminal_failure" | "payer_mismatch";
 // Re-export shared helpers/constants for callers that import from this module
 export type { DerivedHints } from "../utils/payment-hints";
 export { computeDerivedHints } from "../utils/payment-hints";
-export { NOT_FOUND_ENQUEUE_GRACE_MS } from "../utils/payment-status";
+export { NOT_FOUND_ENQUEUE_GRACE_MS };
 
 // =============================================================================
 // Internal Constants
@@ -178,19 +183,22 @@ function nextAlarmDelayMs(pollCount: number): number {
 
 const SCHEMA_SQL = `
   CREATE TABLE IF NOT EXISTS payment_state (
-    payment_id       TEXT PRIMARY KEY,
-    check_status_url TEXT NOT NULL,
-    payer_address    TEXT NOT NULL,
-    route            TEXT NOT NULL,
-    token_type       TEXT NOT NULL,
-    status           TEXT NOT NULL DEFAULT 'queued',
-    terminal_reason  TEXT,
-    txid             TEXT,
-    confirmed_at     TEXT,
-    polled_at        TEXT NOT NULL,
-    poll_count       INTEGER NOT NULL DEFAULT 0,
-    created_at       TEXT NOT NULL,
-    is_terminal      INTEGER NOT NULL DEFAULT 0
+    payment_id         TEXT PRIMARY KEY,
+    check_status_url   TEXT NOT NULL,
+    payer_address      TEXT NOT NULL,
+    route              TEXT NOT NULL,
+    token_type         TEXT NOT NULL,
+    status             TEXT NOT NULL DEFAULT 'queued',
+    terminal_reason    TEXT,
+    txid               TEXT,
+    confirmed_at       TEXT,
+    polled_at          TEXT NOT NULL,
+    poll_count         INTEGER NOT NULL DEFAULT 0,
+    retryable_failures INTEGER NOT NULL DEFAULT 0,
+    schema_mismatches  INTEGER NOT NULL DEFAULT 0,
+    fallback_warned    INTEGER NOT NULL DEFAULT 0,
+    created_at         TEXT NOT NULL,
+    is_terminal        INTEGER NOT NULL DEFAULT 0
   );
 
   CREATE TABLE IF NOT EXISTS tx_guard (
@@ -207,6 +215,7 @@ const SCHEMA_SQL = `
     bound_at                   INTEGER,
     claim_id                   TEXT,
     claim_expires_at           INTEGER,
+    same_payment_retries       INTEGER NOT NULL DEFAULT 0,
     consumed                   INTEGER NOT NULL DEFAULT 0,
     consumed_at                INTEGER,
     consumed_txid              TEXT,
@@ -236,6 +245,21 @@ export class PaymentPollingDO extends DurableObject<Env> {
     // Initialize schema synchronously before any method runs
     ctx.blockConcurrencyWhile(async () => {
       this.sql.exec(SCHEMA_SQL);
+      const stateCols = new Set(
+        [...this.sql.exec("PRAGMA table_info(payment_state)")].map(
+          (r) => (r as Record<string, unknown>).name as string
+        )
+      );
+      if (!stateCols.has("retryable_failures")) {
+        this.sql.exec("ALTER TABLE payment_state ADD COLUMN retryable_failures INTEGER NOT NULL DEFAULT 0");
+      }
+      if (!stateCols.has("schema_mismatches")) {
+        this.sql.exec("ALTER TABLE payment_state ADD COLUMN schema_mismatches INTEGER NOT NULL DEFAULT 0");
+      }
+      if (!stateCols.has("fallback_warned")) {
+        this.sql.exec("ALTER TABLE payment_state ADD COLUMN fallback_warned INTEGER NOT NULL DEFAULT 0");
+      }
+
       const cols = new Set(
         [...this.sql.exec("PRAGMA table_info(tx_guard)")].map(
           (r) => (r as Record<string, unknown>).name as string
@@ -249,6 +273,9 @@ export class PaymentPollingDO extends DurableObject<Env> {
       }
       if (!cols.has("claim_expires_at")) {
         this.sql.exec("ALTER TABLE tx_guard ADD COLUMN claim_expires_at INTEGER");
+      }
+      if (!cols.has("same_payment_retries")) {
+        this.sql.exec("ALTER TABLE tx_guard ADD COLUMN same_payment_retries INTEGER NOT NULL DEFAULT 0");
       }
     });
   }
@@ -330,18 +357,46 @@ export class PaymentPollingDO extends DurableObject<Env> {
       return this._markTerminal(paymentId, "failed", "internal_error", undefined, now, pollCount, checkStatusUrl);
     }
 
+    const alreadyWarnedFallback = (row.fallback_warned as number | null) === 1;
     let statusData: Awaited<ReturnType<typeof this._fetchStatus>>;
     try {
-      statusData = await this._fetchStatus(paymentId, checkStatusUrl);
+      statusData = await this._fetchStatus(paymentId, checkStatusUrl, alreadyWarnedFallback);
     } catch (err) {
       if (err instanceof RelaySchemaMismatchError) {
+        const nextMismatchCount = ((row.schema_mismatches as number | null) ?? 0) + 1;
+        if (nextMismatchCount < MAX_CONSECUTIVE_SCHEMA_MISMATCHES) {
+          console.warn("[PaymentPollingDO] transient relay status schema mismatch; retrying:", {
+            paymentId: err.paymentId,
+            transport: err.transport,
+            rawStatus: err.rawStatus,
+            pollCount,
+            consecutiveMismatches: nextMismatchCount,
+            maxConsecutiveMismatches: MAX_CONSECUTIVE_SCHEMA_MISMATCHES,
+            issues: err.issues,
+          });
+          this.sql.exec(
+            `UPDATE payment_state SET polled_at = ?, poll_count = ?, schema_mismatches = ? WHERE payment_id = ?`,
+            now,
+            pollCount,
+            nextMismatchCount,
+            paymentId
+          );
+          await this._reschedule(pollCount);
+          return this._readSnapshot(paymentId);
+        }
         console.error("[PaymentPollingDO] relay status schema mismatch:", {
           paymentId: err.paymentId,
           transport: err.transport,
           rawStatus: err.rawStatus,
           pollCount,
+          consecutiveMismatches: nextMismatchCount,
           issues: err.issues,
         });
+        this.sql.exec(
+          `UPDATE payment_state SET schema_mismatches = ? WHERE payment_id = ?`,
+          nextMismatchCount,
+          paymentId
+        );
         return this._markTerminal(
           paymentId,
           "failed",
@@ -364,21 +419,38 @@ export class PaymentPollingDO extends DurableObject<Env> {
       status === "not_found" &&
       Number.isFinite(createdAtMs) &&
       ageMs <= NOT_FOUND_ENQUEUE_GRACE_MS;
-    const keepNonTerminal = withinNotFoundGrace;
+    const nextRetryFailureCount =
+      status === "failed" ? ((row.retryable_failures as number | null) ?? 0) + 1 : 0;
+    const withinBoundedRetry =
+      status === "failed" &&
+      shouldKeepSamePaymentForBoundedRetry({
+        status,
+        retryable: statusData.retryable,
+        terminalReason,
+        errorCode: statusData.errorCode,
+        attemptCount: nextRetryFailureCount,
+      });
+    const keepNonTerminal = withinNotFoundGrace || withinBoundedRetry;
     const persistedStatus = keepNonTerminal ? ((row.status as string) || "queued") : status;
     const persistedTerminalReason = keepNonTerminal ? undefined : terminalReason;
     const isTerminal = !keepNonTerminal && TERMINAL_STATUSES.has(status) ? 1 : 0;
+    const persistedRetryFailures = withinBoundedRetry ? nextRetryFailureCount : 0;
+    const persistedFallbackWarned =
+      alreadyWarnedFallback || Boolean(statusData.usedHttpFallback) ? 1 : 0;
 
     this.sql.exec(
       `
       UPDATE payment_state SET
-        status          = ?,
-        terminal_reason = ?,
-        txid            = ?,
-        confirmed_at    = ?,
-        polled_at       = ?,
-        poll_count      = ?,
-        is_terminal     = ?
+        status             = ?,
+        terminal_reason    = ?,
+        txid               = ?,
+        confirmed_at       = ?,
+        polled_at          = ?,
+        poll_count         = ?,
+        retryable_failures = ?,
+        schema_mismatches  = 0,
+        fallback_warned    = ?,
+        is_terminal        = ?
       WHERE payment_id = ?
       `,
       persistedStatus,
@@ -387,6 +459,8 @@ export class PaymentPollingDO extends DurableObject<Env> {
       confirmedAt ?? null,
       now,
       pollCount,
+      persistedRetryFailures,
+      persistedFallbackWarned,
       isTerminal,
       paymentId
     );
@@ -466,16 +540,23 @@ export class PaymentPollingDO extends DurableObject<Env> {
    */
   private async _fetchStatus(
     paymentId: string,
-    checkStatusUrl: string
+    checkStatusUrl: string,
+    alreadyWarnedFallback = false
   ): Promise<{
     status: string;
     terminalReason?: string;
     txid?: string;
     confirmedAt?: string;
     retryable?: boolean;
+    errorCode?: string;
+    usedHttpFallback?: boolean;
   }> {
     if (this.env.X402_RELAY) {
       const rpcStatus = await this.env.X402_RELAY.checkPayment(paymentId);
+      const rawErrorCode =
+        typeof (rpcStatus as { errorCode?: unknown } | null | undefined)?.errorCode === "string"
+          ? ((rpcStatus as { errorCode: string }).errorCode)
+          : undefined;
       const parsedRpc = RpcCheckPaymentResultSchema.safeParse(rpcStatus);
       if (parsedRpc.success) {
         return {
@@ -484,25 +565,30 @@ export class PaymentPollingDO extends DurableObject<Env> {
           txid: parsedRpc.data.txid,
           confirmedAt: parsedRpc.data.confirmedAt,
           retryable: parsedRpc.data.retryable,
+          errorCode: parsedRpc.data.errorCode ?? rawErrorCode,
         };
       }
 
       // Looser HTTP status schema fallback: preserves confirmed / terminal-failed state
       // when peripheral RPC fields drift ahead of `@aibtc/tx-schemas` (e.g. a new `errorCode`
       // such as `BROADCAST_EXHAUSTED` or a non-URL `checkStatusUrl`), while still validating
-      // `paymentId`, `status`, `terminalReason`, and `txid`.
+      // `paymentId`, `status`, `terminalReason`, and `txid`. Warn at most once per paymentId.
       const parsedFallback = HttpPaymentStatusResponseSchema.safeParse(rpcStatus);
       if (parsedFallback.success) {
-        console.warn("[PaymentPollingDO] relay RPC status fell back to HTTP schema:", {
-          paymentId,
-          issues: parsedRpc.error.issues,
-        });
+        if (!alreadyWarnedFallback) {
+          console.warn("[PaymentPollingDO] relay RPC status fell back to HTTP schema:", {
+            paymentId,
+            issues: parsedRpc.error.issues,
+          });
+        }
         return {
           status: parsedFallback.data.status,
           terminalReason: parsedFallback.data.terminalReason,
           txid: parsedFallback.data.txid,
           confirmedAt: parsedFallback.data.confirmedAt,
           retryable: parsedFallback.data.retryable,
+          errorCode: rawErrorCode,
+          usedHttpFallback: true,
         };
       }
 
@@ -851,6 +937,7 @@ export class PaymentPollingDO extends DurableObject<Env> {
         verified_payer             = COALESCE(tx_guard.verified_payer, excluded.verified_payer),
         request_binding_hash       = CASE WHEN tx_guard.consumed = 1 OR tx_guard.relay_payment_id IS NOT NULL THEN tx_guard.request_binding_hash ELSE excluded.request_binding_hash END,
         bound_at                   = CASE WHEN tx_guard.consumed = 1 OR tx_guard.relay_payment_id IS NOT NULL THEN tx_guard.bound_at ELSE excluded.bound_at END,
+        same_payment_retries       = CASE WHEN tx_guard.consumed = 1 OR tx_guard.relay_payment_id IS NOT NULL THEN tx_guard.same_payment_retries ELSE 0 END,
         claim_id                   = NULL,
         claim_expires_at           = NULL,
         updated_at                 = excluded.updated_at
@@ -871,6 +958,27 @@ export class PaymentPollingDO extends DurableObject<Env> {
     const record = this._readTxGuard()!;
     await this._scheduleTxGuardAlarm(boundAt + TX_BOUND_TTL_MS);
     return record;
+  }
+
+  /**
+   * Increment bounded same-payment retry count for an active bound relayPaymentId.
+   * Returns the updated retry count, or null if not bound to expectedRelayPaymentId.
+   */
+  async recordSamePaymentRetry(expectedRelayPaymentId: string): Promise<number | null> {
+    if (!expectedRelayPaymentId) return null;
+    const existing = this._readTxGuard();
+    if (!existing || existing.consumed || existing.relayPaymentId !== expectedRelayPaymentId) {
+      return null;
+    }
+    const now = Date.now();
+    const nextCount = (existing.samePaymentRetries ?? 0) + 1;
+    this.sql.exec(
+      "UPDATE tx_guard SET same_payment_retries = ?, updated_at = ? WHERE id = 1 AND consumed = 0 AND relay_payment_id = ?",
+      nextCount,
+      now,
+      expectedRelayPaymentId
+    );
+    return nextCount;
   }
 
   /**
@@ -987,6 +1095,10 @@ export class PaymentPollingDO extends DurableObject<Env> {
       boundAt: typeof row.bound_at === "number" ? row.bound_at : undefined,
       claimId: (row.claim_id as string | null) ?? undefined,
       claimExpiresAt: typeof row.claim_expires_at === "number" ? row.claim_expires_at : undefined,
+      samePaymentRetries:
+        typeof row.same_payment_retries === "number" && row.same_payment_retries > 0
+          ? row.same_payment_retries
+          : undefined,
       consumed: row.consumed === 1,
       consumedAt: typeof row.consumed_at === "number" ? row.consumed_at : undefined,
       consumedTxid: (row.consumed_txid as string | null) ?? undefined,

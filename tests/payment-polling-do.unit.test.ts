@@ -1187,7 +1187,7 @@ describe("PaymentPollingDO real tx_guard & alarm() lifecycle", () => {
     expect(retryRowsAfterConsume.length).toBe(0);
   });
 
-  test("poll() validates RPC checkPayment, marks failed+retryable=true immediately terminal with real terminalReason, falls back to HTTP schema on peripheral RPC drift, and fails fast on deterministic schema mismatch", async () => {
+  test("poll() distinguishes dead BROADCAST_EXHAUSTED from bounded no-errorCode retry, deduplicates HTTP fallback warn per payment, and bounds consecutive schema mismatches", async () => {
     let rpcSeq = 0;
     const warnLogs: Array<{ msg: unknown; details: unknown }> = [];
     const errorLogs: Array<{ msg: unknown; details: unknown }> = [];
@@ -1201,28 +1201,29 @@ describe("PaymentPollingDO real tx_guard & alarm() lifecycle", () => {
     }) as typeof console.error;
 
     try {
-      // Case 1: RPC mempool -> transient transport error -> failed + retryable: true (with BROADCAST_EXHAUSTED)
+      // Case 1: RPC peripheral drift (warn once per paymentId) -> transient transport error -> BROADCAST_EXHAUSTED (`internal_error`)
       const { instance, db, ready } = createInMemoryDO({
         X402_RELAY: {
           async checkPayment(paymentId: string) {
             rpcSeq += 1;
             if (rpcSeq === 1) {
-              // Valid RPC payload with senderNonceInfo validated via RpcCheckPaymentResultSchema
+              // Relative checkStatusUrl triggers HTTP fallback warning #1 for validPayId
               return {
                 paymentId,
                 status: "mempool",
-                senderNonceInfo: { provided: 7, expected: 7, healthy: true },
+                checkStatusUrl: `/payment/${paymentId}`,
               };
             }
             if (rpcSeq === 2) {
               // Transient network/RPC transport error -> reschedules without schema mismatch
               throw new Error("RPC binding transient disconnect");
             }
-            // Relay `finalizeExhaustedPayment` shape: terminal failed + retryable: true + BROADCAST_EXHAUSTED
+            // Relay `finalizeExhaustedPayment` shape (`queue-consumer.ts:577-582`):
+            // status: "failed", terminalReason: "internal_error", errorCode: "BROADCAST_EXHAUSTED", retryable: true
             return {
               paymentId,
               status: "failed",
-              terminalReason: "broadcast_failure",
+              terminalReason: "internal_error",
               errorCode: "BROADCAST_EXHAUSTED",
               retryable: true,
             };
@@ -1240,37 +1241,83 @@ describe("PaymentPollingDO real tx_guard & alarm() lifecycle", () => {
         tokenType: "STX",
       });
 
-      // Poll 1: RPC "mempool" with senderNonceInfo validates cleanly via RpcCheckPaymentResultSchema
+      // Poll 1: HTTP fallback succeeds and logs warn once
       const snap1 = await instance.poll();
       expect(snap1?.status).toBe("mempool");
+      expect(warnLogs.length).toBe(1);
       expect(errorLogs.length).toBe(0);
 
-      // Poll 2: Transient transport error reschedules and returns cached "mempool" without schema mismatch
+      // Poll 2: Transient transport error reschedules and returns cached "mempool"
       const snap2 = await instance.poll();
       expect(snap2?.status).toBe("mempool");
       expect(errorLogs.length).toBe(0);
 
-      // Poll 3: failed + retryable: true + BROADCAST_EXHAUSTED falls back to HttpPaymentStatusResponseSchema
-      // and immediately marks payment_state terminal while preserving `broadcast_failure`
+      // Poll 3: BROADCAST_EXHAUSTED marks terminal immediately on first observation AND does NOT re-warn for the same paymentId
       const snap3 = await instance.poll();
       expect(snap3?.status).toBe("failed");
-      expect(snap3?.terminalReason).toBe("broadcast_failure");
+      expect(snap3?.terminalReason).toBe("internal_error");
       expect(warnLogs.length).toBe(1);
       const row3 = db
         .query("SELECT status, terminal_reason, is_terminal FROM payment_state WHERE payment_id = ?")
         .get(validPayId) as { status: string; terminal_reason: string | null; is_terminal: number };
       expect(row3.status).toBe("failed");
-      expect(row3.terminal_reason).toBe("broadcast_failure");
+      expect(row3.terminal_reason).toBe("internal_error");
       expect(row3.is_terminal).toBe(1);
       expect(await instance.poll()).toBeNull();
 
-      // Case 2: Confirmed payment with peripheral RPC drift (relative checkStatusUrl) still confirms via HTTP schema fallback
+      // Case 1b: No-`errorCode` retryable failure (`RELAY_KV` missing shape in `rpc.ts:585-593`)
+      // keeps the row non-terminal for 2 attempts, then marks terminal on attempt 3 with real terminalReason
+      const noCodePayId = "pay_9999888877776666";
+      const { instance: noCodeInstance, db: noCodeDb, ready: noCodeReady } = createInMemoryDO({
+        X402_RELAY: {
+          async checkPayment(paymentId: string) {
+            return {
+              paymentId,
+              status: "failed",
+              terminalReason: "internal_error",
+              error: "Storage not configured",
+              retryable: true,
+            };
+          },
+        },
+      });
+      await noCodeReady();
+      await noCodeInstance.track({
+        paymentId: noCodePayId,
+        checkStatusUrl: `https://relay.example/payment/${noCodePayId}`,
+        payerAddress: "ST_BUYER",
+        route: "/paid",
+        tokenType: "STX",
+      });
+
+      const nc1 = await noCodeInstance.poll();
+      expect(nc1?.status).toBe("queued");
+      expect(nc1?.terminalReason).toBeUndefined();
+      const nc2 = await noCodeInstance.poll();
+      expect(nc2?.status).toBe("queued");
+      const nc3 = await noCodeInstance.poll();
+      expect(nc3?.status).toBe("failed");
+      expect(nc3?.terminalReason).toBe("internal_error");
+      const ncRow = noCodeDb
+        .query("SELECT status, terminal_reason, is_terminal FROM payment_state WHERE payment_id = ?")
+        .get(noCodePayId) as { status: string; terminal_reason: string | null; is_terminal: number };
+      expect(ncRow.status).toBe("failed");
+      expect(ncRow.terminal_reason).toBe("internal_error");
+      expect(ncRow.is_terminal).toBe(1);
+      expect(await noCodeInstance.poll()).toBeNull();
+
+      // Case 2: Transient schema mismatch during relay deploy (2 bad polls -> valid confirmed on poll 3) recovers!
       const confirmedPayId = "pay_1111222233334444";
       const confirmedTxid =
         "0x222233334444555566667777888899990000aaaabbbbccccddddeeeeffff1111";
+      let deployPoll = 0;
       const { instance: confirmedInstance, ready: confirmedReady } = createInMemoryDO({
         X402_RELAY: {
           async checkPayment(paymentId: string) {
+            deployPoll += 1;
+            if (deployPoll <= 2) {
+              return { paymentId, status: "transient_deploy_skew" };
+            }
             return {
               paymentId,
               status: "confirmed",
@@ -1289,12 +1336,14 @@ describe("PaymentPollingDO real tx_guard & alarm() lifecycle", () => {
         route: "/paid",
         tokenType: "STX",
       });
+      expect((await confirmedInstance.poll())?.status).toBe("queued");
+      expect((await confirmedInstance.poll())?.status).toBe("queued");
       const confirmedSnap = await confirmedInstance.poll();
       expect(confirmedSnap?.status).toBe("confirmed");
       expect(confirmedSnap?.txid).toBe(confirmedTxid);
       expect(await confirmedInstance.poll()).toBeNull();
 
-      // Case 3: Deterministic schema mismatch (`status: "future_unknown_rpc_state"`) logs once and fails fast
+      // Case 3: Persistent deterministic schema mismatch reaches MAX_CONSECUTIVE_SCHEMA_MISMATCHES (3) and marks terminal
       const mismatchPayId = "pay_5555666677778888";
       const { instance: mismatchInstance, db: mismatchDb, ready: mismatchReady } = createInMemoryDO({
         X402_RELAY: {
@@ -1314,6 +1363,9 @@ describe("PaymentPollingDO real tx_guard & alarm() lifecycle", () => {
         route: "/paid",
         tokenType: "STX",
       });
+      expect((await mismatchInstance.poll())?.status).toBe("queued");
+      expect((await mismatchInstance.poll())?.status).toBe("queued");
+      expect(errorLogs.length).toBe(0);
       const mismatchSnap = await mismatchInstance.poll();
       expect(mismatchSnap?.status).toBe("failed");
       expect(mismatchSnap?.terminalReason).toBe("internal_error");

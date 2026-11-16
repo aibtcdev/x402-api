@@ -4297,12 +4297,10 @@ describe("x402Middleware — RPC enqueue vs confirmed settlement, relay ID recov
       async checkPayment(paymentId: string) {
         checkCalls.push(paymentId);
         if (paymentId === "pay_exhausted_dead_7906") {
-          // Matches relay `finalizeExhaustedPayment`: terminal failed + retryable: true
-          // ("releases that dedup so the agent can cleanly resubmit").
+          // Matches relay `finalizeExhaustedPayment` (and verifies `COMPAT_RELAY_CODE_TO_TERMINAL_REASON.BROADCAST_EXHAUSTED -> "internal_error"`):
           return {
             paymentId,
             status: "failed",
-            terminalReason: "internal_error",
             errorCode: "BROADCAST_EXHAUSTED",
             retryable: true,
             error: "Broadcast exhausted",
@@ -4423,13 +4421,13 @@ describe("x402Middleware — RPC enqueue vs confirmed settlement, relay ID recov
       harness.env
     );
     expect(res1.status).toBe(402);
-    expect(res1.headers.get("Retry-After")).toBe("30");
+    expect(res1.headers.get("Retry-After")).toBeNull();
     expect(res1.headers.get("X-PAYMENT-ID")).toBe("pay_exhausted_dead_7906");
     const body1 = (await res1.json()) as Record<string, unknown>;
     expect(body1.paymentId).toBe("pay_exhausted_dead_7906");
     expect(body1.terminalReason).toBe("internal_error");
     expect(body1.retryable).toBe(true);
-    expect(body1.nextSteps).toBe("retry_later");
+    expect(body1.nextSteps).toBe("start_new_payment");
     expect(clearBoundCount).toBe(1);
     expect(failedAttemptsInDO).toBe(1);
     expect(submitCalls).toEqual([clientStickyId]);
@@ -4518,6 +4516,113 @@ describe("x402Middleware — RPC enqueue vs confirmed settlement, relay ID recov
     const bodyUntyped = (await resUntyped.json()) as Record<string, unknown>;
     expect(bodyUntyped.retryable).toBe(true);
     expect(bodyUntyped.nextSteps).toBe("retry_later");
+
+    // No-`errorCode` retryable relay failure (`checkPayment` when `RELAY_KV` is missing in `rpc.ts:585-593`):
+    // keeps the same `paymentId` with `retry_later` + `reuse_same_payment` for 2 bounded attempts,
+    // then releases on attempt 3 with `start_new_payment` and rotates `settlementAttemptId` on attempt 4.
+    const noCodeTx = await buildSignedTxHex({ sponsored: true, nonce: 7921n });
+    const noCodeClientId = "pay_client_nocode_7921";
+    const noCodeSubmits: string[] = [];
+    const noCodeChecks: string[] = [];
+    const noCodeHarness = createTestHarness({
+      async submitPayment(_tx, _opts, paymentIdentifier) {
+        noCodeSubmits.push(paymentIdentifier ?? "");
+        return {
+          accepted: true,
+          paymentId: noCodeSubmits.length === 1 ? "pay_nocode_bound_7921" : "pay_nocode_fresh_7921",
+          status: "queued",
+        };
+      },
+      async checkPayment(paymentId: string) {
+        noCodeChecks.push(paymentId);
+        if (paymentId === "pay_nocode_bound_7921") {
+          return {
+            paymentId,
+            status: "failed",
+            terminalReason: "internal_error",
+            error: "Storage not configured",
+            retryable: true,
+          };
+        }
+        return {
+          paymentId,
+          status: "confirmed",
+          txid: "0x" + "81".repeat(32),
+          payer: TEST_BUYER_ADDRESS,
+        };
+      },
+    });
+    const noCodeSig = encodePaymentSignature({
+      x402Version: 2,
+      extensions: { "payment-identifier": { info: { id: noCodeClientId } } },
+      payload: { transaction: noCodeTx },
+    });
+
+    // Attempts 1 & 2: keep `pay_nocode_bound_7921`, emit `retry_later` + `Retry-After: 30` + log `reuse_same_payment`
+    for (let i = 1; i <= 2; i++) {
+      const rKeep = await noCodeHarness.app.request(
+        "http://localhost/paid",
+        {
+          method: "POST",
+          headers: {
+            [X402_HEADERS.PAYMENT_SIGNATURE]: noCodeSig,
+            "X-PAYMENT-ID": i === 1 ? noCodeClientId : "pay_nocode_bound_7921",
+          },
+        },
+        noCodeHarness.env
+      );
+      expect(rKeep.status).toBe(402);
+      expect(rKeep.headers.get("Retry-After")).toBe("30");
+      expect(rKeep.headers.get("X-PAYMENT-ID")).toBe("pay_nocode_bound_7921");
+      const bKeep = (await rKeep.json()) as Record<string, unknown>;
+      expect(bKeep.nextSteps).toBe("retry_later");
+      expect(bKeep.retryable).toBe(true);
+    }
+    expect(noCodeSubmits).toEqual([noCodeClientId]);
+    const reuseEvents = noCodeHarness.events.filter((e) => e.message === "payment.failed");
+    expect(reuseEvents.map((e) => e.data?.action)).toEqual(["reuse_same_payment", "reuse_same_payment"]);
+
+    // Attempt 3: bounded retry limit (3) reached -> releases binding and emits `start_new_payment` (no `Retry-After`)
+    const rRelease = await noCodeHarness.app.request(
+      "http://localhost/paid",
+      {
+        method: "POST",
+        headers: {
+          [X402_HEADERS.PAYMENT_SIGNATURE]: noCodeSig,
+          "X-PAYMENT-ID": "pay_nocode_bound_7921",
+        },
+      },
+      noCodeHarness.env
+    );
+    expect(rRelease.status).toBe(402);
+    expect(rRelease.headers.get("Retry-After")).toBeNull();
+    const bRelease = (await rRelease.json()) as Record<string, unknown>;
+    expect(bRelease.nextSteps).toBe("start_new_payment");
+    expect(bRelease.retryable).toBe(true);
+    const allFailEvents = noCodeHarness.events.filter((e) => e.message === "payment.failed");
+    expect(allFailEvents[2]?.data?.action).toBe("start_new_payment");
+
+    // Attempt 4: fresh resubmit rotates settlementAttemptId (`|retry:1`) and confirms 200
+    const rFresh = await noCodeHarness.app.request(
+      "http://localhost/paid",
+      {
+        method: "POST",
+        headers: {
+          [X402_HEADERS.PAYMENT_SIGNATURE]: noCodeSig,
+          "X-PAYMENT-ID": noCodeClientId,
+        },
+      },
+      noCodeHarness.env
+    );
+    expect(rFresh.status).toBe(200);
+    expect(noCodeSubmits.length).toBe(2);
+    expect(noCodeSubmits[1]).not.toBe(noCodeClientId);
+    expect(noCodeChecks).toEqual([
+      "pay_nocode_bound_7921",
+      "pay_nocode_bound_7921",
+      "pay_nocode_bound_7921",
+      "pay_nocode_fresh_7921",
+    ]);
   });
 
   test("maps INSUFFICIENT_FUNDS to 402 insufficient_funds and SPONSOR_NONCE_STALE / SPONSOR_NONCE_DUPLICATE to 503 retry", async () => {

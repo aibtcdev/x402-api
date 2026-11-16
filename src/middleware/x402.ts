@@ -74,6 +74,7 @@ import type { DerivedHints } from "../utils/payment-hints";
 import {
   isRelayRetryableTerminalReason,
   NOT_FOUND_ENQUEUE_GRACE_MS,
+  shouldKeepSamePaymentForBoundedRetry,
 } from "../utils/payment-status";
 
 export { NOT_FOUND_ENQUEUE_GRACE_MS };
@@ -115,6 +116,7 @@ interface BoundRpcPayment {
   asset: string;
   network: string;
   createdAt: number;
+  samePaymentRetries?: number;
 }
 
 interface RelayBoundStore {
@@ -183,7 +185,7 @@ const RPC_CODE_TO_TERMINAL_REASON: Record<RpcErrorCode, TerminalReason | null> =
  */
 const COMPAT_RELAY_CODE_TO_TERMINAL_REASON: Partial<Record<string, TerminalReason>> = {
   QUEUE_UNAVAILABLE: "queue_unavailable",
-  BROADCAST_EXHAUSTED: "broadcast_failure",
+  BROADCAST_EXHAUSTED: "internal_error",
 };
 
 function mapRelayErrorCodeToTerminalReason(code: string | undefined): TerminalReason | undefined {
@@ -739,6 +741,7 @@ interface TxGuardDOStub {
   claimTx?: (input: ClaimTxInput) => Promise<ClaimTxResult>;
   releaseTxClaim?: (claimId: string) => Promise<void>;
   bindTxPayment?: (input: BindTxPaymentInput) => Promise<TxGuardRecord>;
+  recordSamePaymentRetry?: (expectedRelayPaymentId: string) => Promise<number | null>;
   clearBoundTx?: (expectedRelayPaymentId: string, reason?: ClearBoundTxReason) => Promise<void>;
   markTxConsumed?: (input: MarkTxConsumedInput) => Promise<{
     alreadyConsumed: boolean;
@@ -844,6 +847,29 @@ async function bindTxPaymentInDO(
     log.error("PaymentPollingDO.bindTxPayment failed", {
       txHash: input.txHash,
       paymentId: input.relayPaymentId,
+      err: String(err),
+    });
+    return { available: true, error: err };
+  }
+}
+
+async function recordSamePaymentRetryInDO(
+  c: { env: Env },
+  txHash: string,
+  expectedRelayPaymentId: string,
+  log: Logger
+): Promise<{ available: boolean; count?: number | null; error?: unknown }> {
+  try {
+    const stub = getTxGuardStub(c, txHash);
+    if (!stub || typeof stub.recordSamePaymentRetry !== "function") {
+      return { available: false };
+    }
+    const count = await stub.recordSamePaymentRetry(expectedRelayPaymentId);
+    return { available: true, count };
+  } catch (err) {
+    log.error("PaymentPollingDO.recordSamePaymentRetry failed", {
+      txHash,
+      expectedRelayPaymentId,
       err: String(err),
     });
     return { available: true, error: err };
@@ -1363,6 +1389,8 @@ export function x402Middleware(
     let hasRelayMintedPaymentId = false;
     let settledViaHttpVerifier = false;
     let activeHeldClaimId: string | undefined;
+    let releasedBoundPaymentOnTerminalFailure = false;
+    let keptSamePaymentForBoundedRetry = false;
 
     try {
       if (c.env.X402_RELAY) {
@@ -1434,6 +1462,9 @@ export function x402Middleware(
               asset: rec.asset,
               network: rec.network,
               createdAt: rec.boundAt ?? Date.now(),
+              ...(typeof rec.samePaymentRetries === "number" && rec.samePaymentRetries > 0
+                ? { samePaymentRetries: rec.samePaymentRetries }
+                : {}),
             };
             const mismatchResponse = validateBoundPaymentForRecovery(c, hydratedEntry, {
               verifiedPayer,
@@ -1532,6 +1563,11 @@ export function x402Middleware(
                 boundEntry = hydrated.entry;
                 hydratedFromDO = true;
               }
+            } else if (
+              typeof doRec.samePaymentRetries === "number" &&
+              doRec.samePaymentRetries > (boundEntry.samePaymentRetries ?? 0)
+            ) {
+              boundEntry.samePaymentRetries = doRec.samePaymentRetries;
             }
           }
 
@@ -2163,23 +2199,66 @@ export function x402Middleware(
               latestCheck?.terminalReason ??
               mapRelayErrorCodeToTerminalReason(checkErrorCode);
             const checkRetryable = latestCheck?.retryable;
+            const nextSamePaymentAttempt = (boundEntry.samePaymentRetries ?? 0) + 1;
 
-            // Terminal failure on the relay (`failed`, `replaced`, or post-grace `not_found`)
-            // permanently ends this `relayPaymentId` — including `failed` + `retryable: true`
-            // (e.g. `BROADCAST_EXHAUSTED`), where `retryable: true` signals that relay dedup
-            // was released so the caller may cleanly resubmit under a rotated attempt ID.
-            removeBoundPayment(c.env.X402_RELAY, boundEntry);
-            const clearRes = await clearBoundTxInDO(
-              c,
-              txHash,
-              relayPaymentId,
-              "terminal_failure",
-              log
-            );
-            if ("error" in clearRes) {
-              return respondPaymentStoreUnavailable(c);
+            if (
+              shouldKeepSamePaymentForBoundedRetry({
+                status: lastStatus,
+                retryable: checkRetryable,
+                terminalReason: checkTerminalReason,
+                errorCode: checkErrorCode,
+                attemptCount: nextSamePaymentAttempt,
+              })
+            ) {
+              keptSamePaymentForBoundedRetry = true;
+              boundEntry.samePaymentRetries = nextSamePaymentAttempt;
+              const retryUpdate = await recordSamePaymentRetryInDO(
+                c,
+                txHash,
+                relayPaymentId,
+                log
+              );
+              if ("error" in retryUpdate) {
+                return respondPaymentStoreUnavailable(c);
+              }
+              if (
+                retryUpdate.available &&
+                typeof retryUpdate.count === "number" &&
+                retryUpdate.count > boundEntry.samePaymentRetries
+              ) {
+                boundEntry.samePaymentRetries = retryUpdate.count;
+                if (
+                  !shouldKeepSamePaymentForBoundedRetry({
+                    status: lastStatus,
+                    retryable: checkRetryable,
+                    terminalReason: checkTerminalReason,
+                    errorCode: checkErrorCode,
+                    attemptCount: boundEntry.samePaymentRetries,
+                  })
+                ) {
+                  keptSamePaymentForBoundedRetry = false;
+                }
+              }
             }
-            recordTerminalFailure(txHash, relayPaymentId);
+
+            if (!keptSamePaymentForBoundedRetry) {
+              // Release dead or retry-exhausted `relayPaymentId` immediately (including
+              // `BROADCAST_EXHAUSTED` from `finalizeExhaustedPayment`, or when bounded
+              // same-payment retry attempts reach `MAX_SAME_PAYMENT_RETRY_ATTEMPTS`).
+              releasedBoundPaymentOnTerminalFailure = true;
+              removeBoundPayment(c.env.X402_RELAY, boundEntry);
+              const clearRes = await clearBoundTxInDO(
+                c,
+                txHash,
+                relayPaymentId,
+                "terminal_failure",
+                log
+              );
+              if ("error" in clearRes) {
+                return respondPaymentStoreUnavailable(c);
+              }
+              recordTerminalFailure(txHash, relayPaymentId);
+            }
 
             settleResult = {
               success: false,
@@ -2363,7 +2442,7 @@ export function x402Middleware(
       const derivedHints = terminalReason
         ? computeDerivedHints(canonicalStatus ?? "failed", terminalReason)
         : null;
-      const settleHints: DerivedHints =
+      const baseSettleHints: DerivedHints =
         explicitRetryable === false
           ? derivedHints && !derivedHints.retryable
             ? derivedHints
@@ -2379,6 +2458,13 @@ export function x402Middleware(
                   nextSteps: "retry_later",
                 }
               : hintsFromClassifiedCode(classified));
+      const settleHints: DerivedHints =
+        releasedBoundPaymentOnTerminalFailure && baseSettleHints.nextSteps === "retry_later"
+          ? {
+              retryable: baseSettleHints.retryable,
+              nextSteps: "start_new_payment",
+            }
+          : baseSettleHints;
 
       if (classified.code === X402_ERROR_CODES.TRANSACTION_PENDING) {
         logPaymentEvent(log, "info", "payment.pending", {
@@ -2416,18 +2502,25 @@ export function x402Middleware(
           paymentId: resultPaymentId,
           status: "failed",
           checkStatusUrl,
-          action: getRetryAction(classified.code),
+          action: keptSamePaymentForBoundedRetry
+            ? "reuse_same_payment"
+            : releasedBoundPaymentOnTerminalFailure
+              ? "start_new_payment"
+              : getRetryAction(classified.code),
         }, {
           requestCorrelationId,
           classification_code: classified.code,
           http_status: classified.httpStatus,
-          retry_after: settleHints.retryAfter ?? classified.retryAfter ?? null,
+          retry_after:
+            settleHints.nextSteps === "retry_later"
+              ? (settleHints.retryAfter ?? classified.retryAfter ?? null)
+              : null,
           errorReason: errorReason ?? null,
           instability,
         });
       }
 
-      if (settleHints.retryable) {
+      if (settleHints.retryable && settleHints.nextSteps === "retry_later") {
         if (settleHints.retryAfter !== undefined) {
           c.header("Retry-After", String(settleHints.retryAfter));
         } else if (classified.retryAfter) {
