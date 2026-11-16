@@ -4408,7 +4408,8 @@ describe("x402Middleware — RPC enqueue vs confirmed settlement, relay ID recov
     });
 
     // Attempt 1: checkPayment reports terminal failed + internal_error + BROADCAST_EXHAUSTED + retryable: true
-    // Middleware MUST clear the dead bound paymentId, record terminal failure, and log start_new_payment (never reuse_same_payment)
+    // Middleware MUST release the dead bound paymentId immediately, omit dead X-PAYMENT-ID/checkStatusUrl,
+    // and instruct the client to resend the same nonce-safe payment (`retry_later` + `Retry-After: 30`)
     const res1 = await harness.app.request(
       "http://localhost/paid",
       {
@@ -4421,20 +4422,21 @@ describe("x402Middleware — RPC enqueue vs confirmed settlement, relay ID recov
       harness.env
     );
     expect(res1.status).toBe(402);
-    expect(res1.headers.get("Retry-After")).toBeNull();
-    expect(res1.headers.get("X-PAYMENT-ID")).toBe("pay_exhausted_dead_7906");
+    expect(res1.headers.get("Retry-After")).toBe("30");
+    expect(res1.headers.get("X-PAYMENT-ID")).toBeNull();
     const body1 = (await res1.json()) as Record<string, unknown>;
     expect(body1.paymentId).toBe("pay_exhausted_dead_7906");
+    expect(body1.checkStatusUrl).toBeUndefined();
     expect(body1.terminalReason).toBe("internal_error");
     expect(body1.retryable).toBe(true);
-    expect(body1.nextSteps).toBe("start_new_payment");
+    expect(body1.nextSteps).toBe("retry_later");
     expect(clearBoundCount).toBe(1);
     expect(failedAttemptsInDO).toBe(1);
     expect(submitCalls).toEqual([clientStickyId]);
     const failedEvent = harness.events.find((e) => e.message === "payment.failed");
-    expect(failedEvent?.data?.action).toBe("start_new_payment");
+    expect(failedEvent?.data?.action).toBe("retry_later");
 
-    // Attempt 2: client resubmits cleanly -> settlementAttemptId rotates (`|retry:1`) and mints a fresh relayPaymentId
+    // Attempt 2: client resends the same signed tx -> settlementAttemptId rotates (`|retry:1`) and mints a fresh relayPaymentId
     const res2 = await harness.app.request(
       "http://localhost/paid",
       {
@@ -4513,116 +4515,203 @@ describe("x402Middleware — RPC enqueue vs confirmed settlement, relay ID recov
     );
     expect(resUntyped.status).toBe(402);
     expect(resUntyped.headers.get("Retry-After")).toBe("5");
+    expect(resUntyped.headers.get("X-PAYMENT-ID")).toBeNull();
     const bodyUntyped = (await resUntyped.json()) as Record<string, unknown>;
     expect(bodyUntyped.retryable).toBe(true);
     expect(bodyUntyped.nextSteps).toBe("retry_later");
 
-    // No-`errorCode` retryable relay failure (`checkPayment` when `RELAY_KV` is missing in `rpc.ts:585-593`):
-    // keeps the same `paymentId` with `retry_later` + `reuse_same_payment` for 2 bounded attempts,
-    // then releases on attempt 3 with `start_new_payment` and rotates `settlementAttemptId` on attempt 4.
-    const noCodeTx = await buildSignedTxHex({ sponsored: true, nonce: 7921n });
-    const noCodeClientId = "pay_client_nocode_7921";
-    const noCodeSubmits: string[] = [];
-    const noCodeChecks: string[] = [];
-    const noCodeHarness = createTestHarness({
+    // Bounded same-payment resubmissions (`MAX_SAME_PAYMENT_RETRIES = 2` -> 1 initial + 2 retries):
+    // releases immediately on each retryable `failed` (zero wasted polls on dead `paymentId`),
+    // rotates `settlementAttemptId` on each retry, emits `retry_later` (`retryable: true`) for retries 1..2,
+    // and emits `start_new_payment` (`retryable: false`, no `Retry-After`) once the 2 retries are exhausted.
+    const boundedTx = await buildSignedTxHex({ sponsored: true, nonce: 7921n });
+    const boundedClientId = "pay_client_bounded_7921";
+    const boundedSubmits: string[] = [];
+    const boundedChecks: string[] = [];
+    const boundedHarness = createTestHarness({
       async submitPayment(_tx, _opts, paymentIdentifier) {
-        noCodeSubmits.push(paymentIdentifier ?? "");
+        boundedSubmits.push(paymentIdentifier ?? "");
         return {
           accepted: true,
-          paymentId: noCodeSubmits.length === 1 ? "pay_nocode_bound_7921" : "pay_nocode_fresh_7921",
+          paymentId: `pay_bounded_attempt_${boundedSubmits.length}`,
           status: "queued",
         };
       },
       async checkPayment(paymentId: string) {
-        noCodeChecks.push(paymentId);
-        if (paymentId === "pay_nocode_bound_7921") {
-          return {
-            paymentId,
-            status: "failed",
-            terminalReason: "internal_error",
-            error: "Storage not configured",
-            retryable: true,
-          };
-        }
+        boundedChecks.push(paymentId);
         return {
           paymentId,
-          status: "confirmed",
-          txid: "0x" + "81".repeat(32),
-          payer: TEST_BUYER_ADDRESS,
+          status: "failed",
+          terminalReason: "broadcast_failure",
+          errorCode: "BROADCAST_FAILED",
+          retryable: true,
         };
       },
     });
-    const noCodeSig = encodePaymentSignature({
+    const boundedSig = encodePaymentSignature({
       x402Version: 2,
-      extensions: { "payment-identifier": { info: { id: noCodeClientId } } },
-      payload: { transaction: noCodeTx },
+      extensions: { "payment-identifier": { info: { id: boundedClientId } } },
+      payload: { transaction: boundedTx },
     });
 
-    // Attempts 1 & 2: keep `pay_nocode_bound_7921`, emit `retry_later` + `Retry-After: 30` + log `reuse_same_payment`
+    // Attempts 1 & 2 (initial + retry #1): release immediately, rotate attempt ID, emit `retry_later` + `Retry-After: 30`
     for (let i = 1; i <= 2; i++) {
-      const rKeep = await noCodeHarness.app.request(
+      const rRetry = await boundedHarness.app.request(
         "http://localhost/paid",
         {
           method: "POST",
           headers: {
-            [X402_HEADERS.PAYMENT_SIGNATURE]: noCodeSig,
-            "X-PAYMENT-ID": i === 1 ? noCodeClientId : "pay_nocode_bound_7921",
+            [X402_HEADERS.PAYMENT_SIGNATURE]: boundedSig,
           },
         },
-        noCodeHarness.env
+        boundedHarness.env
       );
-      expect(rKeep.status).toBe(402);
-      expect(rKeep.headers.get("Retry-After")).toBe("30");
-      expect(rKeep.headers.get("X-PAYMENT-ID")).toBe("pay_nocode_bound_7921");
-      const bKeep = (await rKeep.json()) as Record<string, unknown>;
-      expect(bKeep.nextSteps).toBe("retry_later");
-      expect(bKeep.retryable).toBe(true);
+      expect(rRetry.status).toBe(402);
+      expect(rRetry.headers.get("Retry-After")).toBe("30");
+      expect(rRetry.headers.get("X-PAYMENT-ID")).toBeNull();
+      const bRetry = (await rRetry.json()) as Record<string, unknown>;
+      expect(bRetry.nextSteps).toBe("retry_later");
+      expect(bRetry.retryable).toBe(true);
+      expect(bRetry.checkStatusUrl).toBeUndefined();
     }
-    expect(noCodeSubmits).toEqual([noCodeClientId]);
-    const reuseEvents = noCodeHarness.events.filter((e) => e.message === "payment.failed");
-    expect(reuseEvents.map((e) => e.data?.action)).toEqual(["reuse_same_payment", "reuse_same_payment"]);
+    expect(boundedSubmits.length).toBe(2);
+    expect(boundedSubmits[0]).toBe(boundedClientId);
+    expect(boundedSubmits[1]).not.toBe(boundedClientId);
 
-    // Attempt 3: bounded retry limit (3) reached -> releases binding and emits `start_new_payment` (no `Retry-After`)
-    const rRelease = await noCodeHarness.app.request(
+    // Attempt 3 (retry #2 fails -> 2 retries exhausted): emits `start_new_payment` with `retryable: false` (never `retryable: true`)
+    const rExhausted = await boundedHarness.app.request(
       "http://localhost/paid",
       {
         method: "POST",
         headers: {
-          [X402_HEADERS.PAYMENT_SIGNATURE]: noCodeSig,
-          "X-PAYMENT-ID": "pay_nocode_bound_7921",
+          [X402_HEADERS.PAYMENT_SIGNATURE]: boundedSig,
         },
       },
-      noCodeHarness.env
+      boundedHarness.env
     );
-    expect(rRelease.status).toBe(402);
-    expect(rRelease.headers.get("Retry-After")).toBeNull();
-    const bRelease = (await rRelease.json()) as Record<string, unknown>;
-    expect(bRelease.nextSteps).toBe("start_new_payment");
-    expect(bRelease.retryable).toBe(true);
-    const allFailEvents = noCodeHarness.events.filter((e) => e.message === "payment.failed");
-    expect(allFailEvents[2]?.data?.action).toBe("start_new_payment");
-
-    // Attempt 4: fresh resubmit rotates settlementAttemptId (`|retry:1`) and confirms 200
-    const rFresh = await noCodeHarness.app.request(
-      "http://localhost/paid",
-      {
-        method: "POST",
-        headers: {
-          [X402_HEADERS.PAYMENT_SIGNATURE]: noCodeSig,
-          "X-PAYMENT-ID": noCodeClientId,
-        },
-      },
-      noCodeHarness.env
-    );
-    expect(rFresh.status).toBe(200);
-    expect(noCodeSubmits.length).toBe(2);
-    expect(noCodeSubmits[1]).not.toBe(noCodeClientId);
-    expect(noCodeChecks).toEqual([
-      "pay_nocode_bound_7921",
-      "pay_nocode_bound_7921",
-      "pay_nocode_bound_7921",
-      "pay_nocode_fresh_7921",
+    expect(rExhausted.status).toBe(402);
+    expect(rExhausted.headers.get("Retry-After")).toBeNull();
+    expect(rExhausted.headers.get("X-PAYMENT-ID")).toBeNull();
+    const bExhausted = (await rExhausted.json()) as Record<string, unknown>;
+    expect(bExhausted.nextSteps).toBe("start_new_payment");
+    expect(bExhausted.retryable).toBe(false);
+    expect(boundedSubmits.length).toBe(3);
+    expect(new Set(boundedSubmits).size).toBe(3);
+    expect(boundedChecks).toEqual([
+      "pay_bounded_attempt_1",
+      "pay_bounded_attempt_2",
+      "pay_bounded_attempt_3",
     ]);
+    const boundedFailEvents = boundedHarness.events.filter((e) => e.message === "payment.failed");
+    expect(boundedFailEvents.map((e) => e.data?.action)).toEqual([
+      "retry_later",
+      "retry_later",
+      "start_new_payment",
+    ]);
+
+    // Cross-isolate concurrent release / consumption during poll:
+    // if another isolate already exhausted or consumed `tx_guard` in DO, warm isolate evicts its stale entry locally
+    const raceTx = await buildSignedTxHex({ sponsored: true, nonce: 7922n });
+    let racePollPhase: "enqueue" | "concurrent_exhausted" = "enqueue";
+    const raceHarness = createTestHarness({
+      async submitPayment() {
+        return { accepted: true, paymentId: "pay_race_stale_7922", status: "queued" };
+      },
+      async checkPayment(paymentId: string) {
+        if (racePollPhase === "enqueue") {
+          return { paymentId, status: "queued" };
+        }
+        return {
+          paymentId,
+          status: "failed",
+          terminalReason: "broadcast_failure",
+          retryable: true,
+        };
+      },
+    });
+    let doGuardState: TxGuardRecord | null = null;
+    (raceHarness.env as unknown as Record<string, unknown>).PAYMENT_POLLING_DO = {
+      idFromName(name: string) {
+        return name as unknown as DurableObjectId;
+      },
+      get() {
+        return {
+          async track() {},
+          async getTxGuard() {
+            return doGuardState;
+          },
+          async claimTx(input: ClaimTxInput): Promise<ClaimTxResult> {
+            doGuardState = {
+              txHash: input.txHash,
+              claimId: input.claimId,
+              consumed: false,
+              expectedRecipient: input.expectedRecipient,
+              minAmount: input.minAmount,
+              asset: input.asset,
+              network: input.network,
+              verifiedPayer: input.verifiedPayer,
+              requestBindingHash: input.requestBindingHash,
+              updatedAt: Date.now(),
+            };
+            return { status: "claimed", record: doGuardState };
+          },
+          async bindTxPayment(input: BindTxPaymentInput) {
+            doGuardState = {
+              txHash: input.txHash,
+              relayPaymentId: input.relayPaymentId,
+              consumed: false,
+              expectedRecipient: input.expectedRecipient,
+              minAmount: input.minAmount,
+              asset: input.asset,
+              network: input.network,
+              verifiedPayer: input.verifiedPayer,
+              requestBindingHash: input.requestBindingHash,
+              boundAt: Date.now(),
+              updatedAt: Date.now(),
+            };
+            return doGuardState;
+          },
+          async clearBoundTx() {
+            // Simulate another isolate having already cleared & exhausted retries (`cleared: false, failedAttempts: 3`)
+            doGuardState = null;
+            return { cleared: false, consumed: false, failedAttempts: 3 };
+          },
+          async markTxConsumed(input: MarkTxConsumedInput) {
+            doGuardState = {
+              txHash: input.txHash,
+              relayPaymentId: input.relayPaymentId,
+              consumed: true,
+              consumedTxid: input.txid,
+              updatedAt: Date.now(),
+            };
+            return { alreadyConsumed: false, record: doGuardState };
+          },
+        };
+      },
+    } as unknown as Env["PAYMENT_POLLING_DO"];
+    const raceSig = encodePaymentSignature({
+      x402Version: 2,
+      payload: { transaction: raceTx },
+    });
+    const rWarm1 = await raceHarness.app.request(
+      "http://localhost/paid",
+      { method: "POST", headers: { [X402_HEADERS.PAYMENT_SIGNATURE]: raceSig } },
+      raceHarness.env
+    );
+    expect(rWarm1.status).toBe(402);
+    expect(rWarm1.headers.get("X-PAYMENT-ID")).toBe("pay_race_stale_7922");
+
+    racePollPhase = "concurrent_exhausted";
+    const rWarm2 = await raceHarness.app.request(
+      "http://localhost/paid",
+      { method: "POST", headers: { [X402_HEADERS.PAYMENT_SIGNATURE]: raceSig } },
+      raceHarness.env
+    );
+    expect(rWarm2.status).toBe(402);
+    expect(rWarm2.headers.get("X-PAYMENT-ID")).toBeNull();
+    const bWarm2 = (await rWarm2.json()) as Record<string, unknown>;
+    expect(bWarm2.nextSteps).toBe("start_new_payment");
+    expect(bWarm2.retryable).toBe(false);
   });
 
   test("maps INSUFFICIENT_FUNDS to 402 insufficient_funds and SPONSOR_NONCE_STALE / SPONSOR_NONCE_DUPLICATE to 503 retry", async () => {

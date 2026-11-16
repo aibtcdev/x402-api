@@ -25,7 +25,7 @@ import type { DerivedHints } from "../utils/payment-hints";
 import {
   MAX_CONSECUTIVE_SCHEMA_MISMATCHES,
   NOT_FOUND_ENQUEUE_GRACE_MS,
-  shouldKeepSamePaymentForBoundedRetry,
+  shouldRetrySamePaymentPoll,
 } from "../utils/payment-status";
 
 export class RelaySchemaMismatchError extends Error {
@@ -86,7 +86,6 @@ export interface TxGuardRecord {
   boundAt?: number;
   claimId?: string;
   claimExpiresAt?: number;
-  samePaymentRetries?: number;
   failedAttempts?: number;
   consumed: boolean;
   consumedAt?: number;
@@ -140,6 +139,13 @@ export interface MarkTxConsumedInput {
 }
 
 export type ClearBoundTxReason = "terminal_failure" | "payer_mismatch";
+
+export interface ClearBoundTxResult {
+  cleared: boolean;
+  consumed: boolean;
+  record?: TxGuardRecord;
+  failedAttempts: number;
+}
 
 // Re-export shared helpers/constants for callers that import from this module
 export type { DerivedHints } from "../utils/payment-hints";
@@ -215,7 +221,6 @@ const SCHEMA_SQL = `
     bound_at                   INTEGER,
     claim_id                   TEXT,
     claim_expires_at           INTEGER,
-    same_payment_retries       INTEGER NOT NULL DEFAULT 0,
     consumed                   INTEGER NOT NULL DEFAULT 0,
     consumed_at                INTEGER,
     consumed_txid              TEXT,
@@ -273,9 +278,6 @@ export class PaymentPollingDO extends DurableObject<Env> {
       }
       if (!cols.has("claim_expires_at")) {
         this.sql.exec("ALTER TABLE tx_guard ADD COLUMN claim_expires_at INTEGER");
-      }
-      if (!cols.has("same_payment_retries")) {
-        this.sql.exec("ALTER TABLE tx_guard ADD COLUMN same_payment_retries INTEGER NOT NULL DEFAULT 0");
       }
     });
   }
@@ -423,12 +425,12 @@ export class PaymentPollingDO extends DurableObject<Env> {
       status === "failed" ? ((row.retryable_failures as number | null) ?? 0) + 1 : 0;
     const withinBoundedRetry =
       status === "failed" &&
-      shouldKeepSamePaymentForBoundedRetry({
+      shouldRetrySamePaymentPoll({
         status,
         retryable: statusData.retryable,
         terminalReason,
         errorCode: statusData.errorCode,
-        attemptCount: nextRetryFailureCount,
+        retryCount: nextRetryFailureCount,
       });
     const keepNonTerminal = withinNotFoundGrace || withinBoundedRetry;
     const persistedStatus = keepNonTerminal ? ((row.status as string) || "queued") : status;
@@ -937,7 +939,6 @@ export class PaymentPollingDO extends DurableObject<Env> {
         verified_payer             = COALESCE(tx_guard.verified_payer, excluded.verified_payer),
         request_binding_hash       = CASE WHEN tx_guard.consumed = 1 OR tx_guard.relay_payment_id IS NOT NULL THEN tx_guard.request_binding_hash ELSE excluded.request_binding_hash END,
         bound_at                   = CASE WHEN tx_guard.consumed = 1 OR tx_guard.relay_payment_id IS NOT NULL THEN tx_guard.bound_at ELSE excluded.bound_at END,
-        same_payment_retries       = CASE WHEN tx_guard.consumed = 1 OR tx_guard.relay_payment_id IS NOT NULL THEN tx_guard.same_payment_retries ELSE 0 END,
         claim_id                   = NULL,
         claim_expires_at           = NULL,
         updated_at                 = excluded.updated_at
@@ -960,42 +961,57 @@ export class PaymentPollingDO extends DurableObject<Env> {
     return record;
   }
 
-  /**
-   * Increment bounded same-payment retry count for an active bound relayPaymentId.
-   * Returns the updated retry count, or null if not bound to expectedRelayPaymentId.
-   */
-  async recordSamePaymentRetry(expectedRelayPaymentId: string): Promise<number | null> {
-    if (!expectedRelayPaymentId) return null;
-    const existing = this._readTxGuard();
-    if (!existing || existing.consumed || existing.relayPaymentId !== expectedRelayPaymentId) {
-      return null;
-    }
-    const now = Date.now();
-    const nextCount = (existing.samePaymentRetries ?? 0) + 1;
-    this.sql.exec(
-      "UPDATE tx_guard SET same_payment_retries = ?, updated_at = ? WHERE id = 1 AND consumed = 0 AND relay_payment_id = ?",
-      nextCount,
-      now,
-      expectedRelayPaymentId
-    );
-    return nextCount;
+  private _readFailedAttempts(txHash?: string): number {
+    const rows = txHash
+      ? [
+          ...this.sql.exec(
+            "SELECT failed_attempts FROM tx_retry_guard WHERE id = 1 AND tx_hash = ? LIMIT 1",
+            txHash
+          ),
+        ]
+      : [...this.sql.exec("SELECT failed_attempts FROM tx_retry_guard WHERE id = 1 LIMIT 1")];
+    return rows.length > 0
+      ? Number((rows[0] as Record<string, unknown>).failed_attempts ?? 0)
+      : 0;
   }
 
   /**
    * Clear pending bound metadata after a terminal non-grace failure or payer mismatch.
-   * Strict no-op if consumed=1 or if relay_payment_id does not match expectedRelayPaymentId.
+   * Strict no-op on tx_guard if consumed=1 or if relay_payment_id does not match expectedRelayPaymentId,
+   * while returning authoritative consumed / failedAttempts state so concurrent isolates never keep stale bindings.
    * Only increments tx_retry_guard.failed_attempts when reason === "terminal_failure".
    */
   async clearBoundTx(
     expectedRelayPaymentId: string,
     reason: ClearBoundTxReason = "terminal_failure"
-  ): Promise<void> {
-    if (!expectedRelayPaymentId) return;
-    const existing = this._readTxGuard();
-    if (!existing || existing.consumed) return;
-    if (existing.relayPaymentId !== expectedRelayPaymentId) return;
+  ): Promise<ClearBoundTxResult> {
     const now = Date.now();
     this._pruneExpiredTxRetryGuard(now);
+    const existing = this._readTxGuard();
+    if (!expectedRelayPaymentId) {
+      return {
+        cleared: false,
+        consumed: Boolean(existing?.consumed),
+        ...(existing ? { record: existing } : {}),
+        failedAttempts: this._readFailedAttempts(existing?.txHash),
+      };
+    }
+    if (existing?.consumed) {
+      return {
+        cleared: false,
+        consumed: true,
+        record: existing,
+        failedAttempts: 0,
+      };
+    }
+    if (!existing || existing.relayPaymentId !== expectedRelayPaymentId) {
+      return {
+        cleared: false,
+        consumed: false,
+        ...(existing ? { record: existing } : {}),
+        failedAttempts: this._readFailedAttempts(existing?.txHash),
+      };
+    }
     if (reason === "terminal_failure") {
       this.sql.exec(
         `
@@ -1024,6 +1040,11 @@ export class PaymentPollingDO extends DurableObject<Env> {
       expectedRelayPaymentId
     );
     await this._clearAlarmIfNoActivePoll();
+    return {
+      cleared: true,
+      consumed: false,
+      failedAttempts: this._readFailedAttempts(existing.txHash),
+    };
   }
 
   /**
@@ -1095,10 +1116,6 @@ export class PaymentPollingDO extends DurableObject<Env> {
       boundAt: typeof row.bound_at === "number" ? row.bound_at : undefined,
       claimId: (row.claim_id as string | null) ?? undefined,
       claimExpiresAt: typeof row.claim_expires_at === "number" ? row.claim_expires_at : undefined,
-      samePaymentRetries:
-        typeof row.same_payment_retries === "number" && row.same_payment_retries > 0
-          ? row.same_payment_retries
-          : undefined,
       consumed: row.consumed === 1,
       consumedAt: typeof row.consumed_at === "number" ? row.consumed_at : undefined,
       consumedTxid: (row.consumed_txid as string | null) ?? undefined,

@@ -77,12 +77,10 @@ export function isRelayRetryableTerminalReason(reason: string | undefined): bool
 }
 
 /**
- * Max retryable `failed` check observations on the same `paymentId` before
- * releasing the binding / marking terminal so the caller may resubmit.
- * Attempts 1..(MAX_SAME_PAYMENT_RETRY_ATTEMPTS - 1) keep the same `paymentId`;
- * attempt >= MAX_SAME_PAYMENT_RETRY_ATTEMPTS releases it.
+ * Maximum bounded retries of the same signed payment (`MAX_SAME_PAYMENT_RETRIES = 2`
+ * means 1 initial attempt + up to 2 retries = 3 total attempts before requiring a new payment).
  */
-export const MAX_SAME_PAYMENT_RETRY_ATTEMPTS = 3;
+export const MAX_SAME_PAYMENT_RETRIES = 2;
 
 /**
  * Max consecutive deterministic schema mismatches in `PaymentPollingDO` before
@@ -91,28 +89,56 @@ export const MAX_SAME_PAYMENT_RETRY_ATTEMPTS = 3;
 export const MAX_CONSECUTIVE_SCHEMA_MISMATCHES = 3;
 
 /**
- * Shared bounded-retry rule for `checkPayment` results with `status === "failed"`
- * (`@aibtc/tx-schemas` `docs/boring-state-machine-contract.md` :81-82, :123):
- *   - `errorCode === "BROADCAST_EXHAUSTED"` (`finalizeExhaustedPayment`): the
- *     payment is permanently exhausted and relay dedup was released -> release immediately (`false`).
- *   - Other retryable relay/settlement (or untyped `retryable: true`) failures
- *     keep the same `paymentId` up to `MAX_SAME_PAYMENT_RETRY_ATTEMPTS - 1`, then release.
+ * Bounded resubmission rule for `x402Middleware` after releasing a failed
+ * `relayPaymentId`. On `x402-sponsor-relay`, `failed` is final for that record
+ * (`skip_terminal_payment`), and `getReusablePaymentRecord` drops terminal records
+ * so resubmitting the same signed tx under a rotated `settlementAttemptId` is
+ * nonce-safe (at most one tx at that sender nonce can confirm) and mints a fresh
+ * relay attempt. Allows up to `MAX_SAME_PAYMENT_RETRIES` retries (`failedAttempts <= 2`);
+ * once `failedAttempts > MAX_SAME_PAYMENT_RETRIES`, callers must start a new payment.
  */
-export function shouldKeepSamePaymentForBoundedRetry(params: {
+export function canRetrySamePaymentResubmission(params: {
+  status: string | undefined;
+  retryable: boolean | undefined;
+  terminalReason: string | undefined;
+  failedAttempts: number;
+}): boolean {
+  if (params.status !== "failed") return false;
+  if (params.retryable === false) return false;
+  if (params.terminalReason !== undefined) {
+    if (!isRelayRetryableTerminalReason(params.terminalReason)) {
+      return false;
+    }
+  } else if (params.retryable !== true) {
+    return false;
+  }
+  return params.failedAttempts > 0 && params.failedAttempts <= MAX_SAME_PAYMENT_RETRIES;
+}
+
+/**
+ * Bounded poll-retry rule for `PaymentPollingDO.poll()`, which only polls
+ * `checkPayment(paymentId)` and cannot resubmit a signed transaction:
+ *   - Any `failed` status carrying a relay `errorCode` (e.g. `BROADCAST_EXHAUSTED`,
+ *     `BROADCAST_FAILED`, `SPONSOR_EXHAUSTED`) reflects a persisted terminal record
+ *     on the relay -> mark terminal immediately (`false`).
+ *   - Transient no-`errorCode` `checkPayment` failures (e.g. `RELAY_KV` missing in
+ *     `rpc.ts:585-593`) retry up to `MAX_SAME_PAYMENT_RETRIES` polls, then mark terminal.
+ */
+export function shouldRetrySamePaymentPoll(params: {
   status: string | undefined;
   retryable: boolean | undefined;
   terminalReason: string | undefined;
   errorCode?: string;
-  attemptCount: number;
+  retryCount: number;
 }): boolean {
   if (params.status !== "failed") return false;
   if (params.retryable !== true) return false;
-  if (params.errorCode === "BROADCAST_EXHAUSTED") return false;
+  if (params.errorCode !== undefined) return false;
   if (
     params.terminalReason !== undefined &&
     !isRelayRetryableTerminalReason(params.terminalReason)
   ) {
     return false;
   }
-  return params.attemptCount < MAX_SAME_PAYMENT_RETRY_ATTEMPTS;
+  return params.retryCount > 0 && params.retryCount <= MAX_SAME_PAYMENT_RETRIES;
 }

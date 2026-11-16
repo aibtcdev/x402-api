@@ -1093,7 +1093,10 @@ describe("PaymentPollingDO real tx_guard & alarm() lifecycle", () => {
       requestBindingHash: "hash_r1",
       claimId: "claim_r2",
     });
-    await instance.clearBoundTx("pay_dead_2");
+    const clearRes2 = await instance.clearBoundTx("pay_dead_2");
+    expect(clearRes2).toEqual({ cleared: true, consumed: false, failedAttempts: 2 });
+    const clearRepeat = await instance.clearBoundTx("pay_dead_2");
+    expect(clearRepeat).toEqual({ cleared: false, consumed: false, failedAttempts: 2 });
 
     const thirdClaim = await instance.claimTx({
       txHash: "tx_retry_1",

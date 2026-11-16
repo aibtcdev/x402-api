@@ -1,10 +1,11 @@
 import { describe, expect, test } from "bun:test";
 import {
-  MAX_SAME_PAYMENT_RETRY_ATTEMPTS,
+  MAX_SAME_PAYMENT_RETRIES,
+  canRetrySamePaymentResubmission,
   isInFlightPaymentState,
   isRelayRetryableTerminalReason,
   isSenderRebuildTerminalReason,
-  shouldKeepSamePaymentForBoundedRetry,
+  shouldRetrySamePaymentPoll,
 } from "../src/utils/payment-status";
 
 describe("payment-status classifier predicates", () => {
@@ -39,50 +40,93 @@ describe("payment-status classifier predicates", () => {
     expect(isInFlightPaymentState(undefined)).toBe(false);
   });
 
-  test("distinguishes dead BROADCAST_EXHAUSTED from bounded same-payment retry", () => {
+  test("bounds same-payment resubmissions and DO poll retries to MAX_SAME_PAYMENT_RETRIES (2)", () => {
+    expect(MAX_SAME_PAYMENT_RETRIES).toBe(2);
+
+    // Middleware resubmission budget: failedAttempts 1 and 2 allow resending same payment; 3 exhausts budget
     expect(
-      shouldKeepSamePaymentForBoundedRetry({
+      canRetrySamePaymentResubmission({
+        status: "failed",
+        retryable: true,
+        terminalReason: "broadcast_failure",
+        failedAttempts: 1,
+      })
+    ).toBe(true);
+    expect(
+      canRetrySamePaymentResubmission({
+        status: "failed",
+        retryable: true,
+        terminalReason: "internal_error",
+        failedAttempts: MAX_SAME_PAYMENT_RETRIES,
+      })
+    ).toBe(true);
+    expect(
+      canRetrySamePaymentResubmission({
+        status: "failed",
+        retryable: true,
+        terminalReason: "internal_error",
+        failedAttempts: MAX_SAME_PAYMENT_RETRIES + 1,
+      })
+    ).toBe(false);
+    expect(
+      canRetrySamePaymentResubmission({
+        status: "failed",
+        retryable: false,
+        terminalReason: "broadcast_failure",
+        failedAttempts: 1,
+      })
+    ).toBe(false);
+    expect(
+      canRetrySamePaymentResubmission({
+        status: "failed",
+        retryable: true,
+        terminalReason: "invalid_transaction",
+        failedAttempts: 1,
+      })
+    ).toBe(false);
+
+    // DO poll retry: persisted relay errorCode (BROADCAST_EXHAUSTED, BROADCAST_FAILED) marks terminal immediately;
+    // transient no-errorCode failure retries MAX_SAME_PAYMENT_RETRIES (2) times and marks terminal on 3rd observation.
+    expect(
+      shouldRetrySamePaymentPoll({
         status: "failed",
         retryable: true,
         terminalReason: "internal_error",
         errorCode: "BROADCAST_EXHAUSTED",
-        attemptCount: 1,
+        retryCount: 1,
       })
     ).toBe(false);
-
     expect(
-      shouldKeepSamePaymentForBoundedRetry({
+      shouldRetrySamePaymentPoll({
         status: "failed",
         retryable: true,
-        terminalReason: "internal_error",
-        attemptCount: 1,
-      })
-    ).toBe(true);
-
-    expect(
-      shouldKeepSamePaymentForBoundedRetry({
-        status: "failed",
-        retryable: true,
-        terminalReason: "internal_error",
-        attemptCount: MAX_SAME_PAYMENT_RETRY_ATTEMPTS - 1,
-      })
-    ).toBe(true);
-
-    expect(
-      shouldKeepSamePaymentForBoundedRetry({
-        status: "failed",
-        retryable: true,
-        terminalReason: "internal_error",
-        attemptCount: MAX_SAME_PAYMENT_RETRY_ATTEMPTS,
+        terminalReason: "broadcast_failure",
+        errorCode: "BROADCAST_FAILED",
+        retryCount: 1,
       })
     ).toBe(false);
-
     expect(
-      shouldKeepSamePaymentForBoundedRetry({
+      shouldRetrySamePaymentPoll({
         status: "failed",
         retryable: true,
-        terminalReason: "invalid_transaction",
-        attemptCount: 1,
+        terminalReason: "internal_error",
+        retryCount: 1,
+      })
+    ).toBe(true);
+    expect(
+      shouldRetrySamePaymentPoll({
+        status: "failed",
+        retryable: true,
+        terminalReason: "internal_error",
+        retryCount: MAX_SAME_PAYMENT_RETRIES,
+      })
+    ).toBe(true);
+    expect(
+      shouldRetrySamePaymentPoll({
+        status: "failed",
+        retryable: true,
+        terminalReason: "internal_error",
+        retryCount: MAX_SAME_PAYMENT_RETRIES + 1,
       })
     ).toBe(false);
   });
