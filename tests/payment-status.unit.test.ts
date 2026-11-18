@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import {
   MAX_SAME_PAYMENT_RETRIES,
   canRetrySamePaymentResubmission,
+  classifySenderNonceState,
   isInFlightPaymentState,
   isRelayRetryableTerminalReason,
   isSenderRebuildTerminalReason,
@@ -129,5 +130,54 @@ describe("payment-status classifier predicates", () => {
         retryCount: MAX_SAME_PAYMENT_RETRIES + 1,
       })
     ).toBe(false);
+  });
+
+  test("classifies payer account nonces into consumed, pending, and unused before start_new_payment", () => {
+    expect(
+      classifySenderNonceState(7, {
+        last_executed_tx_nonce: 7,
+        last_mempool_tx_nonce: null,
+        possible_next_nonce: 8,
+        detected_missing_nonces: [],
+      })
+    ).toBe("consumed");
+
+    expect(
+      classifySenderNonceState(8, {
+        last_executed_tx_nonce: 7,
+        last_mempool_tx_nonce: 8,
+        possible_next_nonce: 9,
+        detected_missing_nonces: [],
+      })
+    ).toBe("pending");
+
+    expect(
+      classifySenderNonceState(9, {
+        last_executed_tx_nonce: 7,
+        last_mempool_tx_nonce: 9,
+        possible_next_nonce: 10,
+        detected_missing_nonces: [8],
+        detected_mempool_nonces: [9],
+      })
+    ).toBe("pending");
+
+    expect(
+      classifySenderNonceState(8, {
+        last_executed_tx_nonce: 7,
+        last_mempool_tx_nonce: 9,
+        possible_next_nonce: 10,
+        detected_missing_nonces: [8],
+        detected_mempool_nonces: [9],
+      })
+    ).toBe("unused");
+
+    expect(
+      classifySenderNonceState(8, {
+        last_executed_tx_nonce: 7,
+        last_mempool_tx_nonce: null,
+        possible_next_nonce: 8,
+        detected_missing_nonces: [],
+      })
+    ).toBe("unused");
   });
 });

@@ -1190,6 +1190,54 @@ describe("PaymentPollingDO real tx_guard & alarm() lifecycle", () => {
     expect(retryRowsAfterConsume.length).toBe(0);
   });
 
+  test("clearBoundTx advances failedAttempts per released binding even when resubmissions return the same relayPaymentId, while ignoring duplicate clears", async () => {
+    const { instance, ready } = createInMemoryDO();
+    await ready();
+
+    const sameRelayId = "pay_same_id_no_kv";
+    for (let expectedAttempt = 1; expectedAttempt <= 3; expectedAttempt++) {
+      const claimed = await instance.claimTx({
+        txHash: "tx_same_relay_id",
+        claimId: `claim_same_${expectedAttempt}`,
+        expectedRecipient: "ST_SELLER",
+        minAmount: "1000",
+        asset: "STX",
+        network: "stacks:2147483648",
+        requestBindingHash: "hash_same_id",
+      });
+      expect(claimed.status).toBe("claimed");
+      if (claimed.status === "claimed" && expectedAttempt > 1) {
+        expect(claimed.record.failedAttempts).toBe(expectedAttempt - 1);
+      }
+
+      await instance.bindTxPayment({
+        txHash: "tx_same_relay_id",
+        relayPaymentId: sameRelayId,
+        expectedRecipient: "ST_SELLER",
+        minAmount: "1000",
+        asset: "STX",
+        network: "stacks:2147483648",
+        requestBindingHash: "hash_same_id",
+        claimId: `claim_same_${expectedAttempt}`,
+      });
+
+      const cleared = await instance.clearBoundTx(sameRelayId, "terminal_failure");
+      expect(cleared).toEqual({
+        cleared: true,
+        consumed: false,
+        failedAttempts: expectedAttempt,
+      });
+
+      // Concurrent duplicate clear on the already-released binding must not double-increment
+      const duplicateClear = await instance.clearBoundTx(sameRelayId, "terminal_failure");
+      expect(duplicateClear).toEqual({
+        cleared: false,
+        consumed: false,
+        failedAttempts: expectedAttempt,
+      });
+    }
+  });
+
   test("poll() distinguishes dead BROADCAST_EXHAUSTED from bounded no-errorCode retry, deduplicates HTTP fallback warn per payment, and bounds consecutive schema mismatches", async () => {
     let rpcSeq = 0;
     const warnLogs: Array<{ msg: unknown; details: unknown }> = [];

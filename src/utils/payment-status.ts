@@ -142,3 +142,56 @@ export function shouldRetrySamePaymentPoll(params: {
   }
   return params.retryCount > 0 && params.retryCount <= MAX_SAME_PAYMENT_RETRIES;
 }
+
+export interface AccountNoncesSnapshot {
+  last_executed_tx_nonce: number | null;
+  last_mempool_tx_nonce: number | null;
+  possible_next_nonce: number;
+  detected_missing_nonces: number[];
+  detected_mempool_nonces?: number[];
+}
+
+export type SenderNonceLifecycleState = "consumed" | "pending" | "unused";
+
+/**
+ * Classify a payment transaction's sender nonce against Hiro's
+ * `/extended/v1/address/{payer}/nonces` snapshot before emitting `start_new_payment`:
+ *   - `"consumed"`: `txNonce <= last_executed_tx_nonce` (an anchored tx already used this nonce).
+ *   - `"pending"`: `txNonce` is still present in the mempool (`detected_mempool_nonces` or
+ *     within `(last_executed_tx_nonce, last_mempool_tx_nonce]` and not in `detected_missing_nonces`).
+ *   - `"unused"`: `txNonce` has neither executed nor sits in the mempool, so signing a new payment is safe.
+ */
+export function classifySenderNonceState(
+  txNonce: number,
+  nonces: AccountNoncesSnapshot
+): SenderNonceLifecycleState {
+  if (!Number.isSafeInteger(txNonce) || txNonce < 0) {
+    return "unused";
+  }
+  const lastExecuted = nonces.last_executed_tx_nonce;
+  if (typeof lastExecuted === "number" && txNonce <= lastExecuted) {
+    return "consumed";
+  }
+  const mempoolSet = new Set(nonces.detected_mempool_nonces ?? []);
+  if (mempoolSet.has(txNonce)) {
+    return "pending";
+  }
+  const missingSet = new Set(nonces.detected_missing_nonces ?? []);
+  if (missingSet.has(txNonce)) {
+    return "unused";
+  }
+  const lastMempool = nonces.last_mempool_tx_nonce;
+  if (typeof lastMempool === "number") {
+    const floor = typeof lastExecuted === "number" ? lastExecuted : -1;
+    if (txNonce > floor && txNonce <= lastMempool) {
+      return "pending";
+    }
+  } else if (
+    lastExecuted === null &&
+    typeof nonces.possible_next_nonce === "number" &&
+    txNonce < nonces.possible_next_nonce
+  ) {
+    return "consumed";
+  }
+  return "unused";
+}

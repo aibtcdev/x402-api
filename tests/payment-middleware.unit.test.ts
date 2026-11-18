@@ -4,15 +4,19 @@ import { X402_ERROR_CODES, X402_HEADERS, X402PaymentVerifier } from "x402-stacks
 import {
   makeSTXTokenTransfer,
   privateKeyToAddress,
+  sponsorTransaction,
 } from "@stacks/transactions";
 import {
   classifyPaymentError,
+  defaultCheckPayerNonceBeforeNewPayment,
   deriveRequestCorrelationId,
+  doesExecutedTxMatchSubmittedOrigin,
   extractCheckStatusUrl,
   extractVerifiedTransactionOrigin,
   NOT_FOUND_ENQUEUE_GRACE_MS,
   x402Middleware,
 } from "../src/middleware/x402";
+import type { X402MiddlewareOptions } from "../src/middleware/x402";
 import { computeDerivedHints } from "../src/utils/payment-hints";
 import type { AppVariables, Env, Logger, RelayRPC } from "../src/types";
 import type {
@@ -56,7 +60,10 @@ function encodePaymentSignature(payload: Record<string, unknown>): string {
   return btoa(JSON.stringify(payload));
 }
 
-function createTestHarness(relay?: RelayRPC) {
+function createTestHarness(
+  relay?: RelayRPC,
+  middlewareOverrides: Partial<X402MiddlewareOptions> = {}
+) {
   const events: Array<{ level: string; message: string; data?: Record<string, unknown> }> = [];
   const trackedPayments: Array<Record<string, unknown>> = [];
   let handlerCount = 0;
@@ -111,7 +118,15 @@ function createTestHarness(relay?: RelayRPC) {
   });
   app.post(
     "/paid",
-    x402Middleware({ tier: "standard", rpcPollMaxAttempts: 1, rpcPollIntervalMs: 0 }),
+    x402Middleware({
+      tier: "standard",
+      rpcPollMaxAttempts: 1,
+      rpcPollIntervalMs: 0,
+      checkPayerNonceBeforeNewPayment:
+        middlewareOverrides.checkPayerNonceBeforeNewPayment ??
+        (async () => ({ outcome: "unused" })),
+      ...middlewareOverrides,
+    }),
     (c) => {
       handlerCount += 1;
       const ctx = c.get("x402");
@@ -4785,6 +4800,390 @@ describe("x402Middleware — RPC enqueue vs confirmed settlement, relay ID recov
       expect(bodySponsor.terminalReason).toBe("sponsor_nonce_conflict");
       expect(bodySponsor.retryable).toBe(true);
       expect(bodySponsor.nextSteps).toBe("retry_later");
+    }
+  });
+
+  test("advances retry counter when resubmissions return the same relayPaymentId on no-errorCode failures", async () => {
+    const sameIdTx = await buildSignedTxHex({ sponsored: true, nonce: 7930n });
+    const sameRelayPaymentId = "pay_same_id_no_relay_kv_7930";
+    const seenAttemptIds: string[] = [];
+    const sameIdHarness = createTestHarness({
+      async submitPayment(_tx, _opts, paymentIdentifier) {
+        seenAttemptIds.push(paymentIdentifier ?? "");
+        return {
+          accepted: true,
+          paymentId: sameRelayPaymentId,
+          status: "queued",
+        };
+      },
+      async checkPayment(paymentId: string) {
+        return {
+          paymentId,
+          status: "failed",
+          terminalReason: "internal_error",
+          error: "Storage not configured",
+          retryable: true,
+        };
+      },
+    });
+    const sig = encodePaymentSignature({
+      x402Version: 2,
+      extensions: { "payment-identifier": { info: { id: "pay_client_same_7930" } } },
+      payload: { transaction: sameIdTx },
+    });
+
+    for (let i = 1; i <= 2; i++) {
+      const res = await sameIdHarness.app.request(
+        "http://localhost/paid",
+        { method: "POST", headers: { [X402_HEADERS.PAYMENT_SIGNATURE]: sig } },
+        sameIdHarness.env
+      );
+      expect(res.status).toBe(402);
+      const body = (await res.json()) as Record<string, unknown>;
+      expect(body.nextSteps).toBe("retry_later");
+      expect(body.retryable).toBe(true);
+    }
+
+    const res3 = await sameIdHarness.app.request(
+      "http://localhost/paid",
+      { method: "POST", headers: { [X402_HEADERS.PAYMENT_SIGNATURE]: sig } },
+      sameIdHarness.env
+    );
+    expect(res3.status).toBe(402);
+    const body3 = (await res3.json()) as Record<string, unknown>;
+    expect(body3.nextSteps).toBe("start_new_payment");
+    expect(body3.retryable).toBe(false);
+    expect(new Set(seenAttemptIds).size).toBe(3);
+  });
+
+  test("verifies payer account nonce via Hiro before start_new_payment (pending -> retry_later, consumed match -> confirmed, consumed mismatch -> replaced, brownout -> retry_later)", async () => {
+    const originalFetch = globalThis.fetch;
+
+    try {
+      const baseUnsponsored = await makeSTXTokenTransfer({
+        recipient: TEST_SELLER_ADDRESS,
+        amount: 1000n,
+        senderKey: TEST_BUYER_PRIVKEY,
+        network: "testnet",
+        memo: "x402-nonce-guard",
+        nonce: 8101n,
+        fee: 200n,
+        sponsored: true,
+      });
+      const coSignedSponsored = await sponsorTransaction({
+        transaction: baseUnsponsored,
+        sponsorPrivateKey: TEST_ATTACKER_PRIVKEY,
+        fee: 550n,
+        sponsorNonce: 42n,
+        network: "testnet",
+      });
+      const replacementTx = await makeSTXTokenTransfer({
+        recipient: TEST_SELLER_ADDRESS,
+        amount: 1n,
+        senderKey: TEST_BUYER_PRIVKEY,
+        network: "testnet",
+        memo: "self-replace",
+        nonce: 8101n,
+        fee: 200n,
+        sponsored: true,
+      });
+      expect(
+        doesExecutedTxMatchSubmittedOrigin(
+          baseUnsponsored.serialize(),
+          `0x${coSignedSponsored.serialize()}`
+        )
+      ).toBe(true);
+      expect(
+        doesExecutedTxMatchSubmittedOrigin(
+          baseUnsponsored.serialize(),
+          replacementTx.serialize()
+        )
+      ).toBe(false);
+
+      // 1. Nonce still pending in mempool on post-grace `not_found` -> keeps `retry_later`
+      const pendingTxHex = await buildSignedTxHex({ sponsored: true, nonce: 8102n });
+      let notFoundPhase: "enqueue" | "expired_not_found" = "enqueue";
+      const realNow = Date.now;
+      let fakeNow = 1_700_000_000_000;
+      Date.now = () => fakeNow;
+
+      globalThis.fetch = (async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.endsWith(`/extended/v1/address/${TEST_BUYER_ADDRESS}/nonces`)) {
+          return new Response(
+            JSON.stringify({
+              last_executed_tx_nonce: 8101,
+              last_mempool_tx_nonce: 8102,
+              possible_next_nonce: 8103,
+              detected_missing_nonces: [],
+              detected_mempool_nonces: [],
+            }),
+            { status: 200, headers: { "Content-Type": "application/json" } }
+          );
+        }
+        return new Response("not mocked", { status: 500 });
+      }) as unknown as typeof fetch;
+
+      const pendingHarness = createTestHarness(
+        {
+          async submitPayment() {
+            return { accepted: true, paymentId: "pay_pending_mempool_8102", status: "queued" };
+          },
+          async checkPayment(paymentId: string) {
+            return {
+              paymentId,
+              status: notFoundPhase === "enqueue" ? "queued" : "not_found",
+            };
+          },
+        },
+        { checkPayerNonceBeforeNewPayment: defaultCheckPayerNonceBeforeNewPayment }
+      );
+      const pendingSig = encodePaymentSignature({
+        x402Version: 2,
+        payload: { transaction: pendingTxHex },
+      });
+      try {
+        const rEnq = await pendingHarness.app.request(
+          "http://localhost/paid",
+          { method: "POST", headers: { [X402_HEADERS.PAYMENT_SIGNATURE]: pendingSig } },
+          pendingHarness.env
+        );
+        expect(rEnq.status).toBe(402);
+
+        notFoundPhase = "expired_not_found";
+        fakeNow += NOT_FOUND_ENQUEUE_GRACE_MS + 5_000;
+        const rPendingGuard = await pendingHarness.app.request(
+          "http://localhost/paid",
+          { method: "POST", headers: { [X402_HEADERS.PAYMENT_SIGNATURE]: pendingSig } },
+          pendingHarness.env
+        );
+        expect(rPendingGuard.status).toBe(402);
+        expect(rPendingGuard.headers.get("Retry-After")).toBe("15");
+        expect(rPendingGuard.headers.get("X-PAYMENT-ID")).toBeNull();
+        const bPendingGuard = (await rPendingGuard.json()) as Record<string, unknown>;
+        expect(bPendingGuard.nextSteps).toBe("retry_later");
+        expect(bPendingGuard.retryable).toBe(true);
+        expect(bPendingGuard.checkStatusUrl).toBeUndefined();
+      } finally {
+        Date.now = realNow;
+      }
+
+      // 2. Nonce already consumed by our exact sponsored tx (`tx_status === "success"`) -> settles as `confirmed` (200 OK)
+      const landedSponsoredTxid = `0x${coSignedSponsored.txid()}`;
+      globalThis.fetch = (async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.endsWith(`/extended/v1/address/${TEST_BUYER_ADDRESS}/nonces`)) {
+          return new Response(
+            JSON.stringify({
+              last_executed_tx_nonce: 8101,
+              last_mempool_tx_nonce: null,
+              possible_next_nonce: 8102,
+              detected_missing_nonces: [],
+            }),
+            { status: 200, headers: { "Content-Type": "application/json" } }
+          );
+        }
+        if (url.includes(`/extended/v1/address/${TEST_BUYER_ADDRESS}/transactions`)) {
+          return new Response(
+            JSON.stringify({
+              results: [
+                {
+                  tx_id: landedSponsoredTxid,
+                  nonce: 8101,
+                  sender_address: TEST_BUYER_ADDRESS,
+                  canonical: true,
+                  tx_status: "success",
+                },
+              ],
+            }),
+            { status: 200, headers: { "Content-Type": "application/json" } }
+          );
+        }
+        if (url.endsWith(`/extended/v1/tx/${coSignedSponsored.txid()}/raw`)) {
+          return new Response(
+            JSON.stringify({ raw_tx: `0x${coSignedSponsored.serialize()}` }),
+            { status: 200, headers: { "Content-Type": "application/json" } }
+          );
+        }
+        return new Response("not mocked", { status: 404 });
+      }) as unknown as typeof fetch;
+
+      const landedHarness = createTestHarness(
+        {
+          async submitPayment() {
+            return { accepted: true, paymentId: "pay_landed_8101", status: "queued" };
+          },
+          async checkPayment(paymentId: string) {
+            return {
+              paymentId,
+              status: "failed",
+              terminalReason: "internal_error",
+              retryable: false,
+            };
+          },
+        },
+        { checkPayerNonceBeforeNewPayment: defaultCheckPayerNonceBeforeNewPayment }
+      );
+      const landedSig = encodePaymentSignature({
+        x402Version: 2,
+        payload: { transaction: baseUnsponsored.serialize() },
+      });
+      const rConfirmed = await landedHarness.app.request(
+        "http://localhost/paid",
+        { method: "POST", headers: { [X402_HEADERS.PAYMENT_SIGNATURE]: landedSig } },
+        landedHarness.env
+      );
+      expect(rConfirmed.status).toBe(200);
+      const bConfirmed = (await rConfirmed.json()) as Record<string, unknown>;
+      expect(bConfirmed.ok).toBe(true);
+      expect(bConfirmed.txid).toBe(landedSponsoredTxid);
+      expect(landedHarness.getHandlerCount()).toBe(1);
+
+      const rReplay = await landedHarness.app.request(
+        "http://localhost/paid",
+        { method: "POST", headers: { [X402_HEADERS.PAYMENT_SIGNATURE]: landedSig } },
+        landedHarness.env
+      );
+      expect(rReplay.status).toBe(402);
+      const bReplay = (await rReplay.json()) as Record<string, unknown>;
+      expect(bReplay.nextSteps).toBe("start_new_payment");
+      expect(landedHarness.getHandlerCount()).toBe(1);
+
+      // 3. Nonce already consumed by a different replacement tx -> answers as `replaced` (`nonce_replacement`)
+      const replacedCandidate = await makeSTXTokenTransfer({
+        recipient: TEST_SELLER_ADDRESS,
+        amount: 1000n,
+        senderKey: TEST_BUYER_PRIVKEY,
+        network: "testnet",
+        memo: "original-unlanded",
+        nonce: 8105n,
+        fee: 200n,
+        sponsored: true,
+      });
+      const otherNonce8105 = await makeSTXTokenTransfer({
+        recipient: TEST_SELLER_ADDRESS,
+        amount: 5n,
+        senderKey: TEST_BUYER_PRIVKEY,
+        network: "testnet",
+        memo: "different-tx",
+        nonce: 8105n,
+        fee: 300n,
+        sponsored: false,
+      });
+      globalThis.fetch = (async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.endsWith(`/extended/v1/address/${TEST_BUYER_ADDRESS}/nonces`)) {
+          return new Response(
+            JSON.stringify({
+              last_executed_tx_nonce: 8105,
+              last_mempool_tx_nonce: null,
+              possible_next_nonce: 8106,
+              detected_missing_nonces: [],
+            }),
+            { status: 200, headers: { "Content-Type": "application/json" } }
+          );
+        }
+        if (url.includes(`/extended/v1/address/${TEST_BUYER_ADDRESS}/transactions`)) {
+          return new Response(
+            JSON.stringify({
+              results: [
+                {
+                  tx_id: `0x${otherNonce8105.txid()}`,
+                  nonce: 8105,
+                  sender_address: TEST_BUYER_ADDRESS,
+                  canonical: true,
+                  tx_status: "success",
+                },
+              ],
+            }),
+            { status: 200, headers: { "Content-Type": "application/json" } }
+          );
+        }
+        if (url.endsWith(`/extended/v1/tx/${otherNonce8105.txid()}/raw`)) {
+          return new Response(
+            JSON.stringify({ raw_tx: `0x${otherNonce8105.serialize()}` }),
+            { status: 200, headers: { "Content-Type": "application/json" } }
+          );
+        }
+        return new Response("not mocked", { status: 404 });
+      }) as unknown as typeof fetch;
+
+      const replacedHarness = createTestHarness(
+        {
+          async submitPayment() {
+            return { accepted: true, paymentId: "pay_replaced_8105", status: "queued" };
+          },
+          async checkPayment(paymentId: string) {
+            return {
+              paymentId,
+              status: "failed",
+              terminalReason: "internal_error",
+              retryable: false,
+            };
+          },
+        },
+        { checkPayerNonceBeforeNewPayment: defaultCheckPayerNonceBeforeNewPayment }
+      );
+      const rReplaced = await replacedHarness.app.request(
+        "http://localhost/paid",
+        {
+          method: "POST",
+          headers: {
+            [X402_HEADERS.PAYMENT_SIGNATURE]: encodePaymentSignature({
+              x402Version: 2,
+              payload: { transaction: replacedCandidate.serialize() },
+            }),
+          },
+        },
+        replacedHarness.env
+      );
+      expect(rReplaced.status).toBe(402);
+      const bReplaced = (await rReplaced.json()) as Record<string, unknown>;
+      expect(bReplaced.status).toBe("replaced");
+      expect(bReplaced.terminalReason).toBe("nonce_replacement");
+      expect(bReplaced.retryable).toBe(false);
+      expect(bReplaced.nextSteps).toBe("start_new_payment");
+      expect(replacedHarness.events.some((e) => e.message === "payment.replaced")).toBe(true);
+
+      // 4. Hiro API 503 failure -> fails safe to `retry_later` rather than risking double-signing
+      const brownoutTx = await buildSignedTxHex({ sponsored: true, nonce: 8106n });
+      globalThis.fetch = (async () => new Response("Service Unavailable", { status: 503 })) as unknown as typeof fetch;
+      const brownoutHarness = createTestHarness(
+        {
+          async submitPayment() {
+            return { accepted: true, paymentId: "pay_brownout_8106", status: "queued" };
+          },
+          async checkPayment(paymentId: string) {
+            return {
+              paymentId,
+              status: "failed",
+              terminalReason: "internal_error",
+              retryable: false,
+            };
+          },
+        },
+        { checkPayerNonceBeforeNewPayment: defaultCheckPayerNonceBeforeNewPayment }
+      );
+      const rBrownout = await brownoutHarness.app.request(
+        "http://localhost/paid",
+        {
+          method: "POST",
+          headers: {
+            [X402_HEADERS.PAYMENT_SIGNATURE]: encodePaymentSignature({
+              x402Version: 2,
+              payload: { transaction: brownoutTx },
+            }),
+          },
+        },
+        brownoutHarness.env
+      );
+      expect(rBrownout.status).toBe(402);
+      expect(rBrownout.headers.get("Retry-After")).toBe("15");
+      const bBrownout = (await rBrownout.json()) as Record<string, unknown>;
+      expect(bBrownout.nextSteps).toBe("retry_later");
+      expect(bBrownout.retryable).toBe(true);
+    } finally {
+      globalThis.fetch = originalFetch;
     }
   });
 });

@@ -57,6 +57,14 @@ export interface AccountInfo {
   nonce_proof: string;
 }
 
+export interface AccountNonces {
+  last_mempool_tx_nonce: number | null;
+  last_executed_tx_nonce: number | null;
+  possible_next_nonce: number;
+  detected_missing_nonces: number[];
+  detected_mempool_nonces?: number[];
+}
+
 export interface BnsName {
   name: string;
   namespace: string;
@@ -163,6 +171,81 @@ export class HiroClient {
     }
 
     return response.json() as Promise<AccountInfo>;
+  }
+
+  /**
+   * Get account nonce tracking state (`possible_next_nonce`, `last_executed_tx_nonce`,
+   * `last_mempool_tx_nonce`, `detected_missing_nonces`, `detected_mempool_nonces`).
+   */
+  async getAccountNonces(address: string, signal?: AbortSignal): Promise<AccountNonces> {
+    this.log.debug("Fetching account nonces", { address });
+
+    const response = await fetch(
+      `${this.baseUrl}/extended/v1/address/${address}/nonces`,
+      { headers: this.getHeaders(), ...(signal ? { signal } : {}) }
+    );
+
+    if (!response.ok) {
+      const error = await response.text();
+      this.log.error("Failed to fetch account nonces", { address, error });
+      throw new HiroError(`Failed to fetch account nonces: ${response.status}`, response.status);
+    }
+
+    return response.json() as Promise<AccountNonces>;
+  }
+
+  /**
+   * Get recent anchored transactions for an address.
+   */
+  async getAddressTransactions(
+    address: string,
+    limit = 50,
+    signal?: AbortSignal
+  ): Promise<Transaction[]> {
+    this.log.debug("Fetching address transactions", { address, limit });
+
+    const response = await fetch(
+      `${this.baseUrl}/extended/v1/address/${address}/transactions?limit=${limit}`,
+      { headers: this.getHeaders(), ...(signal ? { signal } : {}) }
+    );
+
+    if (!response.ok) {
+      const error = await response.text();
+      this.log.error("Failed to fetch address transactions", { address, error });
+      throw new HiroError(
+        `Failed to fetch address transactions: ${response.status}`,
+        response.status
+      );
+    }
+
+    const data = (await response.json()) as { results?: Transaction[] };
+    return Array.isArray(data.results) ? data.results : [];
+  }
+
+  /**
+   * Get raw serialized hex (`0x...` or bare hex) for a transaction ID.
+   */
+  async getRawTransactionHex(txId: string, signal?: AbortSignal): Promise<string> {
+    this.log.debug("Fetching raw transaction", { txId });
+
+    const cleanTxId = txId.startsWith("0x") ? txId.slice(2) : txId;
+
+    const response = await fetch(
+      `${this.baseUrl}/extended/v1/tx/${cleanTxId}/raw`,
+      { headers: this.getHeaders(), ...(signal ? { signal } : {}) }
+    );
+
+    if (!response.ok) {
+      const error = await response.text();
+      this.log.error("Failed to fetch raw transaction", { txId, error });
+      throw new HiroError(`Failed to fetch raw transaction: ${response.status}`, response.status);
+    }
+
+    const data = (await response.json()) as { raw_tx?: string };
+    if (typeof data.raw_tx !== "string" || data.raw_tx.length === 0) {
+      throw new HiroError("Missing raw_tx in Hiro response", 502);
+    }
+    return data.raw_tx;
   }
 
   /**

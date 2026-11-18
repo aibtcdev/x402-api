@@ -1013,6 +1013,10 @@ export class PaymentPollingDO extends DurableObject<Env> {
       };
     }
     if (reason === "terminal_failure") {
+      // Count per released binding (`existing` matched `expectedRelayPaymentId` above
+      // and is deleted immediately below), not per distinct `relayPaymentId`, so a
+      // resubmission that comes back with the same `relayPaymentId` (e.g. when `RELAY_KV`
+      // is unconfigured) still advances `failed_attempts` instead of sticking at 1.
       this.sql.exec(
         `
         INSERT INTO tx_retry_guard (id, tx_hash, failed_attempts, last_failed_id, updated_at)
@@ -1020,10 +1024,7 @@ export class PaymentPollingDO extends DurableObject<Env> {
         ON CONFLICT(id) DO UPDATE SET
           failed_attempts = CASE
             WHEN tx_retry_guard.tx_hash = excluded.tx_hash
-                 AND COALESCE(tx_retry_guard.last_failed_id, '') != excluded.last_failed_id
               THEN tx_retry_guard.failed_attempts + 1
-            WHEN tx_retry_guard.tx_hash = excluded.tx_hash
-              THEN tx_retry_guard.failed_attempts
             ELSE 1
           END,
           tx_hash         = excluded.tx_hash,

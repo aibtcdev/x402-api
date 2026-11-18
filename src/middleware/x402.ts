@@ -27,11 +27,13 @@ import type {
 } from "x402-stacks";
 import {
   deserializeTransaction,
+  serializePayload,
   addressHashModeToVersion,
   Address,
   AuthType,
 } from "@stacks/transactions";
 import { stripHexPrefix } from "../utils/encoding";
+import { HiroClient } from "../services/hiro";
 import type {
   RpcErrorCode,
   SettleResult,
@@ -74,6 +76,7 @@ import { computeDerivedHints } from "../utils/payment-hints";
 import type { DerivedHints } from "../utils/payment-hints";
 import {
   canRetrySamePaymentResubmission,
+  classifySenderNonceState,
   isRelayRetryableTerminalReason,
   NOT_FOUND_ENQUEUE_GRACE_MS,
 } from "../utils/payment-status";
@@ -83,6 +86,23 @@ export { NOT_FOUND_ENQUEUE_GRACE_MS };
 // =============================================================================
 // Types
 // =============================================================================
+
+export type PayerNonceGuardVerdict =
+  | { outcome: "unused" }
+  | { outcome: "pending" }
+  | { outcome: "confirmed"; txid: string }
+  | { outcome: "replaced" }
+  | { outcome: "aborted" }
+  | { outcome: "unavailable" };
+
+export type CheckPayerNonceBeforeNewPaymentFn = (input: {
+  payerAddress: string;
+  txNonce: number;
+  cleanTxHex: string;
+  network: "mainnet" | "testnet";
+  hiroApiKey?: string;
+  log: Logger;
+}) => Promise<PayerNonceGuardVerdict>;
 
 export interface X402MiddlewareOptions {
   /** Pricing tier for fixed pricing endpoints */
@@ -95,6 +115,8 @@ export interface X402MiddlewareOptions {
   rpcPollMaxAttempts?: number;
   /** Delay in ms between checkPayment poll attempts (default: 1000ms) */
   rpcPollIntervalMs?: number;
+  /** Optional override for the pre-`start_new_payment` payer nonce guard (defaults to Hiro API lookup) */
+  checkPayerNonceBeforeNewPayment?: CheckPayerNonceBeforeNewPaymentFn;
 }
 
 export interface VerifiedTransactionOrigin {
@@ -117,6 +139,7 @@ interface BoundRpcPayment {
   asset: string;
   network: string;
   createdAt: number;
+  countedTerminalRelease?: boolean;
 }
 
 interface RelayBoundStore {
@@ -246,9 +269,6 @@ function recordTerminalFailure(txHash: string, relayPaymentId?: string): void {
     return;
   }
   const existing = FAILED_TX_ATTEMPTS.get(txHash);
-  if (relayPaymentId && existing?.lastFailedPaymentId === relayPaymentId) {
-    return;
-  }
   setFailedAttemptCount(txHash, (existing?.count ?? 0) + 1, relayPaymentId);
 }
 
@@ -651,6 +671,99 @@ export function extractVerifiedTransactionOrigin(
     return null;
   }
 }
+
+const PAYER_NONCE_GUARD_TIMEOUT_MS = 2_500;
+
+function stringifyWithBigInt(value: unknown): string {
+  return JSON.stringify(value, (_, v) => (typeof v === "bigint" ? v.toString() : v));
+}
+
+/**
+ * Verify that an executed on-chain transaction matches the caller's submitted
+ * signed origin (`spendingCondition` signer + nonce + signature, `payload`, and
+ * `postConditions`), invariant across sponsor fee/nonce co-signing.
+ */
+export function doesExecutedTxMatchSubmittedOrigin(
+  submittedCleanHex: string,
+  executedRawHex: string
+): boolean {
+  try {
+    const subHex = stripHexPrefix(submittedCleanHex.trim());
+    const execHex = stripHexPrefix(executedRawHex.trim());
+    if (!subHex || !execHex) {
+      return false;
+    }
+    const subTx = deserializeTransaction(subHex);
+    const execTx = deserializeTransaction(execHex);
+    return (
+      stringifyWithBigInt(subTx.auth?.spendingCondition) ===
+        stringifyWithBigInt(execTx.auth?.spendingCondition) &&
+      serializePayload(subTx.payload) === serializePayload(execTx.payload) &&
+      subTx.postConditionMode === execTx.postConditionMode &&
+      stringifyWithBigInt(subTx.postConditions) ===
+        stringifyWithBigInt(execTx.postConditions)
+    );
+  } catch {
+    return false;
+  }
+}
+
+export const defaultCheckPayerNonceBeforeNewPayment: CheckPayerNonceBeforeNewPaymentFn =
+  async ({ payerAddress, txNonce, cleanTxHex, network, hiroApiKey, log }) => {
+    const hiro = new HiroClient(log, network, hiroApiKey);
+    try {
+      const nonces = await hiro.getAccountNonces(
+        payerAddress,
+        AbortSignal.timeout(PAYER_NONCE_GUARD_TIMEOUT_MS)
+      );
+      const nonceState = classifySenderNonceState(txNonce, nonces);
+      if (nonceState === "unused") {
+        return { outcome: "unused" };
+      }
+      if (nonceState === "pending") {
+        return { outcome: "pending" };
+      }
+
+      const recentTxs = await hiro.getAddressTransactions(
+        payerAddress,
+        50,
+        AbortSignal.timeout(PAYER_NONCE_GUARD_TIMEOUT_MS)
+      );
+      const matchedTx = recentTxs.find(
+        (t) =>
+          t.sender_address === payerAddress &&
+          Number(t.nonce) === txNonce &&
+          t.canonical !== false
+      );
+      if (!matchedTx || typeof matchedTx.tx_id !== "string" || matchedTx.tx_id.length === 0) {
+        return { outcome: "unavailable" };
+      }
+      const rawHex = await hiro.getRawTransactionHex(
+        matchedTx.tx_id,
+        AbortSignal.timeout(PAYER_NONCE_GUARD_TIMEOUT_MS)
+      );
+      if (!doesExecutedTxMatchSubmittedOrigin(cleanTxHex, rawHex)) {
+        return { outcome: "replaced" };
+      }
+      if (matchedTx.tx_status === "success") {
+        const normalizedTxid = matchedTx.tx_id.startsWith("0x")
+          ? matchedTx.tx_id
+          : `0x${matchedTx.tx_id}`;
+        return { outcome: "confirmed", txid: normalizedTxid };
+      }
+      return { outcome: "aborted" };
+    } catch (err) {
+      log.warn(
+        "Failed to verify payer account nonce before start_new_payment; keeping retry_later",
+        {
+          payerAddress,
+          txNonce,
+          error: String(err),
+        }
+      );
+      return { outcome: "unavailable" };
+    }
+  };
 
 function extractCallerSuppliedPaymentId(
   paymentPayload: PaymentPayloadV2,
@@ -1108,6 +1221,7 @@ export function x402Middleware(
     estimator,
     rpcPollMaxAttempts = 15,
     rpcPollIntervalMs = 1000,
+    checkPayerNonceBeforeNewPayment = defaultCheckPayerNonceBeforeNewPayment,
   } = options;
 
   return async (c, next) => {
@@ -1376,6 +1490,7 @@ export function x402Middleware(
     let settledViaHttpVerifier = false;
     let activeHeldClaimId: string | undefined;
     let releasedBoundPaymentOnTerminalFailure = false;
+    let verifiedPayer = txOrigin?.payerAddress;
 
     try {
       if (c.env.X402_RELAY) {
@@ -1392,7 +1507,6 @@ export function x402Middleware(
 
         // Verified transaction origin check:
         // Never trust unsigned outer `paymentPayload.payer` and never fall back to `c.env.X402_SERVER_ADDRESS`.
-        let verifiedPayer = txOrigin?.payerAddress;
         if (verifiedPayer && verifiedPayer === c.env.X402_SERVER_ADDRESS) {
           return c.json(
             {
@@ -2211,7 +2325,8 @@ export function x402Middleware(
             releasedBoundPaymentOnTerminalFailure = true;
             if (clearRes.result && clearRes.result.failedAttempts > 0) {
               setFailedAttemptCount(txHash, clearRes.result.failedAttempts, relayPaymentId);
-            } else {
+            } else if ((!clearRes.available || !clearRes.result) && !boundEntry.countedTerminalRelease) {
+              boundEntry.countedTerminalRelease = true;
               recordTerminalFailure(txHash, relayPaymentId);
             }
 
@@ -2369,24 +2484,18 @@ export function x402Middleware(
     }
 
     if (!settleResult.success) {
-      log.error("Payment settlement failed", { ...settleResult });
-
       const settleRecord = settleResult as Partial<SettleResult> & Record<string, unknown>;
       const resultPaymentId =
         typeof settleRecord.paymentId === "string" && settleRecord.paymentId.startsWith("pay_")
           ? settleRecord.paymentId
           : canonicalPaymentId;
-      const errorReason = (settleResult as { errorReason?: string }).errorReason;
-      const canonicalStatus = normalizeOptionalPublicPaymentStatus(
+      let errorReason = (settleResult as { errorReason?: string }).errorReason;
+      let canonicalStatus = normalizeOptionalPublicPaymentStatus(
         (settleResult as { status?: string }).status
       );
-      const terminalReason = (settleResult as { terminalReason?: string }).terminalReason;
+      let terminalReason = (settleResult as { terminalReason?: string }).terminalReason;
       const explicitRetryable = (settleResult as { retryable?: boolean }).retryable;
-      const classified = classifyPaymentError(errorReason || "settlement_failed", settleResult);
-      const instability = derivePaymentInstability({
-        classifiedCode: classified.code,
-        errorReason,
-      });
+      let classified = classifyPaymentError(errorReason || "settlement_failed", settleResult);
 
       const checkStatusUrl = extractCheckStatusUrl(
         settleRecord,
@@ -2394,9 +2503,10 @@ export function x402Middleware(
         resultPaymentId
       );
 
-      const derivedHints = terminalReason
-        ? computeDerivedHints(canonicalStatus ?? "failed", terminalReason)
-        : null;
+      const derivedHints =
+        terminalReason || canonicalStatus === "not_found" || canonicalStatus === "replaced"
+          ? computeDerivedHints(canonicalStatus ?? "failed", terminalReason)
+          : null;
       const baseSettleHints: DerivedHints =
         explicitRetryable === false
           ? derivedHints && !derivedHints.retryable
@@ -2425,7 +2535,7 @@ export function x402Middleware(
           terminalReason,
           failedAttempts: failedAttemptsAfterRelease,
         });
-      const settleHints: DerivedHints =
+      let settleHints: DerivedHints =
         releasedBoundPaymentOnTerminalFailure && baseSettleHints.nextSteps === "retry_later"
           ? canResendSamePayment
             ? baseSettleHints
@@ -2434,97 +2544,183 @@ export function x402Middleware(
                 nextSteps: "start_new_payment",
               }
           : baseSettleHints;
-      const responseCheckStatusUrl =
-        releasedBoundPaymentOnTerminalFailure && canResendSamePayment
-          ? undefined
-          : checkStatusUrl;
 
-      if (classified.code === X402_ERROR_CODES.TRANSACTION_PENDING) {
-        logPaymentEvent(log, "info", "payment.pending", {
-          route: c.req.path,
-          paymentId: resultPaymentId,
-          status: "queued",
-          checkStatusUrl,
-          action: "reuse_same_payment",
-        }, {
-          requestCorrelationId,
-          classification_code: classified.code,
-          http_status: classified.httpStatus,
-          retry_after: classified.retryAfter ?? null,
-          errorReason: errorReason ?? null,
-          instability,
-        });
-      } else if (
-        classified.code === X402_ERROR_CODES.TRANSACTION_FAILED &&
-        (errorReason === "nonce_replacement" || errorReason === "superseded" || canonicalStatus === "replaced")
-      ) {
-        logPaymentEvent(log, "warn", "payment.replaced", {
-          route: c.req.path,
-          paymentId: resultPaymentId,
-          status: "replaced",
-          checkStatusUrl,
-          action: "start_new_payment",
-        }, {
-          requestCorrelationId,
-          classification_code: classified.code,
-          errorReason: errorReason ?? null,
-        });
-      } else {
-        logPaymentEvent(log, classified.httpStatus >= 500 ? "error" : "warn", "payment.failed", {
-          route: c.req.path,
-          paymentId: resultPaymentId,
-          status: "failed",
-          checkStatusUrl: responseCheckStatusUrl,
-          action: releasedBoundPaymentOnTerminalFailure
-            ? settleHints.nextSteps
-            : getRetryAction(classified.code),
-        }, {
-          requestCorrelationId,
-          classification_code: classified.code,
-          http_status: classified.httpStatus,
-          retry_after:
-            settleHints.nextSteps === "retry_later"
-              ? (settleHints.retryAfter ?? classified.retryAfter ?? null)
-              : null,
-          errorReason: errorReason ?? null,
-          instability,
-        });
-      }
+      // Before emitting `start_new_payment` on a released payment (or `rebuild_and_resign` on a
+      // retried tx rejected with `sender_nonce_stale`), check the payer's account nonce so a
+      // pending sponsored tx in the mempool cannot race with a freshly signed next-nonce payment,
+      // and a previously broadcast tx that already confirmed on-chain is settled rather than re-billed.
+      const parsedTxNonce = txOrigin ? Number(txOrigin.nonce) : NaN;
+      const shouldVerifyPayerNonce =
+        Boolean(
+          verifiedPayer &&
+            txOrigin &&
+            Number.isSafeInteger(parsedTxNonce) &&
+            parsedTxNonce >= 0
+        ) &&
+        ((releasedBoundPaymentOnTerminalFailure &&
+          settleHints.nextSteps === "start_new_payment" &&
+          canonicalStatus !== "replaced") ||
+          (!releasedBoundPaymentOnTerminalFailure &&
+            terminalReason === "sender_nonce_stale" &&
+            getFailedAttemptCount(txHash) > 0));
 
-      if (settleHints.retryable && settleHints.nextSteps === "retry_later") {
-        if (settleHints.retryAfter !== undefined) {
-          c.header("Retry-After", String(settleHints.retryAfter));
-        } else if (classified.retryAfter) {
-          c.header("Retry-After", String(classified.retryAfter));
+      if (shouldVerifyPayerNonce && verifiedPayer && txOrigin) {
+        const nonceVerdict = await checkPayerNonceBeforeNewPayment({
+          payerAddress: verifiedPayer,
+          txNonce: parsedTxNonce,
+          cleanTxHex: txOrigin.cleanHex,
+          network: c.env.X402_NETWORK,
+          hiroApiKey: c.env.HIRO_API_KEY,
+          log,
+        });
+        if (nonceVerdict.outcome === "confirmed") {
+          settleResult = {
+            success: true,
+            transaction: nonceVerdict.txid,
+            network: networkV2,
+            payer: verifiedPayer,
+            paymentId: resultPaymentId,
+            status: "confirmed",
+            checkStatusUrl,
+          } as unknown as SettleResult;
+        } else if (
+          releasedBoundPaymentOnTerminalFailure &&
+          (nonceVerdict.outcome === "pending" || nonceVerdict.outcome === "unavailable")
+        ) {
+          const retryAfterSec = baseSettleHints.retryAfter ?? classified.retryAfter ?? 15;
+          settleHints = {
+            retryable: true,
+            retryAfter: retryAfterSec,
+            nextSteps: "retry_later",
+          };
+        } else if (nonceVerdict.outcome === "replaced") {
+          canonicalStatus = "replaced";
+          terminalReason = "nonce_replacement";
+          errorReason = "nonce_replacement";
+          classified = classifyPaymentError("nonce_replacement", {
+            ...settleRecord,
+            status: "replaced",
+            terminalReason: "nonce_replacement",
+          } as unknown as SettleResult);
+          settleHints = {
+            retryable: false,
+            nextSteps: "start_new_payment",
+          };
+        } else if (nonceVerdict.outcome === "aborted") {
+          canonicalStatus = "failed";
+          terminalReason = "chain_abort";
+          errorReason = errorReason || "chain_abort";
+          classified = classifyPaymentError(errorReason, {
+            ...settleRecord,
+            status: "failed",
+            terminalReason: "chain_abort",
+          } as unknown as SettleResult);
+          settleHints = {
+            retryable: false,
+            nextSteps: "start_new_payment",
+          };
         }
       }
 
-      c.header(X402_HEADERS.PAYMENT_RESPONSE, encodeBase64Json(settleHints));
-      if (!releasedBoundPaymentOnTerminalFailure) {
-        c.header("X-PAYMENT-ID", resultPaymentId);
-      }
+      if (!settleResult.success) {
+        log.error("Payment settlement failed", { ...settleResult });
 
-      return c.json(
-        {
-          error: classified.message,
-          code: classified.code,
-          ...(canonicalStatus ? { status: canonicalStatus } : {}),
-          ...(terminalReason ? { terminalReason } : {}),
-          retryable: settleHints.retryable,
-          nextSteps: settleHints.nextSteps,
-          ...(settleHints.retryAfter !== undefined ? { retryAfter: settleHints.retryAfter } : {}),
-          paymentId: resultPaymentId,
-          requestCorrelationId,
-          ...(responseCheckStatusUrl ? { checkStatusUrl: responseCheckStatusUrl } : {}),
-          asset,
-          network: networkV2,
-          resource: c.req.path,
-          details: {
-            errorReason: errorReason ?? undefined,
+        const instability = derivePaymentInstability({
+          classifiedCode: classified.code,
+          errorReason,
+        });
+        const responseCheckStatusUrl =
+          releasedBoundPaymentOnTerminalFailure && settleHints.nextSteps === "retry_later"
+            ? undefined
+            : checkStatusUrl;
+
+        if (classified.code === X402_ERROR_CODES.TRANSACTION_PENDING) {
+          logPaymentEvent(log, "info", "payment.pending", {
+            route: c.req.path,
+            paymentId: resultPaymentId,
+            status: "queued",
+            checkStatusUrl,
+            action: "reuse_same_payment",
+          }, {
+            requestCorrelationId,
+            classification_code: classified.code,
+            http_status: classified.httpStatus,
+            retry_after: classified.retryAfter ?? null,
+            errorReason: errorReason ?? null,
+            instability,
+          });
+        } else if (
+          classified.code === X402_ERROR_CODES.TRANSACTION_FAILED &&
+          (errorReason === "nonce_replacement" || errorReason === "superseded" || canonicalStatus === "replaced")
+        ) {
+          logPaymentEvent(log, "warn", "payment.replaced", {
+            route: c.req.path,
+            paymentId: resultPaymentId,
+            status: "replaced",
+            checkStatusUrl,
+            action: "start_new_payment",
+          }, {
+            requestCorrelationId,
+            classification_code: classified.code,
+            errorReason: errorReason ?? null,
+          });
+        } else {
+          logPaymentEvent(log, classified.httpStatus >= 500 ? "error" : "warn", "payment.failed", {
+            route: c.req.path,
+            paymentId: resultPaymentId,
+            status: "failed",
+            checkStatusUrl: responseCheckStatusUrl,
+            action: releasedBoundPaymentOnTerminalFailure
+              ? settleHints.nextSteps
+              : getRetryAction(classified.code),
+          }, {
+            requestCorrelationId,
+            classification_code: classified.code,
+            http_status: classified.httpStatus,
+            retry_after:
+              settleHints.nextSteps === "retry_later"
+                ? (settleHints.retryAfter ?? classified.retryAfter ?? null)
+                : null,
+            errorReason: errorReason ?? null,
+            instability,
+          });
+        }
+
+        if (settleHints.retryable && settleHints.nextSteps === "retry_later") {
+          if (settleHints.retryAfter !== undefined) {
+            c.header("Retry-After", String(settleHints.retryAfter));
+          } else if (classified.retryAfter) {
+            c.header("Retry-After", String(classified.retryAfter));
+          }
+        }
+
+        c.header(X402_HEADERS.PAYMENT_RESPONSE, encodeBase64Json(settleHints));
+        if (!releasedBoundPaymentOnTerminalFailure) {
+          c.header("X-PAYMENT-ID", resultPaymentId);
+        }
+
+        return c.json(
+          {
+            error: classified.message,
+            code: classified.code,
+            ...(canonicalStatus ? { status: canonicalStatus } : {}),
+            ...(terminalReason ? { terminalReason } : {}),
+            retryable: settleHints.retryable,
+            nextSteps: settleHints.nextSteps,
+            ...(settleHints.retryAfter !== undefined ? { retryAfter: settleHints.retryAfter } : {}),
+            paymentId: resultPaymentId,
+            requestCorrelationId,
+            ...(responseCheckStatusUrl ? { checkStatusUrl: responseCheckStatusUrl } : {}),
+            asset,
+            network: networkV2,
+            resource: c.req.path,
+            details: {
+              errorReason: errorReason ?? undefined,
+            },
           },
-        },
-        classified.httpStatus as 400 | 402 | 500 | 502 | 503
-      );
+          classified.httpStatus as 400 | 402 | 500 | 502 | 503
+        );
+      }
     }
 
     // Extract verified payer address and confirmed txid from settleResult
