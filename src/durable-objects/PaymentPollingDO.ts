@@ -89,6 +89,7 @@ export interface TxGuardRecord {
   claimExpiresAt?: number;
   failedAttempts?: number;
   nonceGuardUnavailable?: number;
+  nonceGuardSyncUnavailable?: number;
   nonceGuardGap?: number;
   consumed: boolean;
   consumedAt?: number;
@@ -149,6 +150,7 @@ export interface ClearBoundTxResult {
   record?: TxGuardRecord;
   failedAttempts: number;
   nonceGuardUnavailable?: number;
+  nonceGuardSyncUnavailable?: number;
   nonceGuardGap?: number;
 }
 
@@ -234,13 +236,14 @@ const SCHEMA_SQL = `
   );
 
   CREATE TABLE IF NOT EXISTS tx_retry_guard (
-    id                      INTEGER PRIMARY KEY CHECK (id = 1),
-    tx_hash                 TEXT NOT NULL,
-    failed_attempts         INTEGER NOT NULL DEFAULT 0,
-    nonce_guard_unavailable INTEGER NOT NULL DEFAULT 0,
-    nonce_guard_gap         INTEGER NOT NULL DEFAULT 0,
-    last_failed_id          TEXT,
-    updated_at              INTEGER NOT NULL
+    id                           INTEGER PRIMARY KEY CHECK (id = 1),
+    tx_hash                      TEXT NOT NULL,
+    failed_attempts              INTEGER NOT NULL DEFAULT 0,
+    nonce_guard_unavailable      INTEGER NOT NULL DEFAULT 0,
+    nonce_guard_sync_unavailable INTEGER NOT NULL DEFAULT 0,
+    nonce_guard_gap              INTEGER NOT NULL DEFAULT 0,
+    last_failed_id               TEXT,
+    updated_at                   INTEGER NOT NULL
   );
 `;
 
@@ -298,6 +301,9 @@ export class PaymentPollingDO extends DurableObject<Env> {
       );
       if (!retryCols.has("nonce_guard_unavailable")) {
         this.sql.exec("ALTER TABLE tx_retry_guard ADD COLUMN nonce_guard_unavailable INTEGER NOT NULL DEFAULT 0");
+      }
+      if (!retryCols.has("nonce_guard_sync_unavailable")) {
+        this.sql.exec("ALTER TABLE tx_retry_guard ADD COLUMN nonce_guard_sync_unavailable INTEGER NOT NULL DEFAULT 0");
       }
       if (!retryCols.has("nonce_guard_gap")) {
         this.sql.exec("ALTER TABLE tx_retry_guard ADD COLUMN nonce_guard_gap INTEGER NOT NULL DEFAULT 0");
@@ -1025,6 +1031,24 @@ export class PaymentPollingDO extends DurableObject<Env> {
       : 0;
   }
 
+  private _readNonceGuardSyncUnavailable(txHash?: string): number {
+    const rows = txHash
+      ? [
+          ...this.sql.exec(
+            "SELECT nonce_guard_sync_unavailable FROM tx_retry_guard WHERE id = 1 AND tx_hash = ? LIMIT 1",
+            txHash
+          ),
+        ]
+      : [
+          ...this.sql.exec(
+            "SELECT nonce_guard_sync_unavailable FROM tx_retry_guard WHERE id = 1 LIMIT 1"
+          ),
+        ];
+    return rows.length > 0
+      ? Number((rows[0] as Record<string, unknown>).nonce_guard_sync_unavailable ?? 0)
+      : 0;
+  }
+
   private _readNonceGuardGap(txHash?: string): number {
     const rows = txHash
       ? [
@@ -1040,9 +1064,9 @@ export class PaymentPollingDO extends DurableObject<Env> {
   }
 
   /**
-   * Atomically increment and return consecutive payer-nonce guard `"unavailable"`
-   * verdicts recorded for `txHash` (resetting `nonce_guard_gap`) so guard-driven
-   * `retry_later` cannot loop forever.
+   * Atomically increment and return released-path payer-nonce guard `"unavailable"`
+   * verdicts recorded for `txHash` while preserving `nonce_guard_sync_unavailable`
+   * and `nonce_guard_gap` (so alternating verdicts never reset each other).
    */
   async recordNonceGuardUnavailable(txHash: string): Promise<number> {
     if (!txHash) {
@@ -1052,8 +1076,8 @@ export class PaymentPollingDO extends DurableObject<Env> {
     this._pruneExpiredTxRetryGuard(now);
     this.sql.exec(
       `
-      INSERT INTO tx_retry_guard (id, tx_hash, failed_attempts, nonce_guard_unavailable, nonce_guard_gap, last_failed_id, updated_at)
-      VALUES (1, ?, 0, 1, 0, NULL, ?)
+      INSERT INTO tx_retry_guard (id, tx_hash, failed_attempts, nonce_guard_unavailable, nonce_guard_sync_unavailable, nonce_guard_gap, last_failed_id, updated_at)
+      VALUES (1, ?, 0, 1, 0, 0, NULL, ?)
       ON CONFLICT(id) DO UPDATE SET
         failed_attempts = CASE
           WHEN tx_retry_guard.tx_hash = excluded.tx_hash
@@ -1065,7 +1089,16 @@ export class PaymentPollingDO extends DurableObject<Env> {
             THEN tx_retry_guard.nonce_guard_unavailable + 1
           ELSE 1
         END,
-        nonce_guard_gap = 0,
+        nonce_guard_sync_unavailable = CASE
+          WHEN tx_retry_guard.tx_hash = excluded.tx_hash
+            THEN tx_retry_guard.nonce_guard_sync_unavailable
+          ELSE 0
+        END,
+        nonce_guard_gap = CASE
+          WHEN tx_retry_guard.tx_hash = excluded.tx_hash
+            THEN tx_retry_guard.nonce_guard_gap
+          ELSE 0
+        END,
         tx_hash    = excluded.tx_hash,
         updated_at = excluded.updated_at
       `,
@@ -1076,9 +1109,55 @@ export class PaymentPollingDO extends DurableObject<Env> {
   }
 
   /**
-   * Atomically increment and return consecutive `detected_missing_nonces` gap
-   * verdicts recorded for `txHash` (resetting `nonce_guard_unavailable`) so a
-   * missing nonce below higher-nonce mempool txs cannot stall indefinitely.
+   * Atomically increment and return non-released synchronous payer-nonce guard
+   * `"unavailable"` verdicts recorded for `txHash`, keeping non-released passes
+   * bounded without consuming the released-path `nonce_guard_unavailable` budget.
+   */
+  async recordNonceGuardSyncUnavailable(txHash: string): Promise<number> {
+    if (!txHash) {
+      return 0;
+    }
+    const now = Date.now();
+    this._pruneExpiredTxRetryGuard(now);
+    this.sql.exec(
+      `
+      INSERT INTO tx_retry_guard (id, tx_hash, failed_attempts, nonce_guard_unavailable, nonce_guard_sync_unavailable, nonce_guard_gap, last_failed_id, updated_at)
+      VALUES (1, ?, 0, 0, 1, 0, NULL, ?)
+      ON CONFLICT(id) DO UPDATE SET
+        failed_attempts = CASE
+          WHEN tx_retry_guard.tx_hash = excluded.tx_hash
+            THEN tx_retry_guard.failed_attempts
+          ELSE 0
+        END,
+        nonce_guard_unavailable = CASE
+          WHEN tx_retry_guard.tx_hash = excluded.tx_hash
+            THEN tx_retry_guard.nonce_guard_unavailable
+          ELSE 0
+        END,
+        nonce_guard_sync_unavailable = CASE
+          WHEN tx_retry_guard.tx_hash = excluded.tx_hash
+            THEN tx_retry_guard.nonce_guard_sync_unavailable + 1
+          ELSE 1
+        END,
+        nonce_guard_gap = CASE
+          WHEN tx_retry_guard.tx_hash = excluded.tx_hash
+            THEN tx_retry_guard.nonce_guard_gap
+          ELSE 0
+        END,
+        tx_hash    = excluded.tx_hash,
+        updated_at = excluded.updated_at
+      `,
+      txHash,
+      now
+    );
+    return this._readNonceGuardSyncUnavailable(txHash);
+  }
+
+  /**
+   * Atomically increment and return `detected_missing_nonces` gap verdicts
+   * recorded for `txHash` while preserving `nonce_guard_unavailable` and
+   * `nonce_guard_sync_unavailable` (so alternating flaky Hiro responses never
+   * reset each other's cap).
    */
   async recordNonceGuardMissingGap(txHash: string): Promise<number> {
     if (!txHash) {
@@ -1088,15 +1167,24 @@ export class PaymentPollingDO extends DurableObject<Env> {
     this._pruneExpiredTxRetryGuard(now);
     this.sql.exec(
       `
-      INSERT INTO tx_retry_guard (id, tx_hash, failed_attempts, nonce_guard_unavailable, nonce_guard_gap, last_failed_id, updated_at)
-      VALUES (1, ?, 0, 0, 1, NULL, ?)
+      INSERT INTO tx_retry_guard (id, tx_hash, failed_attempts, nonce_guard_unavailable, nonce_guard_sync_unavailable, nonce_guard_gap, last_failed_id, updated_at)
+      VALUES (1, ?, 0, 0, 0, 1, NULL, ?)
       ON CONFLICT(id) DO UPDATE SET
         failed_attempts = CASE
           WHEN tx_retry_guard.tx_hash = excluded.tx_hash
             THEN tx_retry_guard.failed_attempts
           ELSE 0
         END,
-        nonce_guard_unavailable = 0,
+        nonce_guard_unavailable = CASE
+          WHEN tx_retry_guard.tx_hash = excluded.tx_hash
+            THEN tx_retry_guard.nonce_guard_unavailable
+          ELSE 0
+        END,
+        nonce_guard_sync_unavailable = CASE
+          WHEN tx_retry_guard.tx_hash = excluded.tx_hash
+            THEN tx_retry_guard.nonce_guard_sync_unavailable
+          ELSE 0
+        END,
         nonce_guard_gap = CASE
           WHEN tx_retry_guard.tx_hash = excluded.tx_hash
             THEN tx_retry_guard.nonce_guard_gap + 1
@@ -1112,8 +1200,8 @@ export class PaymentPollingDO extends DurableObject<Env> {
   }
 
   /**
-   * Reset consecutive payer-nonce guard counters (`nonce_guard_unavailable` and
-   * `nonce_guard_gap`) when a non-unavailable / non-gap verdict is observed.
+   * Reset payer-nonce guard counters when a resolved verdict (`confirmed`,
+   * `unused`, `replaced`, `aborted`) is observed.
    */
   async resetNonceGuardCounters(txHash: string): Promise<void> {
     if (!txHash) {
@@ -1121,7 +1209,7 @@ export class PaymentPollingDO extends DurableObject<Env> {
     }
     const now = Date.now();
     this.sql.exec(
-      "UPDATE tx_retry_guard SET nonce_guard_unavailable = 0, nonce_guard_gap = 0, updated_at = ? WHERE id = 1 AND tx_hash = ?",
+      "UPDATE tx_retry_guard SET nonce_guard_unavailable = 0, nonce_guard_sync_unavailable = 0, nonce_guard_gap = 0, updated_at = ? WHERE id = 1 AND tx_hash = ?",
       now,
       txHash
     );
@@ -1187,8 +1275,8 @@ export class PaymentPollingDO extends DurableObject<Env> {
       // advances `failed_attempts` while stale concurrent clears for an older binding are ignored.
       this.sql.exec(
         `
-        INSERT INTO tx_retry_guard (id, tx_hash, failed_attempts, nonce_guard_unavailable, nonce_guard_gap, last_failed_id, updated_at)
-        VALUES (1, ?, 1, 0, 0, ?, ?)
+        INSERT INTO tx_retry_guard (id, tx_hash, failed_attempts, nonce_guard_unavailable, nonce_guard_sync_unavailable, nonce_guard_gap, last_failed_id, updated_at)
+        VALUES (1, ?, 1, 0, 0, 0, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
           failed_attempts = CASE
             WHEN tx_retry_guard.tx_hash = excluded.tx_hash
@@ -1198,6 +1286,11 @@ export class PaymentPollingDO extends DurableObject<Env> {
           nonce_guard_unavailable = CASE
             WHEN tx_retry_guard.tx_hash = excluded.tx_hash
               THEN tx_retry_guard.nonce_guard_unavailable
+            ELSE 0
+          END,
+          nonce_guard_sync_unavailable = CASE
+            WHEN tx_retry_guard.tx_hash = excluded.tx_hash
+              THEN tx_retry_guard.nonce_guard_sync_unavailable
             ELSE 0
           END,
           nonce_guard_gap = CASE

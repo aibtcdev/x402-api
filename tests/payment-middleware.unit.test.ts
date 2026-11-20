@@ -5275,14 +5275,14 @@ describe("x402Middleware — RPC enqueue vs confirmed settlement, relay ID recov
         expect(bUnparseable.retryable).toBe(true);
       }
 
-      // 3rd consecutive released `unavailable` hits MAX_NONCE_GUARD_UNAVAILABLE_RETRIES cap ->
-      // NEVER emits `start_new_payment` on a consumed/unknown nonce; emits `verify_nonce_on_chain`!
+      // 3rd released `unavailable` hits MAX_NONCE_GUARD_UNAVAILABLE_RETRIES cap ->
+      // NEVER emits `start_new_payment` or HTTP 402; emits non-402 HTTP 502 `verify_nonce_on_chain`!
       const rCapped = await unparseableHarness.app.request(
         "http://localhost/paid",
         { method: "POST", headers: { [X402_HEADERS.PAYMENT_SIGNATURE]: unparseableSig } },
         unparseableHarness.env
       );
-      expect(rCapped.status).toBe(402);
+      expect(rCapped.status).toBe(502);
       const bCapped = (await rCapped.json()) as Record<string, unknown>;
       expect(bCapped.nextSteps).toBe("verify_nonce_on_chain");
       expect(bCapped.nextSteps).not.toBe("start_new_payment");
@@ -5550,16 +5550,21 @@ describe("x402Middleware — RPC enqueue vs confirmed settlement, relay ID recov
       expect(rFallbackOk.status).toBe(200);
       expect(fallbackHarness.getHandlerCount()).toBe(1);
 
-      // 9. Non-released `rebuild_and_resign` passes neither burn the released `unavailable` cap
-      //    nor emit contradictory `rebuild_and_resign` / `TRANSACTION_FAILED` fields on `pending`,
-      //    and a `pending` verdict resets prior released `unavailable` counts
+      // 9. Separate released vs non-released `unavailable` caps (neither uncapped nor stealing budget),
+      //    alternating `unavailable` + `missing_nonce_gap` do NOT reset each other, and `unused` resets all
       const consecTx = await buildSignedTxHex({ sponsored: true, nonce: 8111n });
       const consecSig = encodePaymentSignature({
         x402Version: 2,
         payload: { transaction: consecTx },
       });
-      let consecPhase: "released_unavail_1" | "sync_unavail" | "sync_pending" | "released_unavail_after_reset" =
-        "released_unavail_1";
+      let consecPhase:
+        | "released_unavail_1"
+        | "released_gap_interleaved"
+        | "sync_unavail"
+        | "sync_pending"
+        | "released_unavail_finish_cap"
+        | "resolved_unused"
+        | "released_unavail_after_resolved_reset" = "released_unavail_1";
       let consecSubmits = 0;
       const consecHarness = createTestHarness(
         {
@@ -5593,12 +5598,18 @@ describe("x402Middleware — RPC enqueue vs confirmed settlement, relay ID recov
             if (consecPhase === "sync_pending") {
               return { outcome: "pending", reason: "mempool" };
             }
+            if (consecPhase === "released_gap_interleaved") {
+              return { outcome: "pending", reason: "missing_nonce_gap" };
+            }
+            if (consecPhase === "resolved_unused") {
+              return { outcome: "unused" };
+            }
             return { outcome: "unavailable", reason: "nonce_state_unknown" };
           },
         }
       );
 
-      // First two released unavailable passes -> count reaches 2 (still retry_later)
+      // First two released unavailable passes -> released count reaches 2 (still retry_later)
       for (let i = 0; i < 2; i++) {
         const r = await consecHarness.app.request(
           "http://localhost/paid",
@@ -5609,9 +5620,19 @@ describe("x402Middleware — RPC enqueue vs confirmed settlement, relay ID recov
         expect(((await r.json()) as Record<string, unknown>).nextSteps).toBe("retry_later");
       }
 
-      // Three synchronous non-released unavailable passes must NOT trip verify_nonce_on_chain
+      // Interleaved missing_nonce_gap MUST NOT reset released unavailable count!
+      consecPhase = "released_gap_interleaved";
+      const rGapInterleaved = await consecHarness.app.request(
+        "http://localhost/paid",
+        { method: "POST", headers: { [X402_HEADERS.PAYMENT_SIGNATURE]: consecSig } },
+        consecHarness.env
+      );
+      expect(rGapInterleaved.status).toBe(402);
+      expect(((await rGapInterleaved.json()) as Record<string, unknown>).nextSteps).toBe("retry_later");
+
+      // Non-released synchronous unavailable has its OWN bounded 2-retry cap (attempts 1..2 -> 402 retry_later, attempt 3 -> 502 verify_nonce_on_chain)
       consecPhase = "sync_unavail";
-      for (let i = 0; i < 3; i++) {
+      for (let i = 1; i <= 2; i++) {
         const rSyncU = await consecHarness.app.request(
           "http://localhost/paid",
           { method: "POST", headers: { [X402_HEADERS.PAYMENT_SIGNATURE]: consecSig } },
@@ -5625,8 +5646,17 @@ describe("x402Middleware — RPC enqueue vs confirmed settlement, relay ID recov
         expect(bSyncU.nextSteps).toBe("retry_later");
         expect(bSyncU.retryable).toBe(true);
       }
+      const rSyncUCapped = await consecHarness.app.request(
+        "http://localhost/paid",
+        { method: "POST", headers: { [X402_HEADERS.PAYMENT_SIGNATURE]: consecSig } },
+        consecHarness.env
+      );
+      expect(rSyncUCapped.status).toBe(502);
+      const bSyncUCapped = (await rSyncUCapped.json()) as Record<string, unknown>;
+      expect(bSyncUCapped.nextSteps).toBe("verify_nonce_on_chain");
+      expect(bSyncUCapped.retryable).toBe(false);
 
-      // Synchronous non-released pending pass returns coherent TRANSACTION_PENDING + resets counter
+      // Synchronous non-released pending pass returns coherent TRANSACTION_PENDING (and does NOT reset released unavailable!)
       consecPhase = "sync_pending";
       const rSyncP = await consecHarness.app.request(
         "http://localhost/paid",
@@ -5642,8 +5672,32 @@ describe("x402Middleware — RPC enqueue vs confirmed settlement, relay ID recov
       expect(bSyncP.nextSteps).toBe("retry_later");
       expect(bSyncP.retryable).toBe(true);
 
-      // Because `pending` reset consecutive unavailable to 0, two fresh released unavailable passes stay `retry_later`!
-      consecPhase = "released_unavail_after_reset";
+      // Because neither `missing_nonce_gap` nor `pending` reset the 2 prior released `unavailable` counts,
+      // the 3rd released `unavailable` immediately trips 502 `verify_nonce_on_chain`!
+      consecPhase = "released_unavail_finish_cap";
+      const rThirdReleased = await consecHarness.app.request(
+        "http://localhost/paid",
+        { method: "POST", headers: { [X402_HEADERS.PAYMENT_SIGNATURE]: consecSig } },
+        consecHarness.env
+      );
+      expect(rThirdReleased.status).toBe(502);
+      expect(((await rThirdReleased.json()) as Record<string, unknown>).nextSteps).toBe(
+        "verify_nonce_on_chain"
+      );
+
+      // Once a resolved verdict (`unused`) is observed, all guard counters reset cleanly
+      consecPhase = "resolved_unused";
+      const rUnusedReset = await consecHarness.app.request(
+        "http://localhost/paid",
+        { method: "POST", headers: { [X402_HEADERS.PAYMENT_SIGNATURE]: consecSig } },
+        consecHarness.env
+      );
+      expect(rUnusedReset.status).toBe(402);
+      expect(((await rUnusedReset.json()) as Record<string, unknown>).nextSteps).toBe(
+        "start_new_payment"
+      );
+
+      consecPhase = "released_unavail_after_resolved_reset";
       for (let i = 0; i < 2; i++) {
         const rAfterReset = await consecHarness.app.request(
           "http://localhost/paid",
@@ -5654,7 +5708,8 @@ describe("x402Middleware — RPC enqueue vs confirmed settlement, relay ID recov
         expect(((await rAfterReset.json()) as Record<string, unknown>).nextSteps).toBe("retry_later");
       }
 
-      // 10. `detected_missing_nonces` gap-driven `pending` is bounded to 4 retries before treating as `unused`
+      // 10. `detected_missing_nonces` gap-driven `pending` is bounded to 4 retries before instructing
+      //     `rebuild_and_resign` at exact `payerNonce` N (filling/replacing the gap rather than next-nonce)
       const gapTx = await buildSignedTxHex({ sponsored: true, nonce: 8112n });
       const gapSig = encodePaymentSignature({
         x402Version: 2,
@@ -5711,8 +5766,12 @@ describe("x402Middleware — RPC enqueue vs confirmed settlement, relay ID recov
       );
       expect(rGapCapped.status).toBe(402);
       const bGapCapped = (await rGapCapped.json()) as Record<string, unknown>;
-      expect(bGapCapped.nextSteps).toBe("start_new_payment");
-      expect(bGapCapped.retryable).toBe(false);
+      expect(bGapCapped.nextSteps).toBe("rebuild_and_resign");
+      expect(bGapCapped.retryable).toBe(true);
+      expect(bGapCapped.terminalReason).toBe("sender_nonce_gap");
+      expect(String(bGapCapped.error)).toContain("exact nonce 8112");
+      expect((bGapCapped.details as Record<string, unknown>)?.payerNonce).toBe(8112);
+      expect((bGapCapped.details as Record<string, unknown>)?.mustUseNonce).toBe(8112);
 
       // 11. Stale `clearBoundTx` (`cleared: false` on `bindingId` mismatch with live re-bound DO record)
       //     keeps the payment in-flight (`retry_later` + live `X-PAYMENT-ID`) instead of treating as released

@@ -79,31 +79,25 @@ import {
   classifySenderNonceState,
   isMissingSenderNonceGap,
   isRelayRetryableTerminalReason,
-  MAX_NONCE_GUARD_MISSING_GAP_RETRIES,
-  MAX_NONCE_GUARD_UNAVAILABLE_RETRIES,
   NOT_FOUND_ENQUEUE_GRACE_MS,
+  resolvePayerNonceGuardDecision,
+} from "../utils/payment-status";
+import type {
+  PayerNonceGuardVerdict,
+  PayerNoncePendingReason,
+  PayerNonceUnavailableReason,
 } from "../utils/payment-status";
 
 export { NOT_FOUND_ENQUEUE_GRACE_MS };
+export type {
+  PayerNonceGuardVerdict,
+  PayerNoncePendingReason,
+  PayerNonceUnavailableReason,
+};
 
 // =============================================================================
 // Types
 // =============================================================================
-
-export type PayerNonceUnavailableReason =
-  | "nonce_state_unknown"
-  | "consumed_tx_unindexed"
-  | "consumed_tx_unparseable";
-
-export type PayerNoncePendingReason = "mempool" | "missing_nonce_gap";
-
-export type PayerNonceGuardVerdict =
-  | { outcome: "unused" }
-  | { outcome: "pending"; reason?: PayerNoncePendingReason }
-  | { outcome: "confirmed"; txid: string }
-  | { outcome: "replaced" }
-  | { outcome: "aborted" }
-  | { outcome: "unavailable"; reason?: PayerNonceUnavailableReason };
 
 export type CheckPayerNonceBeforeNewPaymentFn = (input: {
   payerAddress: string;
@@ -254,6 +248,7 @@ const FAILED_TX_ATTEMPTS = new Map<
     count: number;
     lastFailedPaymentId?: string;
     nonceGuardUnavailable: number;
+    nonceGuardSyncUnavailable: number;
     nonceGuardGap: number;
   }
 >();
@@ -278,9 +273,32 @@ function recordIsolateNonceGuardUnavailable(txHash: string): number {
     count: existing?.count ?? 0,
     lastFailedPaymentId: existing?.lastFailedPaymentId,
     nonceGuardUnavailable: nextUnavailable,
-    nonceGuardGap: 0,
+    nonceGuardSyncUnavailable: existing?.nonceGuardSyncUnavailable ?? 0,
+    nonceGuardGap: existing?.nonceGuardGap ?? 0,
   });
   return nextUnavailable;
+}
+
+function recordIsolateNonceGuardSyncUnavailable(txHash: string): number {
+  if (!txHash) {
+    return 0;
+  }
+  const existing = FAILED_TX_ATTEMPTS.get(txHash);
+  if (!existing && FAILED_TX_ATTEMPTS.size >= MAX_BOUND_PAYMENTS_PER_STORE) {
+    const oldest = FAILED_TX_ATTEMPTS.keys().next().value;
+    if (oldest !== undefined) {
+      FAILED_TX_ATTEMPTS.delete(oldest);
+    }
+  }
+  const nextSyncUnavailable = (existing?.nonceGuardSyncUnavailable ?? 0) + 1;
+  FAILED_TX_ATTEMPTS.set(txHash, {
+    count: existing?.count ?? 0,
+    lastFailedPaymentId: existing?.lastFailedPaymentId,
+    nonceGuardUnavailable: existing?.nonceGuardUnavailable ?? 0,
+    nonceGuardSyncUnavailable: nextSyncUnavailable,
+    nonceGuardGap: existing?.nonceGuardGap ?? 0,
+  });
+  return nextSyncUnavailable;
 }
 
 function recordIsolateNonceGuardGap(txHash: string): number {
@@ -298,7 +316,8 @@ function recordIsolateNonceGuardGap(txHash: string): number {
   FAILED_TX_ATTEMPTS.set(txHash, {
     count: existing?.count ?? 0,
     lastFailedPaymentId: existing?.lastFailedPaymentId,
-    nonceGuardUnavailable: 0,
+    nonceGuardUnavailable: existing?.nonceGuardUnavailable ?? 0,
+    nonceGuardSyncUnavailable: existing?.nonceGuardSyncUnavailable ?? 0,
     nonceGuardGap: nextGap,
   });
   return nextGap;
@@ -320,6 +339,7 @@ function resetIsolateNonceGuardCounters(txHash: string): void {
     count: existing.count,
     lastFailedPaymentId: existing.lastFailedPaymentId,
     nonceGuardUnavailable: 0,
+    nonceGuardSyncUnavailable: 0,
     nonceGuardGap: 0,
   });
 }
@@ -329,11 +349,15 @@ function setFailedAttemptCount(
   count: number,
   lastFailedPaymentId?: string,
   nonceGuardUnavailable?: number,
-  nonceGuardGap?: number
+  nonceGuardGap?: number,
+  nonceGuardSyncUnavailable?: number
 ): void {
   if (
     !txHash ||
-    (count <= 0 && (nonceGuardUnavailable ?? 0) <= 0 && (nonceGuardGap ?? 0) <= 0)
+    (count <= 0 &&
+      (nonceGuardUnavailable ?? 0) <= 0 &&
+      (nonceGuardSyncUnavailable ?? 0) <= 0 &&
+      (nonceGuardGap ?? 0) <= 0)
   ) {
     return;
   }
@@ -351,6 +375,10 @@ function setFailedAttemptCount(
       nonceGuardUnavailable !== undefined
         ? Math.max(0, nonceGuardUnavailable)
         : (existing?.nonceGuardUnavailable ?? 0),
+    nonceGuardSyncUnavailable:
+      nonceGuardSyncUnavailable !== undefined
+        ? Math.max(0, nonceGuardSyncUnavailable)
+        : (existing?.nonceGuardSyncUnavailable ?? 0),
     nonceGuardGap:
       nonceGuardGap !== undefined
         ? Math.max(0, nonceGuardGap)
@@ -987,6 +1015,7 @@ interface TxGuardDOStub {
   releaseTxClaim?: (claimId: string) => Promise<void>;
   bindTxPayment?: (input: BindTxPaymentInput) => Promise<TxGuardRecord>;
   recordNonceGuardUnavailable?: (txHash: string) => Promise<number>;
+  recordNonceGuardSyncUnavailable?: (txHash: string) => Promise<number>;
   recordNonceGuardMissingGap?: (txHash: string) => Promise<number>;
   resetNonceGuardCounters?: (txHash: string) => Promise<void>;
   clearBoundTx?: (
@@ -1150,7 +1179,7 @@ async function recordNonceGuardUnavailableInDO(
     if (stub && typeof stub.recordNonceGuardUnavailable === "function") {
       const count = await stub.recordNonceGuardUnavailable(txHash);
       if (typeof count === "number" && count > 0) {
-        setFailedAttemptCount(txHash, getFailedAttemptCount(txHash), undefined, count, 0);
+        setFailedAttemptCount(txHash, getFailedAttemptCount(txHash), undefined, count);
         return count;
       }
     }
@@ -1163,6 +1192,36 @@ async function recordNonceGuardUnavailableInDO(
   return recordIsolateNonceGuardUnavailable(txHash);
 }
 
+async function recordNonceGuardSyncUnavailableInDO(
+  c: { env: Env },
+  txHash: string,
+  log: Logger
+): Promise<number> {
+  try {
+    const stub = getTxGuardStub(c, txHash);
+    if (stub && typeof stub.recordNonceGuardSyncUnavailable === "function") {
+      const count = await stub.recordNonceGuardSyncUnavailable(txHash);
+      if (typeof count === "number" && count > 0) {
+        setFailedAttemptCount(
+          txHash,
+          getFailedAttemptCount(txHash),
+          undefined,
+          undefined,
+          undefined,
+          count
+        );
+        return count;
+      }
+    }
+  } catch (err) {
+    log.warn("PaymentPollingDO.recordNonceGuardSyncUnavailable failed; using isolate counter", {
+      txHash,
+      err: String(err),
+    });
+  }
+  return recordIsolateNonceGuardSyncUnavailable(txHash);
+}
+
 async function recordNonceGuardMissingGapInDO(
   c: { env: Env },
   txHash: string,
@@ -1173,7 +1232,7 @@ async function recordNonceGuardMissingGapInDO(
     if (stub && typeof stub.recordNonceGuardMissingGap === "function") {
       const count = await stub.recordNonceGuardMissingGap(txHash);
       if (typeof count === "number" && count > 0) {
-        setFailedAttemptCount(txHash, getFailedAttemptCount(txHash), undefined, 0, count);
+        setFailedAttemptCount(txHash, getFailedAttemptCount(txHash), undefined, undefined, count);
         return count;
       }
     }
@@ -2854,8 +2913,12 @@ export function x402Middleware(
             getFailedAttemptCount(txHash) > 0));
 
       let guardOverrodeToRetryLater = false;
-      let guardVerifyNonceDetail:
-        | { payerNonce: number; unavailableReason?: PayerNonceUnavailableReason }
+      let guardNonceDetail:
+        | {
+            payerNonce: number;
+            mustUseNonce?: number;
+            unavailableReason?: PayerNonceUnavailableReason;
+          }
         | undefined;
 
       if (shouldVerifyPayerNonce && verifiedPayer && txOrigin) {
@@ -2867,142 +2930,126 @@ export function x402Middleware(
           hiroApiKey: c.env.HIRO_API_KEY,
           log,
         });
-        if (nonceVerdict.outcome === "confirmed") {
+        const retryAfterSec = baseSettleHints.retryAfter ?? classified.retryAfter ?? 15;
+        let unavailableCount: number | undefined;
+        let gapCount: number | undefined;
+        if (nonceVerdict.outcome === "unavailable") {
+          unavailableCount = releasedBoundPaymentOnTerminalFailure
+            ? await recordNonceGuardUnavailableInDO(c, txHash, log)
+            : await recordNonceGuardSyncUnavailableInDO(c, txHash, log);
+        } else if (
+          nonceVerdict.outcome === "pending" &&
+          nonceVerdict.reason === "missing_nonce_gap"
+        ) {
+          gapCount = await recordNonceGuardMissingGapInDO(c, txHash, log);
+        }
+
+        const guardDecision = resolvePayerNonceGuardDecision({
+          verdict: nonceVerdict,
+          payerNonce: parsedTxNonce,
+          retryAfterSec,
+          unavailableCount,
+          gapCount,
+        });
+        if (guardDecision.resetCounters) {
           await resetNonceGuardCountersInDO(c, txHash, log);
-          settleResult = {
-            success: true,
-            transaction: nonceVerdict.txid,
-            network: networkV2,
-            payer: verifiedPayer,
-            paymentId: resultPaymentId,
-            status: "confirmed",
-            checkStatusUrl,
-          } as unknown as SettleResult;
-        } else if (nonceVerdict.outcome === "unused") {
-          await resetNonceGuardCountersInDO(c, txHash, log);
-        } else if (nonceVerdict.outcome === "pending") {
-          const retryAfterSec = baseSettleHints.retryAfter ?? classified.retryAfter ?? 15;
-          let holdRetryLater = true;
-          if (nonceVerdict.reason === "missing_nonce_gap") {
-            const gapAttempts = await recordNonceGuardMissingGapInDO(c, txHash, log);
-            if (gapAttempts > MAX_NONCE_GUARD_MISSING_GAP_RETRIES) {
-              // Gap at a nonce the relay already failed has remained unexecuted and absent
-              // from `detected_mempool_nonces` across `MAX_NONCE_GUARD_MISSING_GAP_RETRIES + 1`
-              // consecutive checks: treat as unused rather than stalling indefinitely while
-              // higher-nonce mempool transactions stay queued.
-              holdRetryLater = false;
-            }
-          } else {
-            await resetNonceGuardCountersInDO(c, txHash, log);
-          }
-          if (holdRetryLater) {
+        }
+
+        switch (guardDecision.kind) {
+          case "settle_confirmed":
+            settleResult = {
+              success: true,
+              transaction: guardDecision.txid,
+              network: networkV2,
+              payer: verifiedPayer,
+              paymentId: resultPaymentId,
+              status: "confirmed",
+              checkStatusUrl,
+            } as unknown as SettleResult;
+            break;
+          case "allow_base_hints":
+            break;
+          case "retry_later":
             guardOverrodeToRetryLater = true;
-            canonicalStatus = "mempool";
+            canonicalStatus = guardDecision.status;
             terminalReason = undefined;
-            errorReason =
-              nonceVerdict.reason === "missing_nonce_gap"
-                ? "payer_nonce_missing_gap"
-                : "payer_nonce_pending";
+            errorReason = guardDecision.errorReason;
             classified = {
               code: X402_ERROR_CODES.TRANSACTION_PENDING,
-              message: "Transaction pending on-chain for payer nonce, please retry",
-              httpStatus: 402,
-              retryAfter: retryAfterSec,
+              message: guardDecision.message,
+              httpStatus: guardDecision.httpStatus,
+              retryAfter: guardDecision.retryAfter,
             };
             settleHints = {
               retryable: true,
-              retryAfter: retryAfterSec,
+              retryAfter: guardDecision.retryAfter,
               nextSteps: "retry_later",
             };
-          }
-        } else if (nonceVerdict.outcome === "unavailable") {
-          const retryAfterSec = baseSettleHints.retryAfter ?? classified.retryAfter ?? 15;
-          if (!releasedBoundPaymentOnTerminalFailure) {
-            // Non-released synchronous `rebuild_and_resign` pass: convert coherently to
-            // `retry_later` without consuming the released consecutive-unavailable cap.
-            guardOverrodeToRetryLater = true;
-            canonicalStatus = undefined;
-            terminalReason = undefined;
-            errorReason = "payer_nonce_guard_unavailable";
+            break;
+          case "rebuild_at_same_nonce":
+            canonicalStatus = guardDecision.status;
+            terminalReason = guardDecision.terminalReason;
+            errorReason = guardDecision.errorReason;
             classified = {
-              code: X402_ERROR_CODES.TRANSACTION_PENDING,
-              message: "Unable to verify payer account nonce, please retry",
-              httpStatus: 402,
-              retryAfter: retryAfterSec,
+              code: X402_ERROR_CODES.INVALID_TRANSACTION_STATE,
+              message: guardDecision.message,
+              httpStatus: guardDecision.httpStatus,
             };
             settleHints = {
               retryable: true,
-              retryAfter: retryAfterSec,
-              nextSteps: "retry_later",
+              nextSteps: "rebuild_and_resign",
             };
-          } else {
-            const unavailableAttempts = await recordNonceGuardUnavailableInDO(c, txHash, log);
-            if (unavailableAttempts <= MAX_NONCE_GUARD_UNAVAILABLE_RETRIES) {
-              guardOverrodeToRetryLater = true;
-              canonicalStatus = undefined;
-              terminalReason = undefined;
-              errorReason = "payer_nonce_guard_unavailable";
-              classified = {
-                code: X402_ERROR_CODES.TRANSACTION_PENDING,
-                message: "Unable to verify payer account nonce, please retry",
-                httpStatus: 402,
-                retryAfter: retryAfterSec,
-              };
-              settleHints = {
-                retryable: true,
-                retryAfter: retryAfterSec,
-                nextSteps: "retry_later",
-              };
-            } else {
-              // Never fall back to `start_new_payment` when the nonce was already consumed
-              // (unindexed/unparseable anchored tx) or its state is unknown — otherwise a
-              // confirmed payment whose `raw_tx` could not be read back would double-charge.
-              canonicalStatus = "failed";
-              terminalReason = "internal_error";
-              errorReason = errorReason || "payer_nonce_verification_unavailable";
-              classified = {
-                code: X402_ERROR_CODES.TRANSACTION_FAILED,
-                message: `Unable to verify on-chain outcome for payer nonce ${parsedTxNonce}; check payer nonce ${parsedTxNonce} on-chain before re-signing`,
-                httpStatus: 402,
-              };
-              settleHints = {
-                retryable: false,
-                nextSteps: "verify_nonce_on_chain",
-              };
-              guardVerifyNonceDetail = {
-                payerNonce: parsedTxNonce,
-                unavailableReason: nonceVerdict.reason,
-              };
-            }
-          }
-        } else if (nonceVerdict.outcome === "replaced") {
-          await resetNonceGuardCountersInDO(c, txHash, log);
-          canonicalStatus = "replaced";
-          terminalReason = "nonce_replacement";
-          errorReason = "nonce_replacement";
-          classified = classifyPaymentError("nonce_replacement", {
-            ...settleRecord,
-            status: "replaced",
-            terminalReason: "nonce_replacement",
-          } as unknown as SettleResult);
-          settleHints = {
-            retryable: false,
-            nextSteps: "start_new_payment",
-          };
-        } else if (nonceVerdict.outcome === "aborted") {
-          await resetNonceGuardCountersInDO(c, txHash, log);
-          canonicalStatus = "failed";
-          terminalReason = "chain_abort";
-          errorReason = errorReason || "chain_abort";
-          classified = classifyPaymentError(errorReason, {
-            ...settleRecord,
-            status: "failed",
-            terminalReason: "chain_abort",
-          } as unknown as SettleResult);
-          settleHints = {
-            retryable: false,
-            nextSteps: "start_new_payment",
-          };
+            guardNonceDetail = {
+              payerNonce: guardDecision.payerNonce,
+              mustUseNonce: guardDecision.payerNonce,
+            };
+            break;
+          case "verify_nonce_on_chain":
+            canonicalStatus = guardDecision.status;
+            terminalReason = guardDecision.terminalReason;
+            errorReason = guardDecision.errorReason;
+            classified = {
+              code: X402_ERROR_CODES.UNEXPECTED_SETTLE_ERROR,
+              message: guardDecision.message,
+              httpStatus: guardDecision.httpStatus,
+            };
+            settleHints = {
+              retryable: false,
+              nextSteps: "verify_nonce_on_chain",
+            };
+            guardNonceDetail = {
+              payerNonce: guardDecision.payerNonce,
+              unavailableReason: guardDecision.unavailableReason,
+            };
+            break;
+          case "replaced":
+            canonicalStatus = "replaced";
+            terminalReason = "nonce_replacement";
+            errorReason = "nonce_replacement";
+            classified = classifyPaymentError("nonce_replacement", {
+              ...settleRecord,
+              status: "replaced",
+              terminalReason: "nonce_replacement",
+            } as unknown as SettleResult);
+            settleHints = {
+              retryable: false,
+              nextSteps: "start_new_payment",
+            };
+            break;
+          case "aborted":
+            canonicalStatus = "failed";
+            terminalReason = "chain_abort";
+            errorReason = errorReason || "chain_abort";
+            classified = classifyPaymentError(errorReason, {
+              ...settleRecord,
+              status: "failed",
+              terminalReason: "chain_abort",
+            } as unknown as SettleResult);
+            settleHints = {
+              retryable: false,
+              nextSteps: "start_new_payment",
+            };
+            break;
         }
       }
 
@@ -3102,11 +3149,14 @@ export function x402Middleware(
             resource: c.req.path,
             details: {
               errorReason: errorReason ?? undefined,
-              ...(guardVerifyNonceDetail
+              ...(guardNonceDetail
                 ? {
-                    payerNonce: guardVerifyNonceDetail.payerNonce,
-                    ...(guardVerifyNonceDetail.unavailableReason
-                      ? { unavailableReason: guardVerifyNonceDetail.unavailableReason }
+                    payerNonce: guardNonceDetail.payerNonce,
+                    ...(guardNonceDetail.mustUseNonce !== undefined
+                      ? { mustUseNonce: guardNonceDetail.mustUseNonce }
+                      : {}),
+                    ...(guardNonceDetail.unavailableReason
+                      ? { unavailableReason: guardNonceDetail.unavailableReason }
                       : {}),
                   }
                 : {}),

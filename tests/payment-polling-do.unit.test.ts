@@ -773,22 +773,22 @@ describe("PaymentPollingDO real tx_guard & alarm() lifecycle", () => {
     expect(await instance.getTxGuard()).toBeNull();
   });
 
-  test("recordNonceGuardUnavailable, recordNonceGuardMissingGap, and resetNonceGuardCounters maintain consecutive counts", async () => {
+  test("recordNonceGuardUnavailable, recordNonceGuardSyncUnavailable, and recordNonceGuardMissingGap do not reset each other, and resetNonceGuardCounters clears all on resolved verdicts", async () => {
     const { instance, ready } = createInMemoryDO();
     await ready();
 
+    // Alternating verdicts (unavailable, gap, sync_unavailable, unavailable) advance each cap independently
     expect(await instance.recordNonceGuardUnavailable("tx_consec")).toBe(1);
+    expect(await instance.recordNonceGuardMissingGap("tx_consec")).toBe(1);
+    expect(await instance.recordNonceGuardSyncUnavailable("tx_consec")).toBe(1);
     expect(await instance.recordNonceGuardUnavailable("tx_consec")).toBe(2);
+    expect(await instance.recordNonceGuardMissingGap("tx_consec")).toBe(2);
+    expect(await instance.recordNonceGuardUnavailable("tx_consec")).toBe(3);
 
-    // Observing a missing-gap pending verdict resets consecutive unavailable and starts gap count at 1
-    expect(await instance.recordNonceGuardMissingGap("tx_consec")).toBe(1);
-    expect(await instance.recordNonceGuardUnavailable("tx_consec")).toBe(1);
-
-    // Any other verdict (pending mempool / unused / confirmed) resets both counters to 0
+    // Only a resolved verdict (`confirmed`, `unused`, `replaced`, `aborted`) resets all three counters
     await instance.resetNonceGuardCounters("tx_consec");
     expect(await instance.recordNonceGuardUnavailable("tx_consec")).toBe(1);
-    expect(await instance.recordNonceGuardMissingGap("tx_consec")).toBe(1);
-    await instance.resetNonceGuardCounters("tx_consec");
+    expect(await instance.recordNonceGuardSyncUnavailable("tx_consec")).toBe(1);
     expect(await instance.recordNonceGuardMissingGap("tx_consec")).toBe(1);
   });
 

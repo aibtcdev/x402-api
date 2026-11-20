@@ -9,6 +9,7 @@ import {
   isMissingSenderNonceGap,
   isRelayRetryableTerminalReason,
   isSenderRebuildTerminalReason,
+  resolvePayerNonceGuardDecision,
   shouldRetrySamePaymentPoll,
 } from "../src/utils/payment-status";
 
@@ -213,5 +214,113 @@ describe("payment-status classifier predicates", () => {
     expect(MAX_NONCE_GUARD_MISSING_GAP_RETRIES).toBeGreaterThan(
       MAX_NONCE_GUARD_UNAVAILABLE_RETRIES
     );
+  });
+
+  test("resolvePayerNonceGuardDecision maps every verdict x counter combination deterministically", () => {
+    expect(
+      resolvePayerNonceGuardDecision({
+        verdict: { outcome: "confirmed", txid: "0xabc" },
+        payerNonce: 42,
+        retryAfterSec: 15,
+      })
+    ).toEqual({
+      kind: "settle_confirmed",
+      txid: "0xabc",
+      resetCounters: true,
+    });
+
+    expect(
+      resolvePayerNonceGuardDecision({
+        verdict: { outcome: "unused" },
+        payerNonce: 42,
+        retryAfterSec: 15,
+      })
+    ).toEqual({
+      kind: "allow_base_hints",
+      resetCounters: true,
+    });
+
+    expect(
+      resolvePayerNonceGuardDecision({
+        verdict: { outcome: "replaced" },
+        payerNonce: 42,
+        retryAfterSec: 15,
+      }).resetCounters
+    ).toBe(true);
+
+    expect(
+      resolvePayerNonceGuardDecision({
+        verdict: { outcome: "aborted" },
+        payerNonce: 42,
+        retryAfterSec: 15,
+      }).resetCounters
+    ).toBe(true);
+
+    // Mempool pending preserves counters (`resetCounters: false`) so flaky alternating verdicts still cap
+    const mempoolDecision = resolvePayerNonceGuardDecision({
+      verdict: { outcome: "pending", reason: "mempool" },
+      payerNonce: 42,
+      retryAfterSec: 15,
+    });
+    expect(mempoolDecision.kind).toBe("retry_later");
+    expect(mempoolDecision.resetCounters).toBe(false);
+
+    // Missing-nonce gap caps at MAX_NONCE_GUARD_MISSING_GAP_RETRIES (4), then instructs rebuild_and_resign at exact nonce N
+    const gapWithinCap = resolvePayerNonceGuardDecision({
+      verdict: { outcome: "pending", reason: "missing_nonce_gap" },
+      payerNonce: 42,
+      retryAfterSec: 15,
+      gapCount: MAX_NONCE_GUARD_MISSING_GAP_RETRIES,
+    });
+    expect(gapWithinCap.kind).toBe("retry_later");
+    expect(gapWithinCap.resetCounters).toBe(false);
+
+    const gapCapped = resolvePayerNonceGuardDecision({
+      verdict: { outcome: "pending", reason: "missing_nonce_gap" },
+      payerNonce: 42,
+      retryAfterSec: 15,
+      gapCount: MAX_NONCE_GUARD_MISSING_GAP_RETRIES + 1,
+    });
+    expect(gapCapped).toMatchObject({
+      kind: "rebuild_at_same_nonce",
+      status: "failed",
+      terminalReason: "sender_nonce_gap",
+      nextSteps: "rebuild_and_resign",
+      retryable: true,
+      httpStatus: 402,
+      payerNonce: 42,
+      resetCounters: false,
+    });
+    if (gapCapped.kind === "rebuild_at_same_nonce") {
+      expect(gapCapped.message).toContain("exact nonce 42");
+    }
+
+    // Unavailable caps at MAX_NONCE_GUARD_UNAVAILABLE_RETRIES (2), then emits non-402 HTTP 502 verify_nonce_on_chain
+    const unavailWithinCap = resolvePayerNonceGuardDecision({
+      verdict: { outcome: "unavailable", reason: "consumed_tx_unparseable" },
+      payerNonce: 42,
+      retryAfterSec: 15,
+      unavailableCount: MAX_NONCE_GUARD_UNAVAILABLE_RETRIES,
+    });
+    expect(unavailWithinCap.kind).toBe("retry_later");
+    expect(unavailWithinCap.resetCounters).toBe(false);
+
+    const unavailCapped = resolvePayerNonceGuardDecision({
+      verdict: { outcome: "unavailable", reason: "consumed_tx_unparseable" },
+      payerNonce: 42,
+      retryAfterSec: 15,
+      unavailableCount: MAX_NONCE_GUARD_UNAVAILABLE_RETRIES + 1,
+    });
+    expect(unavailCapped).toMatchObject({
+      kind: "verify_nonce_on_chain",
+      status: "failed",
+      terminalReason: "internal_error",
+      nextSteps: "verify_nonce_on_chain",
+      retryable: false,
+      httpStatus: 502,
+      payerNonce: 42,
+      unavailableReason: "consumed_tx_unparseable",
+      resetCounters: false,
+    });
   });
 });

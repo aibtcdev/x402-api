@@ -83,19 +83,18 @@ export function isRelayRetryableTerminalReason(reason: string | undefined): bool
 export const MAX_SAME_PAYMENT_RETRIES = 2;
 
 /**
- * Maximum consecutive payer-nonce guard `"unavailable"` verdicts on released
- * payments (Hiro brownout, unindexed consumed tx, or unparseable `raw_tx`)
- * that convert a terminal failure into `retry_later` before stopping with a
- * non-retryable `"verify_nonce_on_chain"` (`terminalReason: "internal_error"`)
- * outcome rather than `start_new_payment`.
+ * Maximum payer-nonce guard `"unavailable"` verdicts (Hiro brownout,
+ * unindexed consumed tx, or unparseable `raw_tx`) before stopping with a
+ * non-402, non-retryable `"verify_nonce_on_chain"` (`502`, `internal_error`)
+ * outcome rather than `start_new_payment` or uncapped `retry_later`.
  */
 export const MAX_NONCE_GUARD_UNAVAILABLE_RETRIES = 2;
 
 /**
- * Maximum consecutive `detected_missing_nonces` gap-driven `"pending"` verdicts
- * after the relay has already failed/released a payment before treating the
- * persistently unexecuted gap at `txNonce` as `"unused"` (avoiding an uncapped
- * `retry_later` wait while higher-nonce transactions sit in the mempool).
+ * Maximum `detected_missing_nonces` gap-driven `"pending"` verdicts on a
+ * relay-failed payment before instructing the caller to `rebuild_and_resign`
+ * at exact `payerNonce` `N` (filling/replacing the gap at `N` rather than
+ * signing above the mempool frontier or waiting indefinitely).
  */
 export const MAX_NONCE_GUARD_MISSING_GAP_RETRIES = 4;
 
@@ -239,4 +238,214 @@ export function isMissingSenderNonceGap(
   }
   const missingSet = new Set(nonces.detected_missing_nonces ?? []);
   return missingSet.has(txNonce);
+}
+
+export type PayerNonceUnavailableReason =
+  | "nonce_state_unknown"
+  | "consumed_tx_unindexed"
+  | "consumed_tx_unparseable";
+
+export type PayerNoncePendingReason = "mempool" | "missing_nonce_gap";
+
+export type PayerNonceGuardVerdict =
+  | { outcome: "unused" }
+  | { outcome: "pending"; reason?: PayerNoncePendingReason }
+  | { outcome: "confirmed"; txid: string }
+  | { outcome: "replaced" }
+  | { outcome: "aborted" }
+  | { outcome: "unavailable"; reason?: PayerNonceUnavailableReason };
+
+export type PayerNonceGuardDecision =
+  | {
+      kind: "settle_confirmed";
+      txid: string;
+      resetCounters: true;
+    }
+  | {
+      kind: "allow_base_hints";
+      resetCounters: true;
+    }
+  | {
+      kind: "replaced";
+      status: "replaced";
+      terminalReason: "nonce_replacement";
+      nextSteps: "start_new_payment";
+      retryable: false;
+      httpStatus: 402;
+      resetCounters: true;
+    }
+  | {
+      kind: "aborted";
+      status: "failed";
+      terminalReason: "chain_abort";
+      nextSteps: "start_new_payment";
+      retryable: false;
+      httpStatus: 402;
+      resetCounters: true;
+    }
+  | {
+      kind: "retry_later";
+      status?: "mempool";
+      errorReason:
+        | "payer_nonce_pending"
+        | "payer_nonce_missing_gap"
+        | "payer_nonce_guard_unavailable";
+      message: string;
+      nextSteps: "retry_later";
+      retryable: true;
+      retryAfter: number;
+      httpStatus: 402;
+      resetCounters: false;
+    }
+  | {
+      kind: "rebuild_at_same_nonce";
+      status: "failed";
+      terminalReason: "sender_nonce_gap";
+      errorReason: "sender_nonce_gap";
+      message: string;
+      nextSteps: "rebuild_and_resign";
+      retryable: true;
+      httpStatus: 402;
+      payerNonce: number;
+      resetCounters: false;
+    }
+  | {
+      kind: "verify_nonce_on_chain";
+      status: "failed";
+      terminalReason: "internal_error";
+      errorReason: "payer_nonce_verification_unavailable";
+      message: string;
+      nextSteps: "verify_nonce_on_chain";
+      retryable: false;
+      httpStatus: 502;
+      payerNonce: number;
+      unavailableReason?: PayerNonceUnavailableReason;
+      resetCounters: false;
+    };
+
+/**
+ * Pure decision table mapping `(verdict, payerNonce, counters, retryAfterSec)`
+ * to a deterministic middleware action:
+ *   - Resolved verdicts (`confirmed`, `unused`, `replaced`, `aborted`) set
+ *     `resetCounters: true`.
+ *   - Unresolved verdicts (`pending`, `missing_nonce_gap`, `unavailable`) set
+ *     `resetCounters: false` so alternating flaky responses never reset each
+ *     other's cap.
+ *   - Exceeding `MAX_NONCE_GUARD_MISSING_GAP_RETRIES` returns `rebuild_and_resign`
+ *     pinned to `payerNonce` `N` so the replacement fills the gap at `N` (at most
+ *     one tx at `N` can confirm) rather than signing above the mempool frontier.
+ *   - Exceeding `MAX_NONCE_GUARD_UNAVAILABLE_RETRIES` (on either released or
+ *     non-released paths) returns non-402 HTTP `502` + `verify_nonce_on_chain`
+ *     (`retryable: false`) so generic x402 clients cannot mistake it for "re-pay".
+ */
+export function resolvePayerNonceGuardDecision(params: {
+  verdict: PayerNonceGuardVerdict;
+  payerNonce: number;
+  retryAfterSec: number;
+  unavailableCount?: number;
+  gapCount?: number;
+}): PayerNonceGuardDecision {
+  const { verdict, payerNonce, retryAfterSec } = params;
+  switch (verdict.outcome) {
+    case "confirmed":
+      return {
+        kind: "settle_confirmed",
+        txid: verdict.txid,
+        resetCounters: true,
+      };
+    case "unused":
+      return {
+        kind: "allow_base_hints",
+        resetCounters: true,
+      };
+    case "replaced":
+      return {
+        kind: "replaced",
+        status: "replaced",
+        terminalReason: "nonce_replacement",
+        nextSteps: "start_new_payment",
+        retryable: false,
+        httpStatus: 402,
+        resetCounters: true,
+      };
+    case "aborted":
+      return {
+        kind: "aborted",
+        status: "failed",
+        terminalReason: "chain_abort",
+        nextSteps: "start_new_payment",
+        retryable: false,
+        httpStatus: 402,
+        resetCounters: true,
+      };
+    case "pending": {
+      if (verdict.reason === "missing_nonce_gap") {
+        const gapCount = params.gapCount ?? 1;
+        if (gapCount > MAX_NONCE_GUARD_MISSING_GAP_RETRIES) {
+          return {
+            kind: "rebuild_at_same_nonce",
+            status: "failed",
+            terminalReason: "sender_nonce_gap",
+            errorReason: "sender_nonce_gap",
+            message: `Payer nonce ${payerNonce} is missing below higher-nonce mempool transactions; rebuild and re-sign using exact nonce ${payerNonce}`,
+            nextSteps: "rebuild_and_resign",
+            retryable: true,
+            httpStatus: 402,
+            payerNonce,
+            resetCounters: false,
+          };
+        }
+        return {
+          kind: "retry_later",
+          status: "mempool",
+          errorReason: "payer_nonce_missing_gap",
+          message: "Transaction pending on-chain for payer nonce, please retry",
+          nextSteps: "retry_later",
+          retryable: true,
+          retryAfter: retryAfterSec,
+          httpStatus: 402,
+          resetCounters: false,
+        };
+      }
+      return {
+        kind: "retry_later",
+        status: "mempool",
+        errorReason: "payer_nonce_pending",
+        message: "Transaction pending on-chain for payer nonce, please retry",
+        nextSteps: "retry_later",
+        retryable: true,
+        retryAfter: retryAfterSec,
+        httpStatus: 402,
+        resetCounters: false,
+      };
+    }
+    case "unavailable": {
+      const unavailableCount = params.unavailableCount ?? 1;
+      if (unavailableCount <= MAX_NONCE_GUARD_UNAVAILABLE_RETRIES) {
+        return {
+          kind: "retry_later",
+          errorReason: "payer_nonce_guard_unavailable",
+          message: "Unable to verify payer account nonce, please retry",
+          nextSteps: "retry_later",
+          retryable: true,
+          retryAfter: retryAfterSec,
+          httpStatus: 402,
+          resetCounters: false,
+        };
+      }
+      return {
+        kind: "verify_nonce_on_chain",
+        status: "failed",
+        terminalReason: "internal_error",
+        errorReason: "payer_nonce_verification_unavailable",
+        message: `Unable to verify on-chain outcome for payer nonce ${payerNonce}; check payer nonce ${payerNonce} on-chain before re-signing`,
+        nextSteps: "verify_nonce_on_chain",
+        retryable: false,
+        httpStatus: 502,
+        payerNonce,
+        unavailableReason: verdict.reason,
+        resetCounters: false,
+      };
+    }
+  }
 }
