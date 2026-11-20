@@ -48,6 +48,32 @@ import {
   derivePaymentInstability,
   logPaymentEvent,
 } from "../utils/payment-observability";
+
+/**
+ * Settlement mutex — serializes verifier.settle() calls per relay URL to prevent
+ * concurrent nonce conflicts (issue #86). Cloudflare Workers run multiple requests
+ * concurrently in the same isolate; without this, simultaneous settlements pick the
+ * same nonce and the relay rejects all but one with `conflicting_nonce`.
+ *
+ * A simple promise-chain mutex: each settle call waits for the previous one to
+ * finish before starting. Keyed by relay URL so different relays don't block each other.
+ */
+const settlementQueues = new Map<string, Promise<void>>();
+
+export function withSettlementLock<T>(relayUrl: string, fn: () => Promise<T>): Promise<T> {
+  const prev = settlementQueues.get(relayUrl) ?? Promise.resolve();
+  let release: () => void;
+  const gate = new Promise<void>(r => { release = r; });
+  settlementQueues.set(relayUrl, prev.then(() => gate));
+  return prev.then(() => fn()).finally(() => {
+    release!();
+    // Clean up if this was the last waiter
+    if (settlementQueues.get(relayUrl) === prev.then(() => gate)) {
+      settlementQueues.delete(relayUrl);
+    }
+  });
+}
+
 import { computeDerivedHints } from "../utils/payment-hints";
 import type { DerivedHints } from "../utils/payment-hints";
 
@@ -514,9 +540,11 @@ export function x402Middleware(
     try {
       // x402-stacks settle() returns SettlementResponseV2; cast to SettleResult
       // (HttpSettleResponse from tx-schemas). Structurally compatible.
-      settleResult = await verifier.settle(paymentPayload, {
-        paymentRequirements,
-      }) as unknown as SettleResult;
+      settleResult = await withSettlementLock(c.env.X402_FACILITATOR_URL, () =>
+        verifier.settle(paymentPayload, {
+          paymentRequirements,
+        })
+      ) as unknown as SettleResult;
 
       log.debug("Settle result", { ...settleResult });
     } catch (error) {
