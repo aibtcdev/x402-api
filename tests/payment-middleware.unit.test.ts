@@ -5275,7 +5275,8 @@ describe("x402Middleware — RPC enqueue vs confirmed settlement, relay ID recov
         expect(bUnparseable.retryable).toBe(true);
       }
 
-      // 3rd consecutive `unavailable` hits MAX_NONCE_GUARD_UNAVAILABLE_RETRIES cap -> bounded `start_new_payment`
+      // 3rd consecutive released `unavailable` hits MAX_NONCE_GUARD_UNAVAILABLE_RETRIES cap ->
+      // NEVER emits `start_new_payment` on a consumed/unknown nonce; emits `verify_nonce_on_chain`!
       const rCapped = await unparseableHarness.app.request(
         "http://localhost/paid",
         { method: "POST", headers: { [X402_HEADERS.PAYMENT_SIGNATURE]: unparseableSig } },
@@ -5283,9 +5284,12 @@ describe("x402Middleware — RPC enqueue vs confirmed settlement, relay ID recov
       );
       expect(rCapped.status).toBe(402);
       const bCapped = (await rCapped.json()) as Record<string, unknown>;
-      expect(bCapped.nextSteps).toBe("start_new_payment");
+      expect(bCapped.nextSteps).toBe("verify_nonce_on_chain");
+      expect(bCapped.nextSteps).not.toBe("start_new_payment");
       expect(bCapped.retryable).toBe(false);
       expect(bCapped.terminalReason).toBe("internal_error");
+      expect(String(bCapped.error)).toContain("8107");
+      expect((bCapped.details as Record<string, unknown>)?.payerNonce).toBe(8107);
 
       // 6. Released `sender_nonce_duplicate` (`rebuild_and_resign`) runs payer-nonce guard:
       //    returns `retry_later` while original tx sits in mempool, and preserves `rebuild_and_resign` when unused
@@ -5454,6 +5458,381 @@ describe("x402Middleware — RPC enqueue vs confirmed settlement, relay ID recov
       );
       expect(rBusyConfirmed.status).toBe(200);
       expect(busyReplacedHarness.getHandlerCount()).toBe(1);
+
+      // 8. Indexed by-nonce lookup throwing 429 falls through to 50-tx scan and confirms (200 OK)
+      const fallbackUnsponsored = await makeSTXTokenTransfer({
+        recipient: TEST_SELLER_ADDRESS,
+        amount: 1000n,
+        senderKey: TEST_BUYER_PRIVKEY,
+        network: "testnet",
+        memo: "by-nonce-429-fallback",
+        nonce: 8110n,
+        fee: 0n,
+        sponsored: true,
+      });
+      const fallbackSponsored = await sponsorTransaction({
+        transaction: fallbackUnsponsored,
+        sponsorPrivateKey: TEST_ATTACKER_PRIVKEY,
+        fee: 300n,
+        sponsorNonce: 78n,
+        network: "testnet",
+      });
+      globalThis.fetch = (async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.endsWith(`/extended/v1/address/${TEST_BUYER_ADDRESS}/nonces`)) {
+          return new Response(
+            JSON.stringify({
+              last_executed_tx_nonce: 8110,
+              last_mempool_tx_nonce: null,
+              possible_next_nonce: 8111,
+              detected_missing_nonces: [],
+            }),
+            { status: 200, headers: { "Content-Type": "application/json" } }
+          );
+        }
+        if (url.includes(`/extended/v1/tx?from_address=`)) {
+          return new Response("Too Many Requests", { status: 429 });
+        }
+        if (url.includes(`/extended/v1/address/${TEST_BUYER_ADDRESS}/transactions`)) {
+          return new Response(
+            JSON.stringify({
+              results: [
+                {
+                  tx_id: `0x${fallbackSponsored.txid()}`,
+                  nonce: 8110,
+                  sender_address: TEST_BUYER_ADDRESS,
+                  canonical: true,
+                  tx_status: "success",
+                },
+              ],
+            }),
+            { status: 200, headers: { "Content-Type": "application/json" } }
+          );
+        }
+        if (url.endsWith(`/extended/v1/tx/${fallbackSponsored.txid()}/raw`)) {
+          return new Response(JSON.stringify({ raw_tx: `0x${fallbackSponsored.serialize()}` }), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          });
+        }
+        return new Response("not mocked", { status: 404 });
+      }) as unknown as typeof fetch;
+
+      const fallbackHarness = createTestHarness(
+        {
+          async submitPayment() {
+            return { accepted: true, paymentId: "pay_bynonce_429_8110", status: "queued" };
+          },
+          async checkPayment(paymentId: string) {
+            return {
+              paymentId,
+              status: "failed",
+              terminalReason: "internal_error",
+              retryable: false,
+            };
+          },
+        },
+        { checkPayerNonceBeforeNewPayment: defaultCheckPayerNonceBeforeNewPayment }
+      );
+      const rFallbackOk = await fallbackHarness.app.request(
+        "http://localhost/paid",
+        {
+          method: "POST",
+          headers: {
+            [X402_HEADERS.PAYMENT_SIGNATURE]: encodePaymentSignature({
+              x402Version: 2,
+              payload: { transaction: fallbackUnsponsored.serialize() },
+            }),
+          },
+        },
+        fallbackHarness.env
+      );
+      expect(rFallbackOk.status).toBe(200);
+      expect(fallbackHarness.getHandlerCount()).toBe(1);
+
+      // 9. Non-released `rebuild_and_resign` passes neither burn the released `unavailable` cap
+      //    nor emit contradictory `rebuild_and_resign` / `TRANSACTION_FAILED` fields on `pending`,
+      //    and a `pending` verdict resets prior released `unavailable` counts
+      const consecTx = await buildSignedTxHex({ sponsored: true, nonce: 8111n });
+      const consecSig = encodePaymentSignature({
+        x402Version: 2,
+        payload: { transaction: consecTx },
+      });
+      let consecPhase: "released_unavail_1" | "sync_unavail" | "sync_pending" | "released_unavail_after_reset" =
+        "released_unavail_1";
+      let consecSubmits = 0;
+      const consecHarness = createTestHarness(
+        {
+          async submitPayment() {
+            consecSubmits += 1;
+            if (consecPhase === "sync_unavail" || consecPhase === "sync_pending") {
+              return {
+                accepted: false,
+                code: "SENDER_NONCE_DUPLICATE",
+                error: "Sender nonce already in mempool",
+                retryable: true,
+              } as never;
+            }
+            return {
+              accepted: true,
+              paymentId: `pay_consec_8111_${consecSubmits}`,
+              status: "queued",
+            };
+          },
+          async checkPayment(paymentId: string) {
+            return {
+              paymentId,
+              status: "failed",
+              terminalReason: "internal_error",
+              retryable: false,
+            };
+          },
+        },
+        {
+          checkPayerNonceBeforeNewPayment: async () => {
+            if (consecPhase === "sync_pending") {
+              return { outcome: "pending", reason: "mempool" };
+            }
+            return { outcome: "unavailable", reason: "nonce_state_unknown" };
+          },
+        }
+      );
+
+      // First two released unavailable passes -> count reaches 2 (still retry_later)
+      for (let i = 0; i < 2; i++) {
+        const r = await consecHarness.app.request(
+          "http://localhost/paid",
+          { method: "POST", headers: { [X402_HEADERS.PAYMENT_SIGNATURE]: consecSig } },
+          consecHarness.env
+        );
+        expect(r.status).toBe(402);
+        expect(((await r.json()) as Record<string, unknown>).nextSteps).toBe("retry_later");
+      }
+
+      // Three synchronous non-released unavailable passes must NOT trip verify_nonce_on_chain
+      consecPhase = "sync_unavail";
+      for (let i = 0; i < 3; i++) {
+        const rSyncU = await consecHarness.app.request(
+          "http://localhost/paid",
+          { method: "POST", headers: { [X402_HEADERS.PAYMENT_SIGNATURE]: consecSig } },
+          consecHarness.env
+        );
+        expect(rSyncU.status).toBe(402);
+        expect(rSyncU.headers.get("X-PAYMENT-ID")).toBeNull();
+        const bSyncU = (await rSyncU.json()) as Record<string, unknown>;
+        expect(bSyncU.code).toBe(X402_ERROR_CODES.TRANSACTION_PENDING);
+        expect(bSyncU.terminalReason).toBeUndefined();
+        expect(bSyncU.nextSteps).toBe("retry_later");
+        expect(bSyncU.retryable).toBe(true);
+      }
+
+      // Synchronous non-released pending pass returns coherent TRANSACTION_PENDING + resets counter
+      consecPhase = "sync_pending";
+      const rSyncP = await consecHarness.app.request(
+        "http://localhost/paid",
+        { method: "POST", headers: { [X402_HEADERS.PAYMENT_SIGNATURE]: consecSig } },
+        consecHarness.env
+      );
+      expect(rSyncP.status).toBe(402);
+      expect(rSyncP.headers.get("X-PAYMENT-ID")).toBeNull();
+      const bSyncP = (await rSyncP.json()) as Record<string, unknown>;
+      expect(bSyncP.code).toBe(X402_ERROR_CODES.TRANSACTION_PENDING);
+      expect(bSyncP.status).toBe("mempool");
+      expect(bSyncP.terminalReason).toBeUndefined();
+      expect(bSyncP.nextSteps).toBe("retry_later");
+      expect(bSyncP.retryable).toBe(true);
+
+      // Because `pending` reset consecutive unavailable to 0, two fresh released unavailable passes stay `retry_later`!
+      consecPhase = "released_unavail_after_reset";
+      for (let i = 0; i < 2; i++) {
+        const rAfterReset = await consecHarness.app.request(
+          "http://localhost/paid",
+          { method: "POST", headers: { [X402_HEADERS.PAYMENT_SIGNATURE]: consecSig } },
+          consecHarness.env
+        );
+        expect(rAfterReset.status).toBe(402);
+        expect(((await rAfterReset.json()) as Record<string, unknown>).nextSteps).toBe("retry_later");
+      }
+
+      // 10. `detected_missing_nonces` gap-driven `pending` is bounded to 4 retries before treating as `unused`
+      const gapTx = await buildSignedTxHex({ sponsored: true, nonce: 8112n });
+      const gapSig = encodePaymentSignature({
+        x402Version: 2,
+        payload: { transaction: gapTx },
+      });
+      globalThis.fetch = (async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.endsWith(`/extended/v1/address/${TEST_BUYER_ADDRESS}/nonces`)) {
+          return new Response(
+            JSON.stringify({
+              last_executed_tx_nonce: 8111,
+              last_mempool_tx_nonce: 8113,
+              possible_next_nonce: 8114,
+              detected_missing_nonces: [8112],
+              detected_mempool_nonces: [8113],
+            }),
+            { status: 200, headers: { "Content-Type": "application/json" } }
+          );
+        }
+        return new Response("not mocked", { status: 404 });
+      }) as unknown as typeof fetch;
+
+      let gapSubmits = 0;
+      const gapHarness = createTestHarness(
+        {
+          async submitPayment() {
+            gapSubmits += 1;
+            return { accepted: true, paymentId: `pay_gap_8112_${gapSubmits}`, status: "queued" };
+          },
+          async checkPayment(paymentId: string) {
+            return {
+              paymentId,
+              status: "failed",
+              terminalReason: "internal_error",
+              retryable: false,
+            };
+          },
+        },
+        { checkPayerNonceBeforeNewPayment: defaultCheckPayerNonceBeforeNewPayment }
+      );
+      for (let i = 1; i <= 4; i++) {
+        const rGapRetry = await gapHarness.app.request(
+          "http://localhost/paid",
+          { method: "POST", headers: { [X402_HEADERS.PAYMENT_SIGNATURE]: gapSig } },
+          gapHarness.env
+        );
+        expect(rGapRetry.status).toBe(402);
+        expect(((await rGapRetry.json()) as Record<string, unknown>).nextSteps).toBe("retry_later");
+      }
+      const rGapCapped = await gapHarness.app.request(
+        "http://localhost/paid",
+        { method: "POST", headers: { [X402_HEADERS.PAYMENT_SIGNATURE]: gapSig } },
+        gapHarness.env
+      );
+      expect(rGapCapped.status).toBe(402);
+      const bGapCapped = (await rGapCapped.json()) as Record<string, unknown>;
+      expect(bGapCapped.nextSteps).toBe("start_new_payment");
+      expect(bGapCapped.retryable).toBe(false);
+
+      // 11. Stale `clearBoundTx` (`cleared: false` on `bindingId` mismatch with live re-bound DO record)
+      //     keeps the payment in-flight (`retry_later` + live `X-PAYMENT-ID`) instead of treating as released
+      const staleBindTx = await buildSignedTxHex({ sponsored: true, nonce: 8115n });
+      const staleBindSig = encodePaymentSignature({
+        x402Version: 2,
+        payload: { transaction: staleBindTx },
+      });
+      let staleCheckPhase: "enqueue" | "stale_clear_mismatch" = "enqueue";
+      let liveBindingInDO: TxGuardRecord | null = null;
+      const staleMismatchDO: Env["PAYMENT_POLLING_DO"] = {
+        idFromName(name: string) {
+          return name as unknown as DurableObjectId;
+        },
+        get() {
+          return {
+            async track() {},
+            async getTxGuard() {
+              return liveBindingInDO;
+            },
+            async claimTx(input: ClaimTxInput): Promise<ClaimTxResult> {
+              return {
+                status: "claimed",
+                record: {
+                  txHash: input.txHash,
+                  claimId: input.claimId,
+                  consumed: false,
+                  updatedAt: Date.now(),
+                },
+              };
+            },
+            async releaseTxClaim() {},
+            async bindTxPayment(input: BindTxPaymentInput): Promise<TxGuardRecord> {
+              liveBindingInDO = {
+                txHash: input.txHash,
+                relayPaymentId: input.relayPaymentId,
+                bindingId: "bind_1",
+                expectedRecipient: input.expectedRecipient,
+                minAmount: input.minAmount,
+                asset: input.asset,
+                network: input.network,
+                verifiedPayer: input.verifiedPayer,
+                requestBindingHash: input.requestBindingHash,
+                boundAt: Date.now(),
+                consumed: false,
+                updatedAt: Date.now(),
+              };
+              return liveBindingInDO;
+            },
+            async clearBoundTx(): Promise<ClearBoundTxResult> {
+              // Simulate another isolate having cleared bind_1 and re-bound bind_2 while checkPayment was in flight
+              const reboundRec: TxGuardRecord = {
+                ...liveBindingInDO!,
+                relayPaymentId: "pay_rebound_live_8115",
+                bindingId: "bind_2",
+                updatedAt: Date.now(),
+              };
+              liveBindingInDO = reboundRec;
+              return {
+                cleared: false,
+                consumed: false,
+                record: reboundRec,
+                failedAttempts: 1,
+              };
+            },
+            async markTxConsumed(input: MarkTxConsumedInput) {
+              return {
+                alreadyConsumed: false,
+                record: {
+                  txHash: input.txHash,
+                  consumed: true,
+                  consumedTxid: input.txid,
+                  updatedAt: Date.now(),
+                },
+              };
+            },
+          };
+        },
+      } as unknown as Env["PAYMENT_POLLING_DO"];
+
+      const staleMismatchHarness = createTestHarness({
+        async submitPayment() {
+          return { accepted: true, paymentId: "pay_initial_8115", status: "queued" };
+        },
+        async checkPayment(paymentId: string) {
+          if (staleCheckPhase === "enqueue") {
+            return { paymentId, status: "queued" };
+          }
+          return {
+            paymentId,
+            status: "failed",
+            terminalReason: "internal_error",
+            retryable: false,
+          };
+        },
+      });
+      (staleMismatchHarness.env as unknown as Record<string, unknown>).PAYMENT_POLLING_DO =
+        staleMismatchDO;
+
+      const rStale1 = await staleMismatchHarness.app.request(
+        "http://localhost/paid",
+        { method: "POST", headers: { [X402_HEADERS.PAYMENT_SIGNATURE]: staleBindSig } },
+        staleMismatchHarness.env
+      );
+      expect(rStale1.status).toBe(402);
+      expect(rStale1.headers.get("X-PAYMENT-ID")).toBe("pay_initial_8115");
+
+      staleCheckPhase = "stale_clear_mismatch";
+      const rStale2 = await staleMismatchHarness.app.request(
+        "http://localhost/paid",
+        { method: "POST", headers: { [X402_HEADERS.PAYMENT_SIGNATURE]: staleBindSig } },
+        staleMismatchHarness.env
+      );
+      expect(rStale2.status).toBe(402);
+      expect(rStale2.headers.get("X-PAYMENT-ID")).toBe("pay_rebound_live_8115");
+      const bStale2 = (await rStale2.json()) as Record<string, unknown>;
+      expect(bStale2.code).toBe(X402_ERROR_CODES.TRANSACTION_PENDING);
+      expect(bStale2.nextSteps).toBe("retry_later");
+      expect(bStale2.retryable).toBe(true);
+      expect(bStale2.paymentId).toBe("pay_rebound_live_8115");
     } finally {
       globalThis.fetch = originalFetch;
     }

@@ -773,6 +773,25 @@ describe("PaymentPollingDO real tx_guard & alarm() lifecycle", () => {
     expect(await instance.getTxGuard()).toBeNull();
   });
 
+  test("recordNonceGuardUnavailable, recordNonceGuardMissingGap, and resetNonceGuardCounters maintain consecutive counts", async () => {
+    const { instance, ready } = createInMemoryDO();
+    await ready();
+
+    expect(await instance.recordNonceGuardUnavailable("tx_consec")).toBe(1);
+    expect(await instance.recordNonceGuardUnavailable("tx_consec")).toBe(2);
+
+    // Observing a missing-gap pending verdict resets consecutive unavailable and starts gap count at 1
+    expect(await instance.recordNonceGuardMissingGap("tx_consec")).toBe(1);
+    expect(await instance.recordNonceGuardUnavailable("tx_consec")).toBe(1);
+
+    // Any other verdict (pending mempool / unused / confirmed) resets both counters to 0
+    await instance.resetNonceGuardCounters("tx_consec");
+    expect(await instance.recordNonceGuardUnavailable("tx_consec")).toBe(1);
+    expect(await instance.recordNonceGuardMissingGap("tx_consec")).toBe(1);
+    await instance.resetNonceGuardCounters("tx_consec");
+    expect(await instance.recordNonceGuardMissingGap("tx_consec")).toBe(1);
+  });
+
   test("alarm() cleans expired tx_guard rows without disrupting active payment_state polling alarms", async () => {
     const { instance, db, ready, getAlarm } = createInMemoryDO();
     await ready();

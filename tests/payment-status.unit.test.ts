@@ -1,9 +1,12 @@
 import { describe, expect, test } from "bun:test";
 import {
+  MAX_NONCE_GUARD_MISSING_GAP_RETRIES,
+  MAX_NONCE_GUARD_UNAVAILABLE_RETRIES,
   MAX_SAME_PAYMENT_RETRIES,
   canRetrySamePaymentResubmission,
   classifySenderNonceState,
   isInFlightPaymentState,
+  isMissingSenderNonceGap,
   isRelayRetryableTerminalReason,
   isSenderRebuildTerminalReason,
   shouldRetrySamePaymentPoll,
@@ -179,5 +182,36 @@ describe("payment-status classifier predicates", () => {
         detected_missing_nonces: [],
       })
     ).toBe("unused");
+
+    expect(
+      isMissingSenderNonceGap(8, {
+        last_executed_tx_nonce: 7,
+        last_mempool_tx_nonce: 9,
+        possible_next_nonce: 10,
+        detected_missing_nonces: [8],
+        detected_mempool_nonces: [9],
+      })
+    ).toBe(true);
+    expect(
+      isMissingSenderNonceGap(9, {
+        last_executed_tx_nonce: 7,
+        last_mempool_tx_nonce: 9,
+        possible_next_nonce: 10,
+        detected_missing_nonces: [8],
+        detected_mempool_nonces: [9],
+      })
+    ).toBe(false);
+    expect(
+      isMissingSenderNonceGap(7, {
+        last_executed_tx_nonce: 7,
+        last_mempool_tx_nonce: 9,
+        possible_next_nonce: 10,
+        detected_missing_nonces: [7, 8],
+        detected_mempool_nonces: [9],
+      })
+    ).toBe(false);
+    expect(MAX_NONCE_GUARD_MISSING_GAP_RETRIES).toBeGreaterThan(
+      MAX_NONCE_GUARD_UNAVAILABLE_RETRIES
+    );
   });
 });

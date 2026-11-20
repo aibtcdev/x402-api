@@ -83,13 +83,21 @@ export function isRelayRetryableTerminalReason(reason: string | undefined): bool
 export const MAX_SAME_PAYMENT_RETRIES = 2;
 
 /**
- * Maximum times a payer-nonce guard `"unavailable"` verdict (Hiro brownout,
- * unparseable `raw_tx`, or missing anchored tx row) may convert a released
- * terminal failure into `retry_later` before falling back to `start_new_payment`
- * with a canonical terminal reason. `"pending"` is intentionally uncapped
- * because mempool transactions resolve on their own.
+ * Maximum consecutive payer-nonce guard `"unavailable"` verdicts on released
+ * payments (Hiro brownout, unindexed consumed tx, or unparseable `raw_tx`)
+ * that convert a terminal failure into `retry_later` before stopping with a
+ * non-retryable `"verify_nonce_on_chain"` (`terminalReason: "internal_error"`)
+ * outcome rather than `start_new_payment`.
  */
 export const MAX_NONCE_GUARD_UNAVAILABLE_RETRIES = 2;
+
+/**
+ * Maximum consecutive `detected_missing_nonces` gap-driven `"pending"` verdicts
+ * after the relay has already failed/released a payment before treating the
+ * persistently unexecuted gap at `txNonce` as `"unused"` (avoiding an uncapped
+ * `retry_later` wait while higher-nonce transactions sit in the mempool).
+ */
+export const MAX_NONCE_GUARD_MISSING_GAP_RETRIES = 4;
 
 /**
  * Max consecutive deterministic schema mismatches in `PaymentPollingDO` before
@@ -207,4 +215,28 @@ export function classifySenderNonceState(
     return "consumed";
   }
   return "unused";
+}
+
+/**
+ * True when `txNonce` has not executed, is absent from `detected_mempool_nonces`,
+ * and is explicitly reported in `detected_missing_nonces` (a nonce gap below
+ * higher-nonce mempool transactions).
+ */
+export function isMissingSenderNonceGap(
+  txNonce: number,
+  nonces: AccountNoncesSnapshot
+): boolean {
+  if (!Number.isSafeInteger(txNonce) || txNonce < 0) {
+    return false;
+  }
+  const lastExecuted = nonces.last_executed_tx_nonce;
+  if (typeof lastExecuted === "number" && txNonce <= lastExecuted) {
+    return false;
+  }
+  const mempoolSet = new Set(nonces.detected_mempool_nonces ?? []);
+  if (mempoolSet.has(txNonce)) {
+    return false;
+  }
+  const missingSet = new Set(nonces.detected_missing_nonces ?? []);
+  return missingSet.has(txNonce);
 }

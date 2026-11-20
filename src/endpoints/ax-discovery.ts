@@ -688,6 +688,7 @@ and the \`payment-response\` header (base64 JSON, same convention as success pat
 | \`start_new_payment\`    | Payment replaced or identity lost — begin a new x402 flow    |
 | \`fix_and_resend\`       | Invalid transaction payload — correct it before retrying      |
 | \`wait_for_confirmation\`| Payment confirmed — resource delivery should proceed         |
+| \`verify_nonce_on_chain\`| Nonce outcome unreadable — check payer nonce on-chain first  |
 
 The \`payment-response\` header on error paths carries
 \`base64({ retryable, nextSteps, retryAfter? })\` — decode with \`atob()\` + \`JSON.parse()\`.
@@ -1374,6 +1375,7 @@ All non-200 payment error responses include structured retry hints. These appear
 | \`start_new_payment\`    | Payment replaced, expired, or identity not found       | false     |
 | \`fix_and_resend\`       | Invalid transaction payload — fix before retrying      | false     |
 | \`wait_for_confirmation\`| Payment confirmed — resource delivery should proceed   | false     |
+| \`verify_nonce_on_chain\`| Nonce outcome unreadable — verify on-chain before sign | false     |
 
 ### Hint Derivation by Terminal Reason Category
 

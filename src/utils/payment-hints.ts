@@ -19,7 +19,7 @@ import type { TerminalReason } from "../services/payment-contract";
 export interface DerivedHints {
   retryable: boolean;
   retryAfter?: number;   // seconds
-  nextSteps: string;     // stable token: rebuild_and_resign | retry_later | start_new_payment | fix_and_resend | wait_for_confirmation
+  nextSteps: string;     // stable token: rebuild_and_resign | retry_later | start_new_payment | fix_and_resend | wait_for_confirmation | verify_nonce_on_chain
 }
 
 // =============================================================================
