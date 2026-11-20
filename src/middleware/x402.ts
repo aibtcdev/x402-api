@@ -78,6 +78,7 @@ import {
   canRetrySamePaymentResubmission,
   classifySenderNonceState,
   isRelayRetryableTerminalReason,
+  MAX_NONCE_GUARD_UNAVAILABLE_RETRIES,
   NOT_FOUND_ENQUEUE_GRACE_MS,
 } from "../utils/payment-status";
 
@@ -128,6 +129,7 @@ export interface VerifiedTransactionOrigin {
 
 interface BoundRpcPayment {
   relayPaymentId: string;
+  bindingId?: string;
   callerSuppliedPaymentId?: string;
   requestCorrelationId: string;
   requestBindingHash: string;
@@ -237,18 +239,42 @@ const CONSUMED_PAYMENTS = {
   relayIdByTxHash: new Map<string, string>(),
 };
 
-const FAILED_TX_ATTEMPTS = new Map<string, { count: number; lastFailedPaymentId?: string }>();
+const FAILED_TX_ATTEMPTS = new Map<
+  string,
+  { count: number; lastFailedPaymentId?: string; nonceGuardUnavailable: number }
+>();
 
 function getFailedAttemptCount(txHash: string): number {
   return txHash ? (FAILED_TX_ATTEMPTS.get(txHash)?.count ?? 0) : 0;
 }
 
+function recordIsolateNonceGuardUnavailable(txHash: string): number {
+  if (!txHash) {
+    return 0;
+  }
+  const existing = FAILED_TX_ATTEMPTS.get(txHash);
+  if (!existing && FAILED_TX_ATTEMPTS.size >= MAX_BOUND_PAYMENTS_PER_STORE) {
+    const oldest = FAILED_TX_ATTEMPTS.keys().next().value;
+    if (oldest !== undefined) {
+      FAILED_TX_ATTEMPTS.delete(oldest);
+    }
+  }
+  const nextUnavailable = (existing?.nonceGuardUnavailable ?? 0) + 1;
+  FAILED_TX_ATTEMPTS.set(txHash, {
+    count: existing?.count ?? 0,
+    lastFailedPaymentId: existing?.lastFailedPaymentId,
+    nonceGuardUnavailable: nextUnavailable,
+  });
+  return nextUnavailable;
+}
+
 function setFailedAttemptCount(
   txHash: string,
   count: number,
-  lastFailedPaymentId?: string
+  lastFailedPaymentId?: string,
+  nonceGuardUnavailable?: number
 ): void {
-  if (!txHash || count <= 0) {
+  if (!txHash || (count <= 0 && (nonceGuardUnavailable ?? 0) <= 0)) {
     return;
   }
   const existing = FAILED_TX_ATTEMPTS.get(txHash);
@@ -259,8 +285,12 @@ function setFailedAttemptCount(
     }
   }
   FAILED_TX_ATTEMPTS.set(txHash, {
-    count,
+    count: Math.max(0, count),
     lastFailedPaymentId: lastFailedPaymentId ?? existing?.lastFailedPaymentId,
+    nonceGuardUnavailable:
+      nonceGuardUnavailable !== undefined
+        ? Math.max(0, nonceGuardUnavailable)
+        : (existing?.nonceGuardUnavailable ?? 0),
   });
 }
 
@@ -678,20 +708,24 @@ function stringifyWithBigInt(value: unknown): string {
   return JSON.stringify(value, (_, v) => (typeof v === "bigint" ? v.toString() : v));
 }
 
+export type ExecutedTxOriginMatch = boolean | "unknown";
+
 /**
  * Verify that an executed on-chain transaction matches the caller's submitted
  * signed origin (`spendingCondition` signer + nonce + signature, `payload`, and
  * `postConditions`), invariant across sponsor fee/nonce co-signing.
+ * Returns `"unknown"` when either hex cannot be deserialized so a truncated or
+ * future-version `raw_tx` is never misclassified as proof of nonce replacement.
  */
 export function doesExecutedTxMatchSubmittedOrigin(
   submittedCleanHex: string,
   executedRawHex: string
-): boolean {
+): ExecutedTxOriginMatch {
   try {
     const subHex = stripHexPrefix(submittedCleanHex.trim());
     const execHex = stripHexPrefix(executedRawHex.trim());
     if (!subHex || !execHex) {
-      return false;
+      return "unknown";
     }
     const subTx = deserializeTransaction(subHex);
     const execTx = deserializeTransaction(execHex);
@@ -704,7 +738,7 @@ export function doesExecutedTxMatchSubmittedOrigin(
         stringifyWithBigInt(execTx.postConditions)
     );
   } catch {
-    return false;
+    return "unknown";
   }
 }
 
@@ -724,17 +758,25 @@ export const defaultCheckPayerNonceBeforeNewPayment: CheckPayerNonceBeforeNewPay
         return { outcome: "pending" };
       }
 
-      const recentTxs = await hiro.getAddressTransactions(
+      let matchedTx = await hiro.getTransactionBySenderNonce(
         payerAddress,
-        50,
+        txNonce,
         AbortSignal.timeout(PAYER_NONCE_GUARD_TIMEOUT_MS)
       );
-      const matchedTx = recentTxs.find(
-        (t) =>
-          t.sender_address === payerAddress &&
-          Number(t.nonce) === txNonce &&
-          t.canonical !== false
-      );
+      if (!matchedTx) {
+        const recentTxs = await hiro.getAddressTransactions(
+          payerAddress,
+          50,
+          AbortSignal.timeout(PAYER_NONCE_GUARD_TIMEOUT_MS)
+        );
+        matchedTx =
+          recentTxs.find(
+            (t) =>
+              t.sender_address === payerAddress &&
+              Number(t.nonce) === txNonce &&
+              t.canonical !== false
+          ) ?? null;
+      }
       if (!matchedTx || typeof matchedTx.tx_id !== "string" || matchedTx.tx_id.length === 0) {
         return { outcome: "unavailable" };
       }
@@ -742,7 +784,11 @@ export const defaultCheckPayerNonceBeforeNewPayment: CheckPayerNonceBeforeNewPay
         matchedTx.tx_id,
         AbortSignal.timeout(PAYER_NONCE_GUARD_TIMEOUT_MS)
       );
-      if (!doesExecutedTxMatchSubmittedOrigin(cleanTxHex, rawHex)) {
+      const originMatch = doesExecutedTxMatchSubmittedOrigin(cleanTxHex, rawHex);
+      if (originMatch === "unknown") {
+        return { outcome: "unavailable" };
+      }
+      if (originMatch === false) {
         return { outcome: "replaced" };
       }
       if (matchedTx.tx_status === "success") {
@@ -854,9 +900,11 @@ interface TxGuardDOStub {
   claimTx?: (input: ClaimTxInput) => Promise<ClaimTxResult>;
   releaseTxClaim?: (claimId: string) => Promise<void>;
   bindTxPayment?: (input: BindTxPaymentInput) => Promise<TxGuardRecord>;
+  recordNonceGuardUnavailable?: (txHash: string) => Promise<number>;
   clearBoundTx?: (
     expectedRelayPaymentId: string,
-    reason?: ClearBoundTxReason
+    reason?: ClearBoundTxReason,
+    expectedBindingId?: string
   ) => Promise<ClearBoundTxResult | boolean | void>;
   markTxConsumed?: (input: MarkTxConsumedInput) => Promise<{
     alreadyConsumed: boolean;
@@ -973,14 +1021,18 @@ async function clearBoundTxInDO(
   txHash: string,
   expectedRelayPaymentId: string,
   reason: ClearBoundTxReason,
-  log: Logger
+  log: Logger,
+  expectedBindingId?: string
 ): Promise<{ available: boolean; result?: ClearBoundTxResult; error?: unknown }> {
   try {
     const stub = getTxGuardStub(c, txHash);
     if (!stub || typeof stub.clearBoundTx !== "function") {
       return { available: false };
     }
-    const rawResult = await stub.clearBoundTx(expectedRelayPaymentId, reason);
+    const rawResult =
+      expectedBindingId !== undefined
+        ? await stub.clearBoundTx(expectedRelayPaymentId, reason, expectedBindingId)
+        : await stub.clearBoundTx(expectedRelayPaymentId, reason);
     if (
       typeof rawResult === "object" &&
       rawResult !== null &&
@@ -998,6 +1050,29 @@ async function clearBoundTxInDO(
     });
     return { available: true, error: err };
   }
+}
+
+async function recordNonceGuardUnavailableInDO(
+  c: { env: Env },
+  txHash: string,
+  log: Logger
+): Promise<number> {
+  try {
+    const stub = getTxGuardStub(c, txHash);
+    if (stub && typeof stub.recordNonceGuardUnavailable === "function") {
+      const count = await stub.recordNonceGuardUnavailable(txHash);
+      if (typeof count === "number" && count > 0) {
+        setFailedAttemptCount(txHash, getFailedAttemptCount(txHash), undefined, count);
+        return count;
+      }
+    }
+  } catch (err) {
+    log.warn("PaymentPollingDO.recordNonceGuardUnavailable failed; using isolate counter", {
+      txHash,
+      err: String(err),
+    });
+  }
+  return recordIsolateNonceGuardUnavailable(txHash);
 }
 
 async function markTxConsumedInDO(
@@ -1546,6 +1621,7 @@ export function x402Middleware(
           ) {
             const hydratedEntry: BoundRpcPayment = {
               relayPaymentId: rec.relayPaymentId,
+              bindingId: rec.bindingId,
               callerSuppliedPaymentId: rec.callerSuppliedPaymentId,
               requestCorrelationId,
               requestBindingHash: rec.requestBindingHash,
@@ -1647,7 +1723,10 @@ export function x402Middleware(
                   syncFailedAttemptCount(txHash, doRec!.failedAttempts!);
                 }
               }
-            } else if (doRec.relayPaymentId !== boundEntry.relayPaymentId) {
+            } else if (
+              doRec.relayPaymentId !== boundEntry.relayPaymentId ||
+              (doRec.bindingId && boundEntry.bindingId && doRec.bindingId !== boundEntry.bindingId)
+            ) {
               removeBoundPayment(c.env.X402_RELAY, boundEntry);
               boundEntry = undefined;
               const hydrated = hydrateFromDORecord(doRec);
@@ -2075,6 +2154,7 @@ export function x402Middleware(
                 } else {
                   const boundFromDO: BoundRpcPayment = {
                     relayPaymentId: rec.relayPaymentId ?? relayPaymentId,
+                    bindingId: rec.bindingId,
                     callerSuppliedPaymentId: rec.callerSuppliedPaymentId ?? callerSuppliedPaymentId,
                     requestCorrelationId,
                     requestBindingHash: rec.requestBindingHash ?? requestBindingHash,
@@ -2177,13 +2257,15 @@ export function x402Middleware(
                   ((rawCheck as unknown as Record<string, unknown>).senderAddress as string | undefined);
                 if (typeof checkReturnedPayer === "string" && checkReturnedPayer.length > 0) {
                   if (verifiedPayer && checkReturnedPayer !== verifiedPayer) {
+                    const expectedBindingId = boundEntry.bindingId;
                     removeBoundPayment(c.env.X402_RELAY, boundEntry);
                     const clearRes = await clearBoundTxInDO(
                       c,
                       txHash,
                       relayPaymentId,
                       "payer_mismatch",
-                      log
+                      log,
+                      expectedBindingId
                     );
                     if ("error" in clearRes) {
                       return respondPaymentStoreUnavailable(c);
@@ -2246,13 +2328,15 @@ export function x402Middleware(
 
               const resolvedPayer = verifiedPayer || boundEntry.verifiedPayer;
               if (!resolvedPayer || resolvedPayer === c.env.X402_SERVER_ADDRESS) {
+                const expectedBindingId = boundEntry.bindingId;
                 removeBoundPayment(c.env.X402_RELAY, boundEntry);
                 const clearRes = await clearBoundTxInDO(
                   c,
                   txHash,
                   relayPaymentId,
                   "payer_mismatch",
-                  log
+                  log,
+                  expectedBindingId
                 );
                 if ("error" in clearRes) {
                   return respondPaymentStoreUnavailable(c);
@@ -2301,7 +2385,8 @@ export function x402Middleware(
               txHash,
               relayPaymentId,
               "terminal_failure",
-              log
+              log,
+              boundEntry.bindingId
             );
             if ("error" in clearRes) {
               return respondPaymentStoreUnavailable(c);
@@ -2324,7 +2409,12 @@ export function x402Middleware(
             }
             releasedBoundPaymentOnTerminalFailure = true;
             if (clearRes.result && clearRes.result.failedAttempts > 0) {
-              setFailedAttemptCount(txHash, clearRes.result.failedAttempts, relayPaymentId);
+              setFailedAttemptCount(
+                txHash,
+                clearRes.result.failedAttempts,
+                relayPaymentId,
+                clearRes.result.nonceGuardUnavailable
+              );
             } else if ((!clearRes.available || !clearRes.result) && !boundEntry.countedTerminalRelease) {
               boundEntry.countedTerminalRelease = true;
               recordTerminalFailure(txHash, relayPaymentId);
@@ -2545,10 +2635,17 @@ export function x402Middleware(
               }
           : baseSettleHints;
 
-      // Before emitting `start_new_payment` on a released payment (or `rebuild_and_resign` on a
-      // retried tx rejected with `sender_nonce_stale`), check the payer's account nonce so a
-      // pending sponsored tx in the mempool cannot race with a freshly signed next-nonce payment,
-      // and a previously broadcast tx that already confirmed on-chain is settled rather than re-billed.
+      // Before emitting `start_new_payment` or `rebuild_and_resign` on a released payment (or
+      // `rebuild_and_resign` on a retried tx rejected synchronously with a `sender`-category code),
+      // verify the payer's account nonce via Hiro so:
+      //   1. A pending sponsored tx in the mempool (e.g. `sender_nonce_duplicate` or `detected_missing_nonces`)
+      //      cannot race with a freshly signed next-nonce payment (`rebuild_and_resign` / `start_new_payment`).
+      //   2. A previously broadcast tx that already confirmed on-chain is settled rather than re-billed.
+      // Producer contract note (`x402-sponsor-relay`): sender-conflict resolution (`queue-consumer.ts`)
+      // wires matching origin txs to `"mempool"` and only marks mismatched txs `"replaced"`/`"superseded"`,
+      // while sponsor RBF/`head_bump` marks `"replaced"`/`"nonce_replacement"` when evicting a sponsor slot.
+      // Running the guard on released `"replaced"` as well closes any block race where the original
+      // broadcast (or a re-sponsored copy of the same origin tx) still landed on-chain.
       const parsedTxNonce = txOrigin ? Number(txOrigin.nonce) : NaN;
       const shouldVerifyPayerNonce =
         Boolean(
@@ -2558,10 +2655,10 @@ export function x402Middleware(
             parsedTxNonce >= 0
         ) &&
         ((releasedBoundPaymentOnTerminalFailure &&
-          settleHints.nextSteps === "start_new_payment" &&
-          canonicalStatus !== "replaced") ||
+          (settleHints.nextSteps === "start_new_payment" ||
+            settleHints.nextSteps === "rebuild_and_resign")) ||
           (!releasedBoundPaymentOnTerminalFailure &&
-            terminalReason === "sender_nonce_stale" &&
+            settleHints.nextSteps === "rebuild_and_resign" &&
             getFailedAttemptCount(txHash) > 0));
 
       if (shouldVerifyPayerNonce && verifiedPayer && txOrigin) {
@@ -2583,16 +2680,48 @@ export function x402Middleware(
             status: "confirmed",
             checkStatusUrl,
           } as unknown as SettleResult;
-        } else if (
-          releasedBoundPaymentOnTerminalFailure &&
-          (nonceVerdict.outcome === "pending" || nonceVerdict.outcome === "unavailable")
-        ) {
+        } else if (nonceVerdict.outcome === "pending") {
           const retryAfterSec = baseSettleHints.retryAfter ?? classified.retryAfter ?? 15;
           settleHints = {
             retryable: true,
             retryAfter: retryAfterSec,
             nextSteps: "retry_later",
           };
+        } else if (nonceVerdict.outcome === "unavailable") {
+          const unavailableAttempts = await recordNonceGuardUnavailableInDO(c, txHash, log);
+          if (
+            releasedBoundPaymentOnTerminalFailure &&
+            unavailableAttempts <= MAX_NONCE_GUARD_UNAVAILABLE_RETRIES
+          ) {
+            const retryAfterSec = baseSettleHints.retryAfter ?? classified.retryAfter ?? 15;
+            settleHints = {
+              retryable: true,
+              retryAfter: retryAfterSec,
+              nextSteps: "retry_later",
+            };
+          } else if (releasedBoundPaymentOnTerminalFailure) {
+            if (!canonicalStatus) {
+              canonicalStatus = "failed";
+            }
+            if (!terminalReason) {
+              terminalReason =
+                canonicalStatus === "not_found"
+                  ? "expired"
+                  : canonicalStatus === "replaced"
+                    ? "superseded"
+                    : "internal_error";
+            }
+            errorReason = errorReason || terminalReason;
+            classified = classifyPaymentError(errorReason, {
+              ...settleRecord,
+              status: canonicalStatus,
+              terminalReason,
+            } as unknown as SettleResult);
+            settleHints = {
+              retryable: false,
+              nextSteps: "start_new_payment",
+            };
+          }
         } else if (nonceVerdict.outcome === "replaced") {
           canonicalStatus = "replaced";
           terminalReason = "nonce_replacement";

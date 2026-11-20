@@ -169,7 +169,7 @@ describe("payment-status classifier predicates", () => {
         detected_missing_nonces: [8],
         detected_mempool_nonces: [9],
       })
-    ).toBe("unused");
+    ).toBe("pending");
 
     expect(
       classifySenderNonceState(8, {

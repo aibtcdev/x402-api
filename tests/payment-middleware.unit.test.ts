@@ -1905,6 +1905,7 @@ describe("x402Middleware — RPC enqueue vs confirmed settlement, relay ID recov
           tier: "standard",
           rpcPollMaxAttempts: 1,
           rpcPollIntervalMs: 0,
+          checkPayerNonceBeforeNewPayment: async () => ({ outcome: "unused" }),
         })
       );
       app.post("/paid", (c) => c.json({ ok: true }));
@@ -2401,6 +2402,7 @@ describe("x402Middleware — RPC enqueue vs confirmed settlement, relay ID recov
           tier: "standard",
           rpcPollMaxAttempts: 1,
           rpcPollIntervalMs: 0,
+          checkPayerNonceBeforeNewPayment: async () => ({ outcome: "unused" }),
         })
       );
       app.post("/paid", (c) => c.json({ ok: true }));
@@ -4899,6 +4901,12 @@ describe("x402Middleware — RPC enqueue vs confirmed settlement, relay ID recov
           replacementTx.serialize()
         )
       ).toBe(false);
+      expect(
+        doesExecutedTxMatchSubmittedOrigin(baseUnsponsored.serialize(), "0xdeadbeef")
+      ).toBe("unknown");
+      expect(doesExecutedTxMatchSubmittedOrigin(baseUnsponsored.serialize(), "")).toBe(
+        "unknown"
+      );
 
       // 1. Nonce still pending in mempool on post-grace `not_found` -> keeps `retry_later`
       const pendingTxHex = await buildSignedTxHex({ sponsored: true, nonce: 8102n });
@@ -5182,6 +5190,270 @@ describe("x402Middleware — RPC enqueue vs confirmed settlement, relay ID recov
       const bBrownout = (await rBrownout.json()) as Record<string, unknown>;
       expect(bBrownout.nextSteps).toBe("retry_later");
       expect(bBrownout.retryable).toBe(true);
+
+      // 5. Truncated/unparseable Hiro `raw_tx` returns `unavailable` (`retry_later`, NOT `replaced`),
+      //    and persistent `unavailable` is bounded to MAX_NONCE_GUARD_UNAVAILABLE_RETRIES (2) before
+      //    falling back to `start_new_payment` with a canonical `terminalReason`
+      const unparseableRawTx = await buildSignedTxHex({ sponsored: true, nonce: 8107n });
+      const unparseableSig = encodePaymentSignature({
+        x402Version: 2,
+        payload: { transaction: unparseableRawTx },
+      });
+      globalThis.fetch = (async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.endsWith(`/extended/v1/address/${TEST_BUYER_ADDRESS}/nonces`)) {
+          return new Response(
+            JSON.stringify({
+              last_executed_tx_nonce: 8107,
+              last_mempool_tx_nonce: null,
+              possible_next_nonce: 8108,
+              detected_missing_nonces: [],
+            }),
+            { status: 200, headers: { "Content-Type": "application/json" } }
+          );
+        }
+        if (url.includes(`/extended/v1/tx?from_address=`)) {
+          return new Response(
+            JSON.stringify({
+              results: [
+                {
+                  tx_id: "0x8107810781078107810781078107810781078107810781078107810781078107",
+                  nonce: 8107,
+                  sender_address: TEST_BUYER_ADDRESS,
+                  canonical: true,
+                  tx_status: "success",
+                },
+              ],
+            }),
+            { status: 200, headers: { "Content-Type": "application/json" } }
+          );
+        }
+        if (url.endsWith("/raw")) {
+          // Corrupt/unsupported wire payload version — must NOT be treated as `replaced`!
+          return new Response(JSON.stringify({ raw_tx: "0xff00badpayload" }), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          });
+        }
+        return new Response("not mocked", { status: 404 });
+      }) as unknown as typeof fetch;
+
+      let unparseableSubmits = 0;
+      const unparseableHarness = createTestHarness(
+        {
+          async submitPayment() {
+            unparseableSubmits += 1;
+            return {
+              accepted: true,
+              paymentId: `pay_unparseable_8107_${unparseableSubmits}`,
+              status: "queued",
+            };
+          },
+          async checkPayment(paymentId: string) {
+            return {
+              paymentId,
+              status: "failed",
+              terminalReason: "internal_error",
+              retryable: false,
+            };
+          },
+        },
+        { checkPayerNonceBeforeNewPayment: defaultCheckPayerNonceBeforeNewPayment }
+      );
+
+      for (let attempt = 1; attempt <= 2; attempt++) {
+        const rUnparseable = await unparseableHarness.app.request(
+          "http://localhost/paid",
+          { method: "POST", headers: { [X402_HEADERS.PAYMENT_SIGNATURE]: unparseableSig } },
+          unparseableHarness.env
+        );
+        expect(rUnparseable.status).toBe(402);
+        const bUnparseable = (await rUnparseable.json()) as Record<string, unknown>;
+        expect(bUnparseable.status).not.toBe("replaced");
+        expect(bUnparseable.terminalReason).not.toBe("nonce_replacement");
+        expect(bUnparseable.nextSteps).toBe("retry_later");
+        expect(bUnparseable.retryable).toBe(true);
+      }
+
+      // 3rd consecutive `unavailable` hits MAX_NONCE_GUARD_UNAVAILABLE_RETRIES cap -> bounded `start_new_payment`
+      const rCapped = await unparseableHarness.app.request(
+        "http://localhost/paid",
+        { method: "POST", headers: { [X402_HEADERS.PAYMENT_SIGNATURE]: unparseableSig } },
+        unparseableHarness.env
+      );
+      expect(rCapped.status).toBe(402);
+      const bCapped = (await rCapped.json()) as Record<string, unknown>;
+      expect(bCapped.nextSteps).toBe("start_new_payment");
+      expect(bCapped.retryable).toBe(false);
+      expect(bCapped.terminalReason).toBe("internal_error");
+
+      // 6. Released `sender_nonce_duplicate` (`rebuild_and_resign`) runs payer-nonce guard:
+      //    returns `retry_later` while original tx sits in mempool, and preserves `rebuild_and_resign` when unused
+      const dupMempoolTx = await buildSignedTxHex({ sponsored: true, nonce: 8108n });
+      let dupNonceInMempool = true;
+      globalThis.fetch = (async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.endsWith(`/extended/v1/address/${TEST_BUYER_ADDRESS}/nonces`)) {
+          return new Response(
+            JSON.stringify(
+              dupNonceInMempool
+                ? {
+                    last_executed_tx_nonce: 8107,
+                    last_mempool_tx_nonce: 8108,
+                    possible_next_nonce: 8109,
+                    detected_missing_nonces: [],
+                    detected_mempool_nonces: [8108],
+                  }
+                : {
+                    last_executed_tx_nonce: 8107,
+                    last_mempool_tx_nonce: null,
+                    possible_next_nonce: 8108,
+                    detected_missing_nonces: [],
+                    detected_mempool_nonces: [],
+                  }
+            ),
+            { status: 200, headers: { "Content-Type": "application/json" } }
+          );
+        }
+        return new Response("not mocked", { status: 404 });
+      }) as unknown as typeof fetch;
+
+      let dupAttempt = 0;
+      const dupSenderHarness = createTestHarness(
+        {
+          async submitPayment() {
+            dupAttempt += 1;
+            return { accepted: true, paymentId: `pay_dup_sender_${dupAttempt}`, status: "queued" };
+          },
+          async checkPayment(paymentId: string) {
+            return {
+              paymentId,
+              status: "failed",
+              terminalReason: "sender_nonce_duplicate",
+            };
+          },
+        },
+        { checkPayerNonceBeforeNewPayment: defaultCheckPayerNonceBeforeNewPayment }
+      );
+      const dupSig = encodePaymentSignature({
+        x402Version: 2,
+        payload: { transaction: dupMempoolTx },
+      });
+      const rDupPending = await dupSenderHarness.app.request(
+        "http://localhost/paid",
+        { method: "POST", headers: { [X402_HEADERS.PAYMENT_SIGNATURE]: dupSig } },
+        dupSenderHarness.env
+      );
+      expect(rDupPending.status).toBe(402);
+      const bDupPending = (await rDupPending.json()) as Record<string, unknown>;
+      expect(bDupPending.nextSteps).toBe("retry_later");
+      expect(bDupPending.retryable).toBe(true);
+
+      dupNonceInMempool = false;
+      const rDupUnused = await dupSenderHarness.app.request(
+        "http://localhost/paid",
+        { method: "POST", headers: { [X402_HEADERS.PAYMENT_SIGNATURE]: dupSig } },
+        dupSenderHarness.env
+      );
+      expect(rDupUnused.status).toBe(402);
+      const bDupUnused = (await rDupUnused.json()) as Record<string, unknown>;
+      expect(bDupUnused.nextSteps).toBe("rebuild_and_resign");
+
+      // 7. Busy address (>50 newer txs) + released `replaced` status settles as `confirmed` (200 OK)
+      //    via indexed `/extended/v1/tx?from_address=...&nonce=...` when our origin tx won on-chain
+      const busyUnsponsored = await makeSTXTokenTransfer({
+        recipient: TEST_SELLER_ADDRESS,
+        amount: 1000n,
+        senderKey: TEST_BUYER_PRIVKEY,
+        network: "testnet",
+        memo: "busy-race",
+        nonce: 8109n,
+        fee: 0n,
+        sponsored: true,
+      });
+      const busySponsored = await sponsorTransaction({
+        transaction: busyUnsponsored,
+        sponsorPrivateKey: TEST_ATTACKER_PRIVKEY,
+        fee: 300n,
+        sponsorNonce: 77n,
+        network: "testnet",
+      });
+      const busyTxid = `0x${busySponsored.txid()}`;
+      globalThis.fetch = (async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.endsWith(`/extended/v1/address/${TEST_BUYER_ADDRESS}/nonces`)) {
+          return new Response(
+            JSON.stringify({
+              last_executed_tx_nonce: 8250,
+              last_mempool_tx_nonce: null,
+              possible_next_nonce: 8251,
+              detected_missing_nonces: [],
+            }),
+            { status: 200, headers: { "Content-Type": "application/json" } }
+          );
+        }
+        if (url.includes(`/extended/v1/tx?from_address=`)) {
+          return new Response(
+            JSON.stringify({
+              results: [
+                {
+                  tx_id: busyTxid,
+                  nonce: 8109,
+                  sender_address: TEST_BUYER_ADDRESS,
+                  canonical: true,
+                  tx_status: "success",
+                },
+              ],
+            }),
+            { status: 200, headers: { "Content-Type": "application/json" } }
+          );
+        }
+        if (url.includes(`/extended/v1/address/${TEST_BUYER_ADDRESS}/transactions`)) {
+          // Last 50 page does NOT contain nonce 8109!
+          return new Response(JSON.stringify({ results: [] }), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          });
+        }
+        if (url.endsWith(`/extended/v1/tx/${busySponsored.txid()}/raw`)) {
+          return new Response(JSON.stringify({ raw_tx: `0x${busySponsored.serialize()}` }), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          });
+        }
+        return new Response("not mocked", { status: 404 });
+      }) as unknown as typeof fetch;
+
+      const busyReplacedHarness = createTestHarness(
+        {
+          async submitPayment() {
+            return { accepted: true, paymentId: "pay_busy_replaced_8109", status: "queued" };
+          },
+          async checkPayment(paymentId: string) {
+            return {
+              paymentId,
+              status: "replaced",
+              terminalReason: "nonce_replacement",
+            };
+          },
+        },
+        { checkPayerNonceBeforeNewPayment: defaultCheckPayerNonceBeforeNewPayment }
+      );
+      const rBusyConfirmed = await busyReplacedHarness.app.request(
+        "http://localhost/paid",
+        {
+          method: "POST",
+          headers: {
+            [X402_HEADERS.PAYMENT_SIGNATURE]: encodePaymentSignature({
+              x402Version: 2,
+              payload: { transaction: busyUnsponsored.serialize() },
+            }),
+          },
+        },
+        busyReplacedHarness.env
+      );
+      expect(rBusyConfirmed.status).toBe(200);
+      expect(busyReplacedHarness.getHandlerCount()).toBe(1);
     } finally {
       globalThis.fetch = originalFetch;
     }

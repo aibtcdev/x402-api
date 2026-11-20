@@ -707,6 +707,72 @@ describe("PaymentPollingDO real tx_guard & alarm() lifecycle", () => {
     expect(afterClear?.relayPaymentId).toBe("pay_consumed_keep");
   });
 
+  test("clearBoundTx counts once across two clears for one failure and ignores stale bindingId after same-relayPaymentId re-bind", async () => {
+    const { instance, ready } = createInMemoryDO();
+    await ready();
+
+    const binding1 = await instance.bindTxPayment({
+      txHash: "tx_reused_id",
+      relayPaymentId: "pay_same_id",
+      expectedRecipient: "ST_SELLER",
+      minAmount: "1000",
+      asset: "STX",
+      network: "stacks:2147483648",
+      requestBindingHash: "hash_reused",
+    });
+    expect(binding1.bindingId).toBeDefined();
+
+    // Two clears racing on the same failure before re-bind only increment failedAttempts once
+    const firstClear = await instance.clearBoundTx(
+      "pay_same_id",
+      "terminal_failure",
+      binding1.bindingId
+    );
+    expect(firstClear.cleared).toBe(true);
+    expect(firstClear.failedAttempts).toBe(1);
+
+    const dupClearBeforeRebind = await instance.clearBoundTx(
+      "pay_same_id",
+      "terminal_failure",
+      binding1.bindingId
+    );
+    expect(dupClearBeforeRebind.cleared).toBe(false);
+    expect(dupClearBeforeRebind.failedAttempts).toBe(1);
+
+    // Re-bind #2 reuses the exact same relayPaymentId ("pay_same_id")
+    const binding2 = await instance.bindTxPayment({
+      txHash: "tx_reused_id",
+      relayPaymentId: "pay_same_id",
+      expectedRecipient: "ST_SELLER",
+      minAmount: "1000",
+      asset: "STX",
+      network: "stacks:2147483648",
+      requestBindingHash: "hash_reused",
+    });
+    expect(binding2.bindingId).toBeDefined();
+    expect(binding2.bindingId).not.toBe(binding1.bindingId);
+
+    // Late/stale clear from binding #1 MUST NOT clobber live binding #2 or double-count failedAttempts
+    const staleClearAfterRebind = await instance.clearBoundTx(
+      "pay_same_id",
+      "terminal_failure",
+      binding1.bindingId
+    );
+    expect(staleClearAfterRebind.cleared).toBe(false);
+    expect(staleClearAfterRebind.failedAttempts).toBe(1);
+    expect((await instance.getTxGuard())?.bindingId).toBe(binding2.bindingId);
+
+    // Real terminal clear for binding #2 advances failedAttempts to 2 and clears tx_guard
+    const secondClear = await instance.clearBoundTx(
+      "pay_same_id",
+      "terminal_failure",
+      binding2.bindingId
+    );
+    expect(secondClear.cleared).toBe(true);
+    expect(secondClear.failedAttempts).toBe(2);
+    expect(await instance.getTxGuard()).toBeNull();
+  });
+
   test("alarm() cleans expired tx_guard rows without disrupting active payment_state polling alarms", async () => {
     const { instance, db, ready, getAlarm } = createInMemoryDO();
     await ready();

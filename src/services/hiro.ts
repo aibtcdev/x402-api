@@ -195,6 +195,48 @@ export class HiroClient {
   }
 
   /**
+   * Look up an anchored transaction sent by `address` at a specific `nonce`
+   * (`GET /extended/v1/tx?from_address={address}&nonce={nonce}&limit=1`).
+   * Indexed by `(from_address, nonce)` on Hiro so busy addresses with >50 newer
+   * transactions still resolve their anchored tx in one request.
+   */
+  async getTransactionBySenderNonce(
+    address: string,
+    nonce: number,
+    signal?: AbortSignal
+  ): Promise<Transaction | null> {
+    this.log.debug("Fetching transaction by sender and nonce", { address, nonce });
+
+    const encodedAddress = encodeURIComponent(address);
+    const response = await fetch(
+      `${this.baseUrl}/extended/v1/tx?from_address=${encodedAddress}&nonce=${nonce}&limit=1`,
+      { headers: this.getHeaders(), ...(signal ? { signal } : {}) }
+    );
+
+    if (!response.ok) {
+      if (response.status === 404) {
+        return null;
+      }
+      const error = await response.text();
+      this.log.error("Failed to fetch transaction by sender nonce", { address, nonce, error });
+      throw new HiroError(
+        `Failed to fetch transaction by sender nonce: ${response.status}`,
+        response.status
+      );
+    }
+
+    const data = (await response.json()) as { results?: Transaction[] };
+    const results = Array.isArray(data.results) ? data.results : [];
+    const match = results.find(
+      (t) =>
+        t.sender_address === address &&
+        Number(t.nonce) === nonce &&
+        t.canonical !== false
+    );
+    return match ?? null;
+  }
+
+  /**
    * Get recent anchored transactions for an address.
    */
   async getAddressTransactions(

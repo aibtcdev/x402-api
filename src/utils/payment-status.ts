@@ -83,6 +83,15 @@ export function isRelayRetryableTerminalReason(reason: string | undefined): bool
 export const MAX_SAME_PAYMENT_RETRIES = 2;
 
 /**
+ * Maximum times a payer-nonce guard `"unavailable"` verdict (Hiro brownout,
+ * unparseable `raw_tx`, or missing anchored tx row) may convert a released
+ * terminal failure into `retry_later` before falling back to `start_new_payment`
+ * with a canonical terminal reason. `"pending"` is intentionally uncapped
+ * because mempool transactions resolve on their own.
+ */
+export const MAX_NONCE_GUARD_UNAVAILABLE_RETRIES = 2;
+
+/**
  * Max consecutive deterministic schema mismatches in `PaymentPollingDO` before
  * marking the payment row terminal (`failed` / `internal_error`).
  */
@@ -155,11 +164,15 @@ export type SenderNonceLifecycleState = "consumed" | "pending" | "unused";
 
 /**
  * Classify a payment transaction's sender nonce against Hiro's
- * `/extended/v1/address/{payer}/nonces` snapshot before emitting `start_new_payment`:
+ * `/extended/v1/address/{payer}/nonces` snapshot before emitting `start_new_payment`
+ * or `rebuild_and_resign`:
  *   - `"consumed"`: `txNonce <= last_executed_tx_nonce` (an anchored tx already used this nonce).
- *   - `"pending"`: `txNonce` is still present in the mempool (`detected_mempool_nonces` or
- *     within `(last_executed_tx_nonce, last_mempool_tx_nonce]` and not in `detected_missing_nonces`).
- *   - `"unused"`: `txNonce` has neither executed nor sits in the mempool, so signing a new payment is safe.
+ *   - `"pending"`: `txNonce` is still present in the mempool (`detected_mempool_nonces`),
+ *     reported as a gap below `last_mempool_tx_nonce` (`detected_missing_nonces`, where the
+ *     relay or peer nodes may still rebroadcast the signed tx to fill the gap), or within
+ *     `(last_executed_tx_nonce, last_mempool_tx_nonce]`.
+ *   - `"unused"`: `txNonce` has neither executed nor sits in or below the mempool frontier,
+ *     so signing a new payment is safe.
  */
 export function classifySenderNonceState(
   txNonce: number,
@@ -178,7 +191,7 @@ export function classifySenderNonceState(
   }
   const missingSet = new Set(nonces.detected_missing_nonces ?? []);
   if (missingSet.has(txNonce)) {
-    return "unused";
+    return "pending";
   }
   const lastMempool = nonces.last_mempool_tx_nonce;
   if (typeof lastMempool === "number") {

@@ -84,9 +84,11 @@ export interface TxGuardRecord {
   verifiedPayer?: string;
   requestBindingHash?: string;
   boundAt?: number;
+  bindingId?: string;
   claimId?: string;
   claimExpiresAt?: number;
   failedAttempts?: number;
+  nonceGuardUnavailable?: number;
   consumed: boolean;
   consumedAt?: number;
   consumedTxid?: string;
@@ -145,6 +147,7 @@ export interface ClearBoundTxResult {
   consumed: boolean;
   record?: TxGuardRecord;
   failedAttempts: number;
+  nonceGuardUnavailable?: number;
 }
 
 // Re-export shared helpers/constants for callers that import from this module
@@ -219,6 +222,7 @@ const SCHEMA_SQL = `
     verified_payer             TEXT,
     request_binding_hash       TEXT,
     bound_at                   INTEGER,
+    binding_id                 TEXT,
     claim_id                   TEXT,
     claim_expires_at           INTEGER,
     consumed                   INTEGER NOT NULL DEFAULT 0,
@@ -228,11 +232,12 @@ const SCHEMA_SQL = `
   );
 
   CREATE TABLE IF NOT EXISTS tx_retry_guard (
-    id              INTEGER PRIMARY KEY CHECK (id = 1),
-    tx_hash         TEXT NOT NULL,
-    failed_attempts INTEGER NOT NULL DEFAULT 0,
-    last_failed_id  TEXT,
-    updated_at      INTEGER NOT NULL
+    id                      INTEGER PRIMARY KEY CHECK (id = 1),
+    tx_hash                 TEXT NOT NULL,
+    failed_attempts         INTEGER NOT NULL DEFAULT 0,
+    nonce_guard_unavailable INTEGER NOT NULL DEFAULT 0,
+    last_failed_id          TEXT,
+    updated_at              INTEGER NOT NULL
   );
 `;
 
@@ -278,6 +283,18 @@ export class PaymentPollingDO extends DurableObject<Env> {
       }
       if (!cols.has("claim_expires_at")) {
         this.sql.exec("ALTER TABLE tx_guard ADD COLUMN claim_expires_at INTEGER");
+      }
+      if (!cols.has("binding_id")) {
+        this.sql.exec("ALTER TABLE tx_guard ADD COLUMN binding_id TEXT");
+      }
+
+      const retryCols = new Set(
+        [...this.sql.exec("PRAGMA table_info(tx_retry_guard)")].map(
+          (r) => (r as Record<string, unknown>).name as string
+        )
+      );
+      if (!retryCols.has("nonce_guard_unavailable")) {
+        this.sql.exec("ALTER TABLE tx_retry_guard ADD COLUMN nonce_guard_unavailable INTEGER NOT NULL DEFAULT 0");
       }
     });
   }
@@ -850,7 +867,7 @@ export class PaymentPollingDO extends DurableObject<Env> {
 
     const retryRows = [
       ...this.sql.exec(
-        "SELECT failed_attempts FROM tx_retry_guard WHERE id = 1 AND tx_hash = ? LIMIT 1",
+        "SELECT failed_attempts, nonce_guard_unavailable FROM tx_retry_guard WHERE id = 1 AND tx_hash = ? LIMIT 1",
         input.txHash
       ),
     ];
@@ -858,10 +875,15 @@ export class PaymentPollingDO extends DurableObject<Env> {
       retryRows.length > 0
         ? Number((retryRows[0] as Record<string, unknown>).failed_attempts ?? 0)
         : 0;
+    const nonceGuardUnavailable =
+      retryRows.length > 0
+        ? Number((retryRows[0] as Record<string, unknown>).nonce_guard_unavailable ?? 0)
+        : 0;
     const baseRecord = this._readTxGuard()!;
     const record: TxGuardRecord = {
       ...baseRecord,
       ...(failedAttempts > 0 ? { failedAttempts } : {}),
+      ...(nonceGuardUnavailable > 0 ? { nonceGuardUnavailable } : {}),
     };
     await this._scheduleTxGuardAlarm(claimExpiresAt);
     return { status: "claimed", record };
@@ -918,6 +940,7 @@ export class PaymentPollingDO extends DurableObject<Env> {
     }
 
     const boundAt = input.boundAt ?? now;
+    const bindingId = crypto.randomUUID();
     const verifiedPayer = input.verifiedPayer || existing?.verifiedPayer || null;
     const callerSuppliedPaymentId =
       input.callerSuppliedPaymentId || existing?.callerSuppliedPaymentId || null;
@@ -926,9 +949,9 @@ export class PaymentPollingDO extends DurableObject<Env> {
       `
       INSERT INTO tx_guard
         (id, tx_hash, relay_payment_id, caller_supplied_payment_id, expected_recipient, min_amount, asset, network,
-         verified_payer, request_binding_hash, bound_at, claim_id, claim_expires_at,
+         verified_payer, request_binding_hash, bound_at, binding_id, claim_id, claim_expires_at,
          consumed, consumed_at, consumed_txid, updated_at)
-      VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, 0, NULL, NULL, ?)
+      VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, 0, NULL, NULL, ?)
       ON CONFLICT(id) DO UPDATE SET
         relay_payment_id           = CASE WHEN tx_guard.consumed = 1 OR tx_guard.relay_payment_id IS NOT NULL THEN tx_guard.relay_payment_id ELSE excluded.relay_payment_id END,
         caller_supplied_payment_id = CASE WHEN tx_guard.consumed = 1 OR tx_guard.relay_payment_id IS NOT NULL THEN tx_guard.caller_supplied_payment_id ELSE COALESCE(excluded.caller_supplied_payment_id, tx_guard.caller_supplied_payment_id) END,
@@ -939,6 +962,7 @@ export class PaymentPollingDO extends DurableObject<Env> {
         verified_payer             = COALESCE(tx_guard.verified_payer, excluded.verified_payer),
         request_binding_hash       = CASE WHEN tx_guard.consumed = 1 OR tx_guard.relay_payment_id IS NOT NULL THEN tx_guard.request_binding_hash ELSE excluded.request_binding_hash END,
         bound_at                   = CASE WHEN tx_guard.consumed = 1 OR tx_guard.relay_payment_id IS NOT NULL THEN tx_guard.bound_at ELSE excluded.bound_at END,
+        binding_id                 = CASE WHEN tx_guard.consumed = 1 OR tx_guard.relay_payment_id IS NOT NULL THEN tx_guard.binding_id ELSE excluded.binding_id END,
         claim_id                   = NULL,
         claim_expires_at           = NULL,
         updated_at                 = excluded.updated_at
@@ -953,6 +977,7 @@ export class PaymentPollingDO extends DurableObject<Env> {
       verifiedPayer,
       input.requestBindingHash,
       boundAt,
+      bindingId,
       now
     );
 
@@ -975,25 +1000,77 @@ export class PaymentPollingDO extends DurableObject<Env> {
       : 0;
   }
 
+  private _readNonceGuardUnavailable(txHash?: string): number {
+    const rows = txHash
+      ? [
+          ...this.sql.exec(
+            "SELECT nonce_guard_unavailable FROM tx_retry_guard WHERE id = 1 AND tx_hash = ? LIMIT 1",
+            txHash
+          ),
+        ]
+      : [...this.sql.exec("SELECT nonce_guard_unavailable FROM tx_retry_guard WHERE id = 1 LIMIT 1")];
+    return rows.length > 0
+      ? Number((rows[0] as Record<string, unknown>).nonce_guard_unavailable ?? 0)
+      : 0;
+  }
+
+  /**
+   * Atomically increment and return the number of payer-nonce guard `"unavailable"`
+   * verdicts recorded for `txHash` so guard-driven `retry_later` cannot loop forever.
+   */
+  async recordNonceGuardUnavailable(txHash: string): Promise<number> {
+    if (!txHash) {
+      return 0;
+    }
+    const now = Date.now();
+    this._pruneExpiredTxRetryGuard(now);
+    this.sql.exec(
+      `
+      INSERT INTO tx_retry_guard (id, tx_hash, failed_attempts, nonce_guard_unavailable, last_failed_id, updated_at)
+      VALUES (1, ?, 0, 1, NULL, ?)
+      ON CONFLICT(id) DO UPDATE SET
+        failed_attempts = CASE
+          WHEN tx_retry_guard.tx_hash = excluded.tx_hash
+            THEN tx_retry_guard.failed_attempts
+          ELSE 0
+        END,
+        nonce_guard_unavailable = CASE
+          WHEN tx_retry_guard.tx_hash = excluded.tx_hash
+            THEN tx_retry_guard.nonce_guard_unavailable + 1
+          ELSE 1
+        END,
+        tx_hash    = excluded.tx_hash,
+        updated_at = excluded.updated_at
+      `,
+      txHash,
+      now
+    );
+    return this._readNonceGuardUnavailable(txHash);
+  }
+
   /**
    * Clear pending bound metadata after a terminal non-grace failure or payer mismatch.
-   * Strict no-op on tx_guard if consumed=1 or if relay_payment_id does not match expectedRelayPaymentId,
-   * while returning authoritative consumed / failedAttempts state so concurrent isolates never keep stale bindings.
+   * Strict no-op on tx_guard if consumed=1, if relay_payment_id does not match expectedRelayPaymentId,
+   * or if expectedBindingId is supplied and does not match the active binding_id (preventing a stale
+   * clear from binding #1 from clobbering a re-bound binding #2 that reused the same relayPaymentId).
    * Only increments tx_retry_guard.failed_attempts when reason === "terminal_failure".
    */
   async clearBoundTx(
     expectedRelayPaymentId: string,
-    reason: ClearBoundTxReason = "terminal_failure"
+    reason: ClearBoundTxReason = "terminal_failure",
+    expectedBindingId?: string
   ): Promise<ClearBoundTxResult> {
     const now = Date.now();
     this._pruneExpiredTxRetryGuard(now);
     const existing = this._readTxGuard();
     if (!expectedRelayPaymentId) {
+      const nonceGuardUnavailable = this._readNonceGuardUnavailable(existing?.txHash);
       return {
         cleared: false,
         consumed: Boolean(existing?.consumed),
         ...(existing ? { record: existing } : {}),
         failedAttempts: this._readFailedAttempts(existing?.txHash),
+        ...(nonceGuardUnavailable > 0 ? { nonceGuardUnavailable } : {}),
       };
     }
     if (existing?.consumed) {
@@ -1004,28 +1081,41 @@ export class PaymentPollingDO extends DurableObject<Env> {
         failedAttempts: 0,
       };
     }
-    if (!existing || existing.relayPaymentId !== expectedRelayPaymentId) {
+    if (
+      !existing ||
+      existing.relayPaymentId !== expectedRelayPaymentId ||
+      (expectedBindingId !== undefined &&
+        existing.bindingId !== undefined &&
+        existing.bindingId !== expectedBindingId)
+    ) {
+      const nonceGuardUnavailable = this._readNonceGuardUnavailable(existing?.txHash);
       return {
         cleared: false,
         consumed: false,
         ...(existing ? { record: existing } : {}),
         failedAttempts: this._readFailedAttempts(existing?.txHash),
+        ...(nonceGuardUnavailable > 0 ? { nonceGuardUnavailable } : {}),
       };
     }
     if (reason === "terminal_failure") {
-      // Count per released binding (`existing` matched `expectedRelayPaymentId` above
-      // and is deleted immediately below), not per distinct `relayPaymentId`, so a
-      // resubmission that comes back with the same `relayPaymentId` (e.g. when `RELAY_KV`
-      // is unconfigured) still advances `failed_attempts` instead of sticking at 1.
+      // Count per released binding (`existing` matched `expectedRelayPaymentId` + `expectedBindingId`
+      // above and is deleted immediately below), not per distinct `relayPaymentId`, so a resubmission
+      // that comes back with the same `relayPaymentId` (e.g. when `RELAY_KV` is unconfigured) still
+      // advances `failed_attempts` while stale concurrent clears for an older binding are ignored.
       this.sql.exec(
         `
-        INSERT INTO tx_retry_guard (id, tx_hash, failed_attempts, last_failed_id, updated_at)
-        VALUES (1, ?, 1, ?, ?)
+        INSERT INTO tx_retry_guard (id, tx_hash, failed_attempts, nonce_guard_unavailable, last_failed_id, updated_at)
+        VALUES (1, ?, 1, 0, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
           failed_attempts = CASE
             WHEN tx_retry_guard.tx_hash = excluded.tx_hash
               THEN tx_retry_guard.failed_attempts + 1
             ELSE 1
+          END,
+          nonce_guard_unavailable = CASE
+            WHEN tx_retry_guard.tx_hash = excluded.tx_hash
+              THEN tx_retry_guard.nonce_guard_unavailable
+            ELSE 0
           END,
           tx_hash         = excluded.tx_hash,
           last_failed_id  = excluded.last_failed_id,
@@ -1036,15 +1126,25 @@ export class PaymentPollingDO extends DurableObject<Env> {
         now
       );
     }
-    this.sql.exec(
-      "DELETE FROM tx_guard WHERE id = 1 AND consumed = 0 AND relay_payment_id = ?",
-      expectedRelayPaymentId
-    );
+    if (expectedBindingId !== undefined && existing.bindingId !== undefined) {
+      this.sql.exec(
+        "DELETE FROM tx_guard WHERE id = 1 AND consumed = 0 AND relay_payment_id = ? AND binding_id = ?",
+        expectedRelayPaymentId,
+        expectedBindingId
+      );
+    } else {
+      this.sql.exec(
+        "DELETE FROM tx_guard WHERE id = 1 AND consumed = 0 AND relay_payment_id = ?",
+        expectedRelayPaymentId
+      );
+    }
     await this._clearAlarmIfNoActivePoll();
+    const nonceGuardUnavailable = this._readNonceGuardUnavailable(existing.txHash);
     return {
       cleared: true,
       consumed: false,
       failedAttempts: this._readFailedAttempts(existing.txHash),
+      ...(nonceGuardUnavailable > 0 ? { nonceGuardUnavailable } : {}),
     };
   }
 
@@ -1066,9 +1166,9 @@ export class PaymentPollingDO extends DurableObject<Env> {
       `
       INSERT INTO tx_guard
         (id, tx_hash, relay_payment_id, caller_supplied_payment_id, expected_recipient, min_amount, asset, network,
-         verified_payer, request_binding_hash, bound_at, claim_id, claim_expires_at,
+         verified_payer, request_binding_hash, bound_at, binding_id, claim_id, claim_expires_at,
          consumed, consumed_at, consumed_txid, updated_at)
-      VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, NULL, NULL, 1, ?, ?, ?)
+      VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, NULL, NULL, NULL, 1, ?, ?, ?)
       ON CONFLICT(id) DO UPDATE SET
         relay_payment_id           = COALESCE(tx_guard.relay_payment_id, excluded.relay_payment_id),
         caller_supplied_payment_id = COALESCE(tx_guard.caller_supplied_payment_id, excluded.caller_supplied_payment_id),
@@ -1077,6 +1177,7 @@ export class PaymentPollingDO extends DurableObject<Env> {
         asset                      = COALESCE(tx_guard.asset, excluded.asset),
         network                    = COALESCE(tx_guard.network, excluded.network),
         verified_payer             = COALESCE(tx_guard.verified_payer, excluded.verified_payer),
+        binding_id                 = NULL,
         claim_id                   = NULL,
         claim_expires_at           = NULL,
         consumed                   = 1,
@@ -1115,6 +1216,7 @@ export class PaymentPollingDO extends DurableObject<Env> {
       verifiedPayer: (row.verified_payer as string | null) ?? undefined,
       requestBindingHash: (row.request_binding_hash as string | null) ?? undefined,
       boundAt: typeof row.bound_at === "number" ? row.bound_at : undefined,
+      bindingId: (row.binding_id as string | null) ?? undefined,
       claimId: (row.claim_id as string | null) ?? undefined,
       claimExpiresAt: typeof row.claim_expires_at === "number" ? row.claim_expires_at : undefined,
       consumed: row.consumed === 1,
