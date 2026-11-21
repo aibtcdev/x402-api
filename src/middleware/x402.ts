@@ -80,6 +80,7 @@ import {
   isMissingSenderNonceGap,
   isRelayRetryableTerminalReason,
   NOT_FOUND_ENQUEUE_GRACE_MS,
+  PAYER_NONCE_UNVERIFIED_CODE,
   resolvePayerNonceGuardDecision,
 } from "../utils/payment-status";
 import type {
@@ -88,7 +89,7 @@ import type {
   PayerNonceUnavailableReason,
 } from "../utils/payment-status";
 
-export { NOT_FOUND_ENQUEUE_GRACE_MS };
+export { NOT_FOUND_ENQUEUE_GRACE_MS, PAYER_NONCE_UNVERIFIED_CODE };
 export type {
   PayerNonceGuardVerdict,
   PayerNoncePendingReason,
@@ -250,6 +251,7 @@ const FAILED_TX_ATTEMPTS = new Map<
     nonceGuardUnavailable: number;
     nonceGuardSyncUnavailable: number;
     nonceGuardGap: number;
+    nonceGuardMempool: number;
   }
 >();
 
@@ -275,6 +277,7 @@ function recordIsolateNonceGuardUnavailable(txHash: string): number {
     nonceGuardUnavailable: nextUnavailable,
     nonceGuardSyncUnavailable: existing?.nonceGuardSyncUnavailable ?? 0,
     nonceGuardGap: existing?.nonceGuardGap ?? 0,
+    nonceGuardMempool: existing?.nonceGuardMempool ?? 0,
   });
   return nextUnavailable;
 }
@@ -297,6 +300,7 @@ function recordIsolateNonceGuardSyncUnavailable(txHash: string): number {
     nonceGuardUnavailable: existing?.nonceGuardUnavailable ?? 0,
     nonceGuardSyncUnavailable: nextSyncUnavailable,
     nonceGuardGap: existing?.nonceGuardGap ?? 0,
+    nonceGuardMempool: existing?.nonceGuardMempool ?? 0,
   });
   return nextSyncUnavailable;
 }
@@ -319,8 +323,32 @@ function recordIsolateNonceGuardGap(txHash: string): number {
     nonceGuardUnavailable: existing?.nonceGuardUnavailable ?? 0,
     nonceGuardSyncUnavailable: existing?.nonceGuardSyncUnavailable ?? 0,
     nonceGuardGap: nextGap,
+    nonceGuardMempool: existing?.nonceGuardMempool ?? 0,
   });
   return nextGap;
+}
+
+function recordIsolateNonceGuardMempool(txHash: string): number {
+  if (!txHash) {
+    return 0;
+  }
+  const existing = FAILED_TX_ATTEMPTS.get(txHash);
+  if (!existing && FAILED_TX_ATTEMPTS.size >= MAX_BOUND_PAYMENTS_PER_STORE) {
+    const oldest = FAILED_TX_ATTEMPTS.keys().next().value;
+    if (oldest !== undefined) {
+      FAILED_TX_ATTEMPTS.delete(oldest);
+    }
+  }
+  const nextMempool = (existing?.nonceGuardMempool ?? 0) + 1;
+  FAILED_TX_ATTEMPTS.set(txHash, {
+    count: existing?.count ?? 0,
+    lastFailedPaymentId: existing?.lastFailedPaymentId,
+    nonceGuardUnavailable: existing?.nonceGuardUnavailable ?? 0,
+    nonceGuardSyncUnavailable: existing?.nonceGuardSyncUnavailable ?? 0,
+    nonceGuardGap: existing?.nonceGuardGap ?? 0,
+    nonceGuardMempool: nextMempool,
+  });
+  return nextMempool;
 }
 
 function resetIsolateNonceGuardCounters(txHash: string): void {
@@ -341,6 +369,7 @@ function resetIsolateNonceGuardCounters(txHash: string): void {
     nonceGuardUnavailable: 0,
     nonceGuardSyncUnavailable: 0,
     nonceGuardGap: 0,
+    nonceGuardMempool: 0,
   });
 }
 
@@ -350,14 +379,16 @@ function setFailedAttemptCount(
   lastFailedPaymentId?: string,
   nonceGuardUnavailable?: number,
   nonceGuardGap?: number,
-  nonceGuardSyncUnavailable?: number
+  nonceGuardSyncUnavailable?: number,
+  nonceGuardMempool?: number
 ): void {
   if (
     !txHash ||
     (count <= 0 &&
       (nonceGuardUnavailable ?? 0) <= 0 &&
       (nonceGuardSyncUnavailable ?? 0) <= 0 &&
-      (nonceGuardGap ?? 0) <= 0)
+      (nonceGuardGap ?? 0) <= 0 &&
+      (nonceGuardMempool ?? 0) <= 0)
   ) {
     return;
   }
@@ -383,6 +414,10 @@ function setFailedAttemptCount(
       nonceGuardGap !== undefined
         ? Math.max(0, nonceGuardGap)
         : (existing?.nonceGuardGap ?? 0),
+    nonceGuardMempool:
+      nonceGuardMempool !== undefined
+        ? Math.max(0, nonceGuardMempool)
+        : (existing?.nonceGuardMempool ?? 0),
   });
 }
 
@@ -845,7 +880,10 @@ export const defaultCheckPayerNonceBeforeNewPayment: CheckPayerNonceBeforeNewPay
       );
       const nonceState = classifySenderNonceState(txNonce, nonces);
       if (nonceState === "unused") {
-        return { outcome: "unused" };
+        return {
+          outcome: "unused",
+          pinToPayerNonce: txNonce === nonces.possible_next_nonce,
+        };
       }
       if (nonceState === "pending") {
         return {
@@ -1017,6 +1055,7 @@ interface TxGuardDOStub {
   recordNonceGuardUnavailable?: (txHash: string) => Promise<number>;
   recordNonceGuardSyncUnavailable?: (txHash: string) => Promise<number>;
   recordNonceGuardMissingGap?: (txHash: string) => Promise<number>;
+  recordNonceGuardMempoolPending?: (txHash: string) => Promise<number>;
   resetNonceGuardCounters?: (txHash: string) => Promise<void>;
   clearBoundTx?: (
     expectedRelayPaymentId: string,
@@ -1245,6 +1284,37 @@ async function recordNonceGuardMissingGapInDO(
   return recordIsolateNonceGuardGap(txHash);
 }
 
+async function recordNonceGuardMempoolPendingInDO(
+  c: { env: Env },
+  txHash: string,
+  log: Logger
+): Promise<number> {
+  try {
+    const stub = getTxGuardStub(c, txHash);
+    if (stub && typeof stub.recordNonceGuardMempoolPending === "function") {
+      const count = await stub.recordNonceGuardMempoolPending(txHash);
+      if (typeof count === "number" && count > 0) {
+        setFailedAttemptCount(
+          txHash,
+          getFailedAttemptCount(txHash),
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          count
+        );
+        return count;
+      }
+    }
+  } catch (err) {
+    log.warn("PaymentPollingDO.recordNonceGuardMempoolPending failed; using isolate counter", {
+      txHash,
+      err: String(err),
+    });
+  }
+  return recordIsolateNonceGuardMempool(txHash);
+}
+
 async function resetNonceGuardCountersInDO(
   c: { env: Env },
   txHash: string,
@@ -1441,6 +1511,8 @@ function hintsFromClassifiedCode(classified: { code: string; retryAfter?: number
     case X402_ERROR_CODES.BROADCAST_FAILED:
     case X402_ERROR_CODES.UNEXPECTED_SETTLE_ERROR:
       return { retryable: true, retryAfter: classified.retryAfter ?? 5, nextSteps: "retry_later" };
+    case PAYER_NONCE_UNVERIFIED_CODE:
+      return { retryable: false, nextSteps: "verify_nonce_on_chain" };
     case X402_ERROR_CODES.TRANSACTION_FAILED:
       return { retryable: false, nextSteps: "start_new_payment" };
     case X402_ERROR_CODES.INVALID_TRANSACTION_STATE:
@@ -1459,6 +1531,8 @@ function getRetryAction(code: string): string {
     case X402_ERROR_CODES.BROADCAST_FAILED:
     case X402_ERROR_CODES.UNEXPECTED_SETTLE_ERROR:
       return "retry_later";
+    case PAYER_NONCE_UNVERIFIED_CODE:
+      return "verify_nonce_on_chain";
     case X402_ERROR_CODES.TRANSACTION_FAILED:
       return "start_new_payment";
     default:
@@ -2913,6 +2987,7 @@ export function x402Middleware(
             getFailedAttemptCount(txHash) > 0));
 
       let guardOverrodeToRetryLater = false;
+      let guardSuppressesReleasedStatusUrl = false;
       let guardNonceDetail:
         | {
             payerNonce: number;
@@ -2933,6 +3008,7 @@ export function x402Middleware(
         const retryAfterSec = baseSettleHints.retryAfter ?? classified.retryAfter ?? 15;
         let unavailableCount: number | undefined;
         let gapCount: number | undefined;
+        let mempoolCount: number | undefined;
         if (nonceVerdict.outcome === "unavailable") {
           unavailableCount = releasedBoundPaymentOnTerminalFailure
             ? await recordNonceGuardUnavailableInDO(c, txHash, log)
@@ -2942,6 +3018,8 @@ export function x402Middleware(
           nonceVerdict.reason === "missing_nonce_gap"
         ) {
           gapCount = await recordNonceGuardMissingGapInDO(c, txHash, log);
+        } else if (nonceVerdict.outcome === "pending") {
+          mempoolCount = await recordNonceGuardMempoolPendingInDO(c, txHash, log);
         }
 
         const guardDecision = resolvePayerNonceGuardDecision({
@@ -2950,6 +3028,7 @@ export function x402Middleware(
           retryAfterSec,
           unavailableCount,
           gapCount,
+          mempoolCount,
         });
         if (guardDecision.resetCounters) {
           await resetNonceGuardCountersInDO(c, txHash, log);
@@ -2968,6 +3047,21 @@ export function x402Middleware(
             } as unknown as SettleResult;
             break;
           case "allow_base_hints":
+            if (guardDecision.mustUseNonce !== undefined) {
+              settleHints = {
+                ...settleHints,
+                payerNonce: guardDecision.payerNonce,
+                mustUseNonce: guardDecision.mustUseNonce,
+              };
+              guardNonceDetail = {
+                payerNonce: guardDecision.payerNonce ?? parsedTxNonce,
+                mustUseNonce: guardDecision.mustUseNonce,
+              };
+            } else if (guardDecision.payerNonce !== undefined) {
+              guardNonceDetail = {
+                payerNonce: guardDecision.payerNonce,
+              };
+            }
             break;
           case "retry_later":
             guardOverrodeToRetryLater = true;
@@ -2987,6 +3081,7 @@ export function x402Middleware(
             };
             break;
           case "rebuild_at_same_nonce":
+            guardSuppressesReleasedStatusUrl = true;
             canonicalStatus = guardDecision.status;
             terminalReason = guardDecision.terminalReason;
             errorReason = guardDecision.errorReason;
@@ -2998,24 +3093,28 @@ export function x402Middleware(
             settleHints = {
               retryable: true,
               nextSteps: "rebuild_and_resign",
+              payerNonce: guardDecision.payerNonce,
+              mustUseNonce: guardDecision.mustUseNonce,
             };
             guardNonceDetail = {
               payerNonce: guardDecision.payerNonce,
-              mustUseNonce: guardDecision.payerNonce,
+              mustUseNonce: guardDecision.mustUseNonce,
             };
             break;
           case "verify_nonce_on_chain":
+            guardSuppressesReleasedStatusUrl = true;
             canonicalStatus = guardDecision.status;
             terminalReason = guardDecision.terminalReason;
             errorReason = guardDecision.errorReason;
             classified = {
-              code: X402_ERROR_CODES.UNEXPECTED_SETTLE_ERROR,
+              code: guardDecision.code,
               message: guardDecision.message,
               httpStatus: guardDecision.httpStatus,
             };
             settleHints = {
               retryable: false,
               nextSteps: "verify_nonce_on_chain",
+              payerNonce: guardDecision.payerNonce,
             };
             guardNonceDetail = {
               payerNonce: guardDecision.payerNonce,
@@ -3061,7 +3160,8 @@ export function x402Middleware(
           errorReason,
         });
         const suppressUnboundPaymentPointers =
-          (releasedBoundPaymentOnTerminalFailure && settleHints.nextSteps === "retry_later") ||
+          (releasedBoundPaymentOnTerminalFailure &&
+            (settleHints.nextSteps === "retry_later" || guardSuppressesReleasedStatusUrl)) ||
           (guardOverrodeToRetryLater && !hasRelayMintedPaymentId);
         const responseCheckStatusUrl = suppressUnboundPaymentPointers
           ? undefined
@@ -3141,6 +3241,8 @@ export function x402Middleware(
             retryable: settleHints.retryable,
             nextSteps: settleHints.nextSteps,
             ...(settleHints.retryAfter !== undefined ? { retryAfter: settleHints.retryAfter } : {}),
+            ...(settleHints.payerNonce !== undefined ? { payerNonce: settleHints.payerNonce } : {}),
+            ...(settleHints.mustUseNonce !== undefined ? { mustUseNonce: settleHints.mustUseNonce } : {}),
             paymentId: resultPaymentId,
             requestCorrelationId,
             ...(responseCheckStatusUrl ? { checkStatusUrl: responseCheckStatusUrl } : {}),
@@ -3162,7 +3264,7 @@ export function x402Middleware(
                 : {}),
             },
           },
-          classified.httpStatus as 400 | 402 | 500 | 502 | 503
+          classified.httpStatus as 400 | 402 | 409 | 500 | 502 | 503
         );
       }
     }

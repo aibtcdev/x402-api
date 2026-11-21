@@ -777,19 +777,22 @@ describe("PaymentPollingDO real tx_guard & alarm() lifecycle", () => {
     const { instance, ready } = createInMemoryDO();
     await ready();
 
-    // Alternating verdicts (unavailable, gap, sync_unavailable, unavailable) advance each cap independently
+    // Alternating verdicts (unavailable, gap, sync_unavailable, mempool) advance each cap independently
     expect(await instance.recordNonceGuardUnavailable("tx_consec")).toBe(1);
     expect(await instance.recordNonceGuardMissingGap("tx_consec")).toBe(1);
     expect(await instance.recordNonceGuardSyncUnavailable("tx_consec")).toBe(1);
+    expect(await instance.recordNonceGuardMempoolPending("tx_consec")).toBe(1);
     expect(await instance.recordNonceGuardUnavailable("tx_consec")).toBe(2);
     expect(await instance.recordNonceGuardMissingGap("tx_consec")).toBe(2);
+    expect(await instance.recordNonceGuardMempoolPending("tx_consec")).toBe(2);
     expect(await instance.recordNonceGuardUnavailable("tx_consec")).toBe(3);
 
-    // Only a resolved verdict (`confirmed`, `unused`, `replaced`, `aborted`) resets all three counters
+    // Only a resolved verdict (`confirmed`, `unused`, `replaced`, `aborted`) resets all four counters
     await instance.resetNonceGuardCounters("tx_consec");
     expect(await instance.recordNonceGuardUnavailable("tx_consec")).toBe(1);
     expect(await instance.recordNonceGuardSyncUnavailable("tx_consec")).toBe(1);
     expect(await instance.recordNonceGuardMissingGap("tx_consec")).toBe(1);
+    expect(await instance.recordNonceGuardMempoolPending("tx_consec")).toBe(1);
   });
 
   test("alarm() cleans expired tx_guard rows without disrupting active payment_state polling alarms", async () => {

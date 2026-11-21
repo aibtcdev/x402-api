@@ -1,8 +1,10 @@
 import { describe, expect, test } from "bun:test";
 import {
+  MAX_NONCE_GUARD_MEMPOOL_PENDING_RETRIES,
   MAX_NONCE_GUARD_MISSING_GAP_RETRIES,
   MAX_NONCE_GUARD_UNAVAILABLE_RETRIES,
   MAX_SAME_PAYMENT_RETRIES,
+  PAYER_NONCE_UNVERIFIED_CODE,
   canRetrySamePaymentResubmission,
   classifySenderNonceState,
   isInFlightPaymentState,
@@ -237,6 +239,21 @@ describe("payment-status classifier predicates", () => {
       })
     ).toEqual({
       kind: "allow_base_hints",
+      payerNonce: 42,
+      mustUseNonce: 42,
+      resetCounters: true,
+    });
+
+    // When `txNonce > possible_next_nonce` (`pinToPayerNonce: false`), omit `mustUseNonce` so caller can sign at `possible_next_nonce`
+    expect(
+      resolvePayerNonceGuardDecision({
+        verdict: { outcome: "unused", pinToPayerNonce: false },
+        payerNonce: 42,
+        retryAfterSec: 15,
+      })
+    ).toEqual({
+      kind: "allow_base_hints",
+      payerNonce: 42,
       resetCounters: true,
     });
 
@@ -256,14 +273,35 @@ describe("payment-status classifier predicates", () => {
       }).resetCounters
     ).toBe(true);
 
-    // Mempool pending preserves counters (`resetCounters: false`) so flaky alternating verdicts still cap
+    // Mempool pending preserves counters (`resetCounters: false`) and caps at MAX_NONCE_GUARD_MEMPOOL_PENDING_RETRIES
     const mempoolDecision = resolvePayerNonceGuardDecision({
       verdict: { outcome: "pending", reason: "mempool" },
       payerNonce: 42,
       retryAfterSec: 15,
+      mempoolCount: MAX_NONCE_GUARD_MEMPOOL_PENDING_RETRIES,
     });
     expect(mempoolDecision.kind).toBe("retry_later");
     expect(mempoolDecision.resetCounters).toBe(false);
+
+    const mempoolCapped = resolvePayerNonceGuardDecision({
+      verdict: { outcome: "pending", reason: "mempool" },
+      payerNonce: 42,
+      retryAfterSec: 15,
+      mempoolCount: MAX_NONCE_GUARD_MEMPOOL_PENDING_RETRIES + 1,
+    });
+    expect(mempoolCapped).toMatchObject({
+      kind: "verify_nonce_on_chain",
+      code: PAYER_NONCE_UNVERIFIED_CODE,
+      status: "failed",
+      terminalReason: "internal_error",
+      errorReason: "payer_nonce_mempool_stalled",
+      nextSteps: "verify_nonce_on_chain",
+      retryable: false,
+      httpStatus: 409,
+      payerNonce: 42,
+      unavailableReason: "mempool_tx_stalled",
+      resetCounters: false,
+    });
 
     // Missing-nonce gap caps at MAX_NONCE_GUARD_MISSING_GAP_RETRIES (4), then instructs rebuild_and_resign at exact nonce N
     const gapWithinCap = resolvePayerNonceGuardDecision({
@@ -289,13 +327,14 @@ describe("payment-status classifier predicates", () => {
       retryable: true,
       httpStatus: 402,
       payerNonce: 42,
+      mustUseNonce: 42,
       resetCounters: false,
     });
     if (gapCapped.kind === "rebuild_at_same_nonce") {
       expect(gapCapped.message).toContain("exact nonce 42");
     }
 
-    // Unavailable caps at MAX_NONCE_GUARD_UNAVAILABLE_RETRIES (2), then emits non-402 HTTP 502 verify_nonce_on_chain
+    // Unavailable caps at MAX_NONCE_GUARD_UNAVAILABLE_RETRIES (2), then emits HTTP 409 PAYER_NONCE_UNVERIFIED verify_nonce_on_chain
     const unavailWithinCap = resolvePayerNonceGuardDecision({
       verdict: { outcome: "unavailable", reason: "consumed_tx_unparseable" },
       payerNonce: 42,
@@ -313,11 +352,12 @@ describe("payment-status classifier predicates", () => {
     });
     expect(unavailCapped).toMatchObject({
       kind: "verify_nonce_on_chain",
+      code: PAYER_NONCE_UNVERIFIED_CODE,
       status: "failed",
       terminalReason: "internal_error",
       nextSteps: "verify_nonce_on_chain",
       retryable: false,
-      httpStatus: 502,
+      httpStatus: 409,
       payerNonce: 42,
       unavailableReason: "consumed_tx_unparseable",
       resetCounters: false,
