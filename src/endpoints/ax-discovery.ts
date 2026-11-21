@@ -660,6 +660,7 @@ All endpoints return structured errors:
 | 400    | Bad request (missing required fields, etc.)      |
 | 402    | Payment required (x402 challenge response)       |
 | 404    | Not found (key, paste, job, lock does not exist) |
+| 409    | Conflict (e.g. \`PAYER_NONCE_UNVERIFIED\` — inspect \`payerNonce\` on-chain; do not auto-retry or re-pay) |
 | 500    | Server error (upstream API, Durable Object, etc) |
 
 ### Payment Error Hints
@@ -683,15 +684,16 @@ and the \`payment-response\` header (base64 JSON, same convention as success pat
 
 | Token                  | Meaning                                                       |
 |------------------------|---------------------------------------------------------------|
-| \`rebuild_and_resign\`   | Sender nonce issue — build and sign a fresh transaction       |
+| \`rebuild_and_resign\`   | Sender nonce issue — build and sign a fresh transaction (honor \`mustUseNonce\` when present) |
 | \`retry_later\`          | Transient relay/settlement error — retry after \`retryAfter\` s |
-| \`start_new_payment\`    | Payment replaced or identity lost — begin a new x402 flow    |
+| \`start_new_payment\`    | Payment replaced or identity lost — begin a new x402 flow (honor \`mustUseNonce\` when present) |
 | \`fix_and_resend\`       | Invalid transaction payload — correct it before retrying      |
 | \`wait_for_confirmation\`| Payment confirmed — resource delivery should proceed         |
+| \`verify_nonce_on_chain\`| Nonce outcome unreadable (HTTP 409, \`PAYER_NONCE_UNVERIFIED\`) — check \`payerNonce\` on-chain, do not re-pay |
 
 The \`payment-response\` header on error paths carries
-\`base64({ retryable, nextSteps, retryAfter? })\` — decode with \`atob()\` + \`JSON.parse()\`.
-\`retryAfter\` is only present when the hint is \`retry_later\`.
+\`base64({ retryable, nextSteps, retryAfter?, payerNonce?, mustUseNonce? })\` — decode with \`atob()\` + \`JSON.parse()\`.
+\`retryAfter\` is only present when the hint is \`retry_later\`. When \`mustUseNonce\` is present (e.g. after a missing-nonce gap or an unused-nonce snapshot), sign the replacement transaction at that exact sender nonce so the old and new transactions remain mutually exclusive on-chain.
 
 Topic doc: https://x402.aibtc.com/topics/payment-flow
 
@@ -1369,11 +1371,12 @@ All non-200 payment error responses include structured retry hints. These appear
 
 | Token                  | When used                                              | Retryable |
 |------------------------|--------------------------------------------------------|-----------|
-| \`rebuild_and_resign\`   | Sender nonce stale/duplicate — build a fresh signed tx | true      |
+| \`rebuild_and_resign\`   | Sender nonce stale/duplicate/gap — build a fresh signed tx (at \`mustUseNonce\` when provided) | true      |
 | \`retry_later\`          | Transient relay or settlement error                    | true      |
-| \`start_new_payment\`    | Payment replaced, expired, or identity not found       | false     |
+| \`start_new_payment\`    | Payment replaced, expired, or identity not found (at \`mustUseNonce\` when provided) | false     |
 | \`fix_and_resend\`       | Invalid transaction payload — fix before retrying      | false     |
 | \`wait_for_confirmation\`| Payment confirmed — resource delivery should proceed   | false     |
+| \`verify_nonce_on_chain\`| Nonce outcome unreadable (HTTP 409, code \`PAYER_NONCE_UNVERIFIED\`) — inspect \`payerNonce\` on-chain, never auto-repay | false     |
 
 ### Hint Derivation by Terminal Reason Category
 
@@ -1386,20 +1389,27 @@ All non-200 payment error responses include structured retry hints. These appear
 | identity     | expired, unknown_payment_identity                            | start_new_payment    |
 | validation   | invalid_transaction, not_sponsored                           | fix_and_resend       |
 
+> **Note:** HTTP \`409\` \`PAYER_NONCE_UNVERIFIED\` (\`nextSteps: "verify_nonce_on_chain"\`) is emitted by the payer-nonce guard when Hiro cannot verify the submitted \`payerNonce\`; it intentionally omits \`terminalReason\` so category-table clients never map it to \`retry_later\`.
+
 ### Client Retry Pattern
 
 \`\`\`typescript
 const response = await fetch(endpoint, { headers: { "payment-signature": sig } });
 if (!response.ok) {
   const body = await response.json();
+  const exactNonce = body.mustUseNonce ?? body.details?.mustUseNonce;
   if (!body.retryable) {
-    // terminal — start a new x402 flow or fix the payload
+    if (body.nextSteps === "start_new_payment") {
+      // Honor mustUseNonce when starting a new payment after an unused-nonce snapshot
+      return startNewPayment(exactNonce !== undefined ? { nonce: exactNonce } : undefined);
+    }
+    // terminal — e.g. verify_nonce_on_chain (409) or fix_and_resend
     return handleTerminal(body.nextSteps);
   }
   const delay = (body.retryAfter ?? 5) * 1000;
   await sleep(delay);
   if (body.nextSteps === "rebuild_and_resign") {
-    sig = await rebuildAndSign(paymentRequirements);
+    sig = await rebuildAndSign(paymentRequirements, exactNonce !== undefined ? { nonce: exactNonce } : undefined);
   }
   // retry with same or new sig
 }
