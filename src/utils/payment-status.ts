@@ -106,12 +106,15 @@ export const MAX_NONCE_GUARD_UNAVAILABLE_RETRIES = 2;
 export const MAX_NONCE_GUARD_MISSING_GAP_RETRIES = 4;
 
 /**
- * Maximum mempool-driven `"pending"` guard verdicts after the settlement relay
- * has already rejected or marked a payment `failed` before returning HTTP `409`
- * `PAYER_NONCE_UNVERIFIED` (`verify_nonce_on_chain`, `mempool_tx_stalled`)
- * instead of retrying every 15s until mempool eviction.
+ * Maximum mempool-driven `"pending"` guard verdicts AND minimum elapsed stall
+ * window (`90s`, matching 6 × 15s nominal retries) after the settlement relay
+ * has already rejected or marked a payment `failed` before instructing the
+ * caller to `rebuild_and_resign` at exact `payerNonce` `N` (a same-nonce RBF
+ * replacement so at most one transaction at `N` can confirm, while fast or
+ * parallel bursts within `< 90s` keep returning `retry_later`).
  */
 export const MAX_NONCE_GUARD_MEMPOOL_PENDING_RETRIES = 6;
+export const MIN_NONCE_GUARD_MEMPOOL_PENDING_ELAPSED_MS = 90_000;
 
 /**
  * Max consecutive deterministic schema mismatches in `PaymentPollingDO` before
@@ -258,8 +261,7 @@ export function isMissingSenderNonceGap(
 export type PayerNonceUnavailableReason =
   | "nonce_state_unknown"
   | "consumed_tx_unindexed"
-  | "consumed_tx_unparseable"
-  | "mempool_tx_stalled";
+  | "consumed_tx_unparseable";
 
 export type PayerNoncePendingReason = "mempool" | "missing_nonce_gap";
 
@@ -318,8 +320,8 @@ export type PayerNonceGuardDecision =
   | {
       kind: "rebuild_at_same_nonce";
       status: "failed";
-      terminalReason: "sender_nonce_gap";
-      errorReason: "sender_nonce_gap";
+      terminalReason: "sender_nonce_gap" | "sender_nonce_duplicate";
+      errorReason: "sender_nonce_gap" | "sender_nonce_duplicate";
       message: string;
       nextSteps: "rebuild_and_resign";
       retryable: true;
@@ -332,8 +334,7 @@ export type PayerNonceGuardDecision =
       kind: "verify_nonce_on_chain";
       code: typeof PAYER_NONCE_UNVERIFIED_CODE;
       status: "failed";
-      terminalReason: "internal_error";
-      errorReason: "payer_nonce_verification_unavailable" | "payer_nonce_mempool_stalled";
+      errorReason: "payer_nonce_verification_unavailable";
       message: string;
       nextSteps: "verify_nonce_on_chain";
       retryable: false;
@@ -355,13 +356,15 @@ export type PayerNonceGuardDecision =
  *   - Unresolved verdicts (`pending`, `missing_nonce_gap`, `unavailable`) set
  *     `resetCounters: false` so alternating flaky responses never reset each
  *     other's cap.
- *   - Exceeding `MAX_NONCE_GUARD_MISSING_GAP_RETRIES` returns `rebuild_and_resign`
- *     pinned to `payerNonce` `N` (`mustUseNonce: N` in both header and body).
- *   - Exceeding `MAX_NONCE_GUARD_MEMPOOL_PENDING_RETRIES` or
- *     `MAX_NONCE_GUARD_UNAVAILABLE_RETRIES` returns HTTP `409` +
- *     `PAYER_NONCE_UNVERIFIED` (`verify_nonce_on_chain`, `retryable: false`)
- *     so neither generic HTTP retry layers (`502/503`) nor x402 clients (`402`)
- *     replay or double-pay.
+ *   - Exceeding `MAX_NONCE_GUARD_MISSING_GAP_RETRIES` or stalling in `mempool`
+ *     past both `MAX_NONCE_GUARD_MEMPOOL_PENDING_RETRIES` and
+ *     `MIN_NONCE_GUARD_MEMPOOL_PENDING_ELAPSED_MS` returns `rebuild_and_resign`
+ *     pinned to `payerNonce` `N` (`mustUseNonce: N` in both header and body)
+ *     so at most one transaction at `N` can confirm on-chain.
+ *   - Exceeding `MAX_NONCE_GUARD_UNAVAILABLE_RETRIES` returns HTTP `409` +
+ *     `PAYER_NONCE_UNVERIFIED` (`verify_nonce_on_chain`, `retryable: false`,
+ *     omitting `terminalReason` so `internal_error -> retry_later` table
+ *     readers never loop) when the payer's nonce state cannot be read.
  */
 export function resolvePayerNonceGuardDecision(params: {
   verdict: PayerNonceGuardVerdict;
@@ -370,6 +373,8 @@ export function resolvePayerNonceGuardDecision(params: {
   unavailableCount?: number;
   gapCount?: number;
   mempoolCount?: number;
+  mempoolElapsedMs?: number;
+  minMempoolStallMs?: number;
 }): PayerNonceGuardDecision {
   const { verdict, payerNonce, retryAfterSec } = params;
   switch (verdict.outcome) {
@@ -444,19 +449,26 @@ export function resolvePayerNonceGuardDecision(params: {
         };
       }
       const mempoolCount = params.mempoolCount ?? 1;
-      if (mempoolCount > MAX_NONCE_GUARD_MEMPOOL_PENDING_RETRIES) {
+      const minStallMs =
+        params.minMempoolStallMs ?? MIN_NONCE_GUARD_MEMPOOL_PENDING_ELAPSED_MS;
+      const mempoolStallElapsed =
+        params.mempoolElapsedMs === undefined ||
+        params.mempoolElapsedMs >= minStallMs;
+      if (
+        mempoolCount > MAX_NONCE_GUARD_MEMPOOL_PENDING_RETRIES &&
+        mempoolStallElapsed
+      ) {
         return {
-          kind: "verify_nonce_on_chain",
-          code: PAYER_NONCE_UNVERIFIED_CODE,
+          kind: "rebuild_at_same_nonce",
           status: "failed",
-          terminalReason: "internal_error",
-          errorReason: "payer_nonce_mempool_stalled",
-          message: `Transaction at payer nonce ${payerNonce} remains unconfirmed in mempool after relay failure; check payer nonce ${payerNonce} on-chain before re-signing`,
-          nextSteps: "verify_nonce_on_chain",
-          retryable: false,
-          httpStatus: 409,
+          terminalReason: "sender_nonce_duplicate",
+          errorReason: "sender_nonce_duplicate",
+          message: `Transaction at payer nonce ${payerNonce} remains unconfirmed in mempool after relay failure; rebuild and re-sign using exact nonce ${payerNonce} to replace it safely`,
+          nextSteps: "rebuild_and_resign",
+          retryable: true,
+          httpStatus: 402,
           payerNonce,
-          unavailableReason: "mempool_tx_stalled",
+          mustUseNonce: payerNonce,
           resetCounters: false,
         };
       }
@@ -490,7 +502,6 @@ export function resolvePayerNonceGuardDecision(params: {
         kind: "verify_nonce_on_chain",
         code: PAYER_NONCE_UNVERIFIED_CODE,
         status: "failed",
-        terminalReason: "internal_error",
         errorReason: "payer_nonce_verification_unavailable",
         message: `Unable to verify on-chain outcome for payer nonce ${payerNonce}; check payer nonce ${payerNonce} on-chain before re-signing`,
         nextSteps: "verify_nonce_on_chain",

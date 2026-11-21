@@ -243,6 +243,7 @@ const SCHEMA_SQL = `
     nonce_guard_sync_unavailable INTEGER NOT NULL DEFAULT 0,
     nonce_guard_gap              INTEGER NOT NULL DEFAULT 0,
     nonce_guard_mempool          INTEGER NOT NULL DEFAULT 0,
+    nonce_guard_mempool_first_at INTEGER NOT NULL DEFAULT 0,
     last_failed_id               TEXT,
     updated_at                   INTEGER NOT NULL
   );
@@ -311,6 +312,9 @@ export class PaymentPollingDO extends DurableObject<Env> {
       }
       if (!retryCols.has("nonce_guard_mempool")) {
         this.sql.exec("ALTER TABLE tx_retry_guard ADD COLUMN nonce_guard_mempool INTEGER NOT NULL DEFAULT 0");
+      }
+      if (!retryCols.has("nonce_guard_mempool_first_at")) {
+        this.sql.exec("ALTER TABLE tx_retry_guard ADD COLUMN nonce_guard_mempool_first_at INTEGER NOT NULL DEFAULT 0");
       }
     });
   }
@@ -1067,18 +1071,30 @@ export class PaymentPollingDO extends DurableObject<Env> {
       : 0;
   }
 
-  private _readNonceGuardMempool(txHash?: string): number {
+  private _readNonceGuardMempoolWindow(
+    txHash?: string,
+    nowMs: number = Date.now()
+  ): { count: number; elapsedMs: number } {
     const rows = txHash
       ? [
           ...this.sql.exec(
-            "SELECT nonce_guard_mempool FROM tx_retry_guard WHERE id = 1 AND tx_hash = ? LIMIT 1",
+            "SELECT nonce_guard_mempool, nonce_guard_mempool_first_at FROM tx_retry_guard WHERE id = 1 AND tx_hash = ? LIMIT 1",
             txHash
           ),
         ]
-      : [...this.sql.exec("SELECT nonce_guard_mempool FROM tx_retry_guard WHERE id = 1 LIMIT 1")];
-    return rows.length > 0
-      ? Number((rows[0] as Record<string, unknown>).nonce_guard_mempool ?? 0)
-      : 0;
+      : [
+          ...this.sql.exec(
+            "SELECT nonce_guard_mempool, nonce_guard_mempool_first_at FROM tx_retry_guard WHERE id = 1 LIMIT 1"
+          ),
+        ];
+    if (rows.length === 0) {
+      return { count: 0, elapsedMs: 0 };
+    }
+    const row = rows[0] as Record<string, unknown>;
+    const count = Number(row.nonce_guard_mempool ?? 0);
+    const firstAt = Number(row.nonce_guard_mempool_first_at ?? 0);
+    const elapsedMs = count > 0 && firstAt > 0 ? Math.max(0, nowMs - firstAt) : 0;
+    return { count, elapsedMs };
   }
 
   /**
@@ -1094,8 +1110,8 @@ export class PaymentPollingDO extends DurableObject<Env> {
     this._pruneExpiredTxRetryGuard(now);
     this.sql.exec(
       `
-      INSERT INTO tx_retry_guard (id, tx_hash, failed_attempts, nonce_guard_unavailable, nonce_guard_sync_unavailable, nonce_guard_gap, nonce_guard_mempool, last_failed_id, updated_at)
-      VALUES (1, ?, 0, 1, 0, 0, 0, NULL, ?)
+      INSERT INTO tx_retry_guard (id, tx_hash, failed_attempts, nonce_guard_unavailable, nonce_guard_sync_unavailable, nonce_guard_gap, nonce_guard_mempool, nonce_guard_mempool_first_at, last_failed_id, updated_at)
+      VALUES (1, ?, 0, 1, 0, 0, 0, 0, NULL, ?)
       ON CONFLICT(id) DO UPDATE SET
         failed_attempts = CASE
           WHEN tx_retry_guard.tx_hash = excluded.tx_hash
@@ -1122,6 +1138,11 @@ export class PaymentPollingDO extends DurableObject<Env> {
             THEN tx_retry_guard.nonce_guard_mempool
           ELSE 0
         END,
+        nonce_guard_mempool_first_at = CASE
+          WHEN tx_retry_guard.tx_hash = excluded.tx_hash
+            THEN tx_retry_guard.nonce_guard_mempool_first_at
+          ELSE 0
+        END,
         tx_hash    = excluded.tx_hash,
         updated_at = excluded.updated_at
       `,
@@ -1144,8 +1165,8 @@ export class PaymentPollingDO extends DurableObject<Env> {
     this._pruneExpiredTxRetryGuard(now);
     this.sql.exec(
       `
-      INSERT INTO tx_retry_guard (id, tx_hash, failed_attempts, nonce_guard_unavailable, nonce_guard_sync_unavailable, nonce_guard_gap, nonce_guard_mempool, last_failed_id, updated_at)
-      VALUES (1, ?, 0, 0, 1, 0, 0, NULL, ?)
+      INSERT INTO tx_retry_guard (id, tx_hash, failed_attempts, nonce_guard_unavailable, nonce_guard_sync_unavailable, nonce_guard_gap, nonce_guard_mempool, nonce_guard_mempool_first_at, last_failed_id, updated_at)
+      VALUES (1, ?, 0, 0, 1, 0, 0, 0, NULL, ?)
       ON CONFLICT(id) DO UPDATE SET
         failed_attempts = CASE
           WHEN tx_retry_guard.tx_hash = excluded.tx_hash
@@ -1172,6 +1193,11 @@ export class PaymentPollingDO extends DurableObject<Env> {
             THEN tx_retry_guard.nonce_guard_mempool
           ELSE 0
         END,
+        nonce_guard_mempool_first_at = CASE
+          WHEN tx_retry_guard.tx_hash = excluded.tx_hash
+            THEN tx_retry_guard.nonce_guard_mempool_first_at
+          ELSE 0
+        END,
         tx_hash    = excluded.tx_hash,
         updated_at = excluded.updated_at
       `,
@@ -1195,8 +1221,8 @@ export class PaymentPollingDO extends DurableObject<Env> {
     this._pruneExpiredTxRetryGuard(now);
     this.sql.exec(
       `
-      INSERT INTO tx_retry_guard (id, tx_hash, failed_attempts, nonce_guard_unavailable, nonce_guard_sync_unavailable, nonce_guard_gap, nonce_guard_mempool, last_failed_id, updated_at)
-      VALUES (1, ?, 0, 0, 0, 1, 0, NULL, ?)
+      INSERT INTO tx_retry_guard (id, tx_hash, failed_attempts, nonce_guard_unavailable, nonce_guard_sync_unavailable, nonce_guard_gap, nonce_guard_mempool, nonce_guard_mempool_first_at, last_failed_id, updated_at)
+      VALUES (1, ?, 0, 0, 0, 1, 0, 0, NULL, ?)
       ON CONFLICT(id) DO UPDATE SET
         failed_attempts = CASE
           WHEN tx_retry_guard.tx_hash = excluded.tx_hash
@@ -1223,6 +1249,11 @@ export class PaymentPollingDO extends DurableObject<Env> {
             THEN tx_retry_guard.nonce_guard_mempool
           ELSE 0
         END,
+        nonce_guard_mempool_first_at = CASE
+          WHEN tx_retry_guard.tx_hash = excluded.tx_hash
+            THEN tx_retry_guard.nonce_guard_mempool_first_at
+          ELSE 0
+        END,
         tx_hash    = excluded.tx_hash,
         updated_at = excluded.updated_at
       `,
@@ -1233,19 +1264,23 @@ export class PaymentPollingDO extends DurableObject<Env> {
   }
 
   /**
-   * Atomically increment and return mempool-pending guard verdicts recorded for
-   * `txHash` after relay rejection/failure while preserving all sibling guard counters.
+   * Atomically increment mempool-pending guard verdicts for `txHash` and return
+   * `{ count, elapsedMs }` measured from the first mempool-pending check for
+   * `txHash`, while preserving all sibling guard counters.
    */
-  async recordNonceGuardMempoolPending(txHash: string): Promise<number> {
+  async recordNonceGuardMempoolPendingWindow(
+    txHash: string,
+    nowMs?: number
+  ): Promise<{ count: number; elapsedMs: number }> {
     if (!txHash) {
-      return 0;
+      return { count: 0, elapsedMs: 0 };
     }
-    const now = Date.now();
+    const now = typeof nowMs === "number" && Number.isFinite(nowMs) ? nowMs : Date.now();
     this._pruneExpiredTxRetryGuard(now);
     this.sql.exec(
       `
-      INSERT INTO tx_retry_guard (id, tx_hash, failed_attempts, nonce_guard_unavailable, nonce_guard_sync_unavailable, nonce_guard_gap, nonce_guard_mempool, last_failed_id, updated_at)
-      VALUES (1, ?, 0, 0, 0, 0, 1, NULL, ?)
+      INSERT INTO tx_retry_guard (id, tx_hash, failed_attempts, nonce_guard_unavailable, nonce_guard_sync_unavailable, nonce_guard_gap, nonce_guard_mempool, nonce_guard_mempool_first_at, last_failed_id, updated_at)
+      VALUES (1, ?, 0, 0, 0, 0, 1, ?, NULL, ?)
       ON CONFLICT(id) DO UPDATE SET
         failed_attempts = CASE
           WHEN tx_retry_guard.tx_hash = excluded.tx_hash
@@ -1272,13 +1307,30 @@ export class PaymentPollingDO extends DurableObject<Env> {
             THEN tx_retry_guard.nonce_guard_mempool + 1
           ELSE 1
         END,
+        nonce_guard_mempool_first_at = CASE
+          WHEN tx_retry_guard.tx_hash = excluded.tx_hash
+            AND tx_retry_guard.nonce_guard_mempool > 0
+            AND tx_retry_guard.nonce_guard_mempool_first_at > 0
+            THEN tx_retry_guard.nonce_guard_mempool_first_at
+          ELSE excluded.nonce_guard_mempool_first_at
+        END,
         tx_hash    = excluded.tx_hash,
         updated_at = excluded.updated_at
       `,
       txHash,
+      now,
       now
     );
-    return this._readNonceGuardMempool(txHash);
+    return this._readNonceGuardMempoolWindow(txHash, now);
+  }
+
+  /**
+   * Atomically increment and return mempool-pending guard verdicts recorded for
+   * `txHash` after relay rejection/failure while preserving all sibling guard counters.
+   */
+  async recordNonceGuardMempoolPending(txHash: string): Promise<number> {
+    const res = await this.recordNonceGuardMempoolPendingWindow(txHash);
+    return res.count;
   }
 
   /**
@@ -1291,7 +1343,7 @@ export class PaymentPollingDO extends DurableObject<Env> {
     }
     const now = Date.now();
     this.sql.exec(
-      "UPDATE tx_retry_guard SET nonce_guard_unavailable = 0, nonce_guard_sync_unavailable = 0, nonce_guard_gap = 0, nonce_guard_mempool = 0, updated_at = ? WHERE id = 1 AND tx_hash = ?",
+      "UPDATE tx_retry_guard SET nonce_guard_unavailable = 0, nonce_guard_sync_unavailable = 0, nonce_guard_gap = 0, nonce_guard_mempool = 0, nonce_guard_mempool_first_at = 0, updated_at = ? WHERE id = 1 AND tx_hash = ?",
       now,
       txHash
     );
@@ -1357,8 +1409,8 @@ export class PaymentPollingDO extends DurableObject<Env> {
       // advances `failed_attempts` while stale concurrent clears for an older binding are ignored.
       this.sql.exec(
         `
-        INSERT INTO tx_retry_guard (id, tx_hash, failed_attempts, nonce_guard_unavailable, nonce_guard_sync_unavailable, nonce_guard_gap, nonce_guard_mempool, last_failed_id, updated_at)
-        VALUES (1, ?, 1, 0, 0, 0, 0, ?, ?)
+        INSERT INTO tx_retry_guard (id, tx_hash, failed_attempts, nonce_guard_unavailable, nonce_guard_sync_unavailable, nonce_guard_gap, nonce_guard_mempool, nonce_guard_mempool_first_at, last_failed_id, updated_at)
+        VALUES (1, ?, 1, 0, 0, 0, 0, 0, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
           failed_attempts = CASE
             WHEN tx_retry_guard.tx_hash = excluded.tx_hash
@@ -1383,6 +1435,11 @@ export class PaymentPollingDO extends DurableObject<Env> {
           nonce_guard_mempool = CASE
             WHEN tx_retry_guard.tx_hash = excluded.tx_hash
               THEN tx_retry_guard.nonce_guard_mempool
+            ELSE 0
+          END,
+          nonce_guard_mempool_first_at = CASE
+            WHEN tx_retry_guard.tx_hash = excluded.tx_hash
+              THEN tx_retry_guard.nonce_guard_mempool_first_at
             ELSE 0
           END,
           tx_hash         = excluded.tx_hash,

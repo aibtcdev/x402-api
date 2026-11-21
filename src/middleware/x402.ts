@@ -79,6 +79,7 @@ import {
   classifySenderNonceState,
   isMissingSenderNonceGap,
   isRelayRetryableTerminalReason,
+  MIN_NONCE_GUARD_MEMPOOL_PENDING_ELAPSED_MS,
   NOT_FOUND_ENQUEUE_GRACE_MS,
   PAYER_NONCE_UNVERIFIED_CODE,
   resolvePayerNonceGuardDecision,
@@ -89,7 +90,11 @@ import type {
   PayerNonceUnavailableReason,
 } from "../utils/payment-status";
 
-export { NOT_FOUND_ENQUEUE_GRACE_MS, PAYER_NONCE_UNVERIFIED_CODE };
+export {
+  MIN_NONCE_GUARD_MEMPOOL_PENDING_ELAPSED_MS,
+  NOT_FOUND_ENQUEUE_GRACE_MS,
+  PAYER_NONCE_UNVERIFIED_CODE,
+};
 export type {
   PayerNonceGuardVerdict,
   PayerNoncePendingReason,
@@ -122,6 +127,8 @@ export interface X402MiddlewareOptions {
   rpcPollIntervalMs?: number;
   /** Optional override for the pre-`start_new_payment` payer nonce guard (defaults to Hiro API lookup) */
   checkPayerNonceBeforeNewPayment?: CheckPayerNonceBeforeNewPaymentFn;
+  /** Minimum elapsed ms in post-failure mempool state before instructing same-nonce rebuild (default: 90_000ms) */
+  nonceGuardMempoolStallMs?: number;
 }
 
 export interface VerifiedTransactionOrigin {
@@ -252,6 +259,7 @@ const FAILED_TX_ATTEMPTS = new Map<
     nonceGuardSyncUnavailable: number;
     nonceGuardGap: number;
     nonceGuardMempool: number;
+    nonceGuardMempoolFirstAt?: number;
   }
 >();
 
@@ -278,6 +286,7 @@ function recordIsolateNonceGuardUnavailable(txHash: string): number {
     nonceGuardSyncUnavailable: existing?.nonceGuardSyncUnavailable ?? 0,
     nonceGuardGap: existing?.nonceGuardGap ?? 0,
     nonceGuardMempool: existing?.nonceGuardMempool ?? 0,
+    nonceGuardMempoolFirstAt: existing?.nonceGuardMempoolFirstAt,
   });
   return nextUnavailable;
 }
@@ -301,6 +310,7 @@ function recordIsolateNonceGuardSyncUnavailable(txHash: string): number {
     nonceGuardSyncUnavailable: nextSyncUnavailable,
     nonceGuardGap: existing?.nonceGuardGap ?? 0,
     nonceGuardMempool: existing?.nonceGuardMempool ?? 0,
+    nonceGuardMempoolFirstAt: existing?.nonceGuardMempoolFirstAt,
   });
   return nextSyncUnavailable;
 }
@@ -324,14 +334,18 @@ function recordIsolateNonceGuardGap(txHash: string): number {
     nonceGuardSyncUnavailable: existing?.nonceGuardSyncUnavailable ?? 0,
     nonceGuardGap: nextGap,
     nonceGuardMempool: existing?.nonceGuardMempool ?? 0,
+    nonceGuardMempoolFirstAt: existing?.nonceGuardMempoolFirstAt,
   });
   return nextGap;
 }
 
-function recordIsolateNonceGuardMempool(txHash: string): number {
+function recordIsolateNonceGuardMempoolWindow(
+  txHash: string
+): { count: number; elapsedMs: number } {
   if (!txHash) {
-    return 0;
+    return { count: 0, elapsedMs: 0 };
   }
+  const now = Date.now();
   const existing = FAILED_TX_ATTEMPTS.get(txHash);
   if (!existing && FAILED_TX_ATTEMPTS.size >= MAX_BOUND_PAYMENTS_PER_STORE) {
     const oldest = FAILED_TX_ATTEMPTS.keys().next().value;
@@ -340,6 +354,10 @@ function recordIsolateNonceGuardMempool(txHash: string): number {
     }
   }
   const nextMempool = (existing?.nonceGuardMempool ?? 0) + 1;
+  const firstAt =
+    existing?.nonceGuardMempool && existing.nonceGuardMempoolFirstAt
+      ? existing.nonceGuardMempoolFirstAt
+      : now;
   FAILED_TX_ATTEMPTS.set(txHash, {
     count: existing?.count ?? 0,
     lastFailedPaymentId: existing?.lastFailedPaymentId,
@@ -347,8 +365,9 @@ function recordIsolateNonceGuardMempool(txHash: string): number {
     nonceGuardSyncUnavailable: existing?.nonceGuardSyncUnavailable ?? 0,
     nonceGuardGap: existing?.nonceGuardGap ?? 0,
     nonceGuardMempool: nextMempool,
+    nonceGuardMempoolFirstAt: firstAt,
   });
-  return nextMempool;
+  return { count: nextMempool, elapsedMs: Math.max(0, now - firstAt) };
 }
 
 function resetIsolateNonceGuardCounters(txHash: string): void {
@@ -370,6 +389,7 @@ function resetIsolateNonceGuardCounters(txHash: string): void {
     nonceGuardSyncUnavailable: 0,
     nonceGuardGap: 0,
     nonceGuardMempool: 0,
+    nonceGuardMempoolFirstAt: undefined,
   });
 }
 
@@ -418,6 +438,7 @@ function setFailedAttemptCount(
       nonceGuardMempool !== undefined
         ? Math.max(0, nonceGuardMempool)
         : (existing?.nonceGuardMempool ?? 0),
+    nonceGuardMempoolFirstAt: existing?.nonceGuardMempoolFirstAt,
   });
 }
 
@@ -1056,6 +1077,10 @@ interface TxGuardDOStub {
   recordNonceGuardSyncUnavailable?: (txHash: string) => Promise<number>;
   recordNonceGuardMissingGap?: (txHash: string) => Promise<number>;
   recordNonceGuardMempoolPending?: (txHash: string) => Promise<number>;
+  recordNonceGuardMempoolPendingWindow?: (
+    txHash: string,
+    nowMs?: number
+  ) => Promise<{ count: number; elapsedMs: number }>;
   resetNonceGuardCounters?: (txHash: string) => Promise<void>;
   clearBoundTx?: (
     expectedRelayPaymentId: string,
@@ -1284,16 +1309,35 @@ async function recordNonceGuardMissingGapInDO(
   return recordIsolateNonceGuardGap(txHash);
 }
 
-async function recordNonceGuardMempoolPendingInDO(
+async function recordNonceGuardMempoolPendingWindowInDO(
   c: { env: Env },
   txHash: string,
   log: Logger
-): Promise<number> {
+): Promise<{ count: number; elapsedMs: number }> {
   try {
     const stub = getTxGuardStub(c, txHash);
+    if (stub && typeof stub.recordNonceGuardMempoolPendingWindow === "function") {
+      const win = await stub.recordNonceGuardMempoolPendingWindow(txHash);
+      if (win && typeof win.count === "number" && win.count > 0) {
+        setFailedAttemptCount(
+          txHash,
+          getFailedAttemptCount(txHash),
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          win.count
+        );
+        return {
+          count: win.count,
+          elapsedMs: Math.max(0, Number(win.elapsedMs ?? 0)),
+        };
+      }
+    }
     if (stub && typeof stub.recordNonceGuardMempoolPending === "function") {
       const count = await stub.recordNonceGuardMempoolPending(txHash);
       if (typeof count === "number" && count > 0) {
+        const isoWin = recordIsolateNonceGuardMempoolWindow(txHash);
         setFailedAttemptCount(
           txHash,
           getFailedAttemptCount(txHash),
@@ -1303,16 +1347,16 @@ async function recordNonceGuardMempoolPendingInDO(
           undefined,
           count
         );
-        return count;
+        return { count, elapsedMs: isoWin.elapsedMs };
       }
     }
   } catch (err) {
-    log.warn("PaymentPollingDO.recordNonceGuardMempoolPending failed; using isolate counter", {
+    log.warn("PaymentPollingDO.recordNonceGuardMempoolPendingWindow failed; using isolate counter", {
       txHash,
       err: String(err),
     });
   }
-  return recordIsolateNonceGuardMempool(txHash);
+  return recordIsolateNonceGuardMempoolWindow(txHash);
 }
 
 async function resetNonceGuardCountersInDO(
@@ -1560,6 +1604,7 @@ export function x402Middleware(
     rpcPollMaxAttempts = 15,
     rpcPollIntervalMs = 1000,
     checkPayerNonceBeforeNewPayment = defaultCheckPayerNonceBeforeNewPayment,
+    nonceGuardMempoolStallMs = MIN_NONCE_GUARD_MEMPOOL_PENDING_ELAPSED_MS,
   } = options;
 
   return async (c, next) => {
@@ -2987,7 +3032,7 @@ export function x402Middleware(
             getFailedAttemptCount(txHash) > 0));
 
       let guardOverrodeToRetryLater = false;
-      let guardSuppressesReleasedStatusUrl = false;
+      let guardSuppressesStatusPointers = false;
       let guardNonceDetail:
         | {
             payerNonce: number;
@@ -3009,6 +3054,7 @@ export function x402Middleware(
         let unavailableCount: number | undefined;
         let gapCount: number | undefined;
         let mempoolCount: number | undefined;
+        let mempoolElapsedMs: number | undefined;
         if (nonceVerdict.outcome === "unavailable") {
           unavailableCount = releasedBoundPaymentOnTerminalFailure
             ? await recordNonceGuardUnavailableInDO(c, txHash, log)
@@ -3019,7 +3065,9 @@ export function x402Middleware(
         ) {
           gapCount = await recordNonceGuardMissingGapInDO(c, txHash, log);
         } else if (nonceVerdict.outcome === "pending") {
-          mempoolCount = await recordNonceGuardMempoolPendingInDO(c, txHash, log);
+          const mempoolWindow = await recordNonceGuardMempoolPendingWindowInDO(c, txHash, log);
+          mempoolCount = mempoolWindow.count;
+          mempoolElapsedMs = mempoolWindow.elapsedMs;
         }
 
         const guardDecision = resolvePayerNonceGuardDecision({
@@ -3029,6 +3077,8 @@ export function x402Middleware(
           unavailableCount,
           gapCount,
           mempoolCount,
+          mempoolElapsedMs,
+          minMempoolStallMs: nonceGuardMempoolStallMs,
         });
         if (guardDecision.resetCounters) {
           await resetNonceGuardCountersInDO(c, txHash, log);
@@ -3081,7 +3131,7 @@ export function x402Middleware(
             };
             break;
           case "rebuild_at_same_nonce":
-            guardSuppressesReleasedStatusUrl = true;
+            guardSuppressesStatusPointers = true;
             canonicalStatus = guardDecision.status;
             terminalReason = guardDecision.terminalReason;
             errorReason = guardDecision.errorReason;
@@ -3102,9 +3152,9 @@ export function x402Middleware(
             };
             break;
           case "verify_nonce_on_chain":
-            guardSuppressesReleasedStatusUrl = true;
+            guardSuppressesStatusPointers = true;
             canonicalStatus = guardDecision.status;
-            terminalReason = guardDecision.terminalReason;
+            terminalReason = undefined;
             errorReason = guardDecision.errorReason;
             classified = {
               code: guardDecision.code,
@@ -3160,9 +3210,9 @@ export function x402Middleware(
           errorReason,
         });
         const suppressUnboundPaymentPointers =
-          (releasedBoundPaymentOnTerminalFailure &&
-            (settleHints.nextSteps === "retry_later" || guardSuppressesReleasedStatusUrl)) ||
-          (guardOverrodeToRetryLater && !hasRelayMintedPaymentId);
+          guardSuppressesStatusPointers ||
+          (releasedBoundPaymentOnTerminalFailure && settleHints.nextSteps === "retry_later") ||
+          (guardOverrodeToRetryLater && (!hasRelayMintedPaymentId || settledViaHttpVerifier));
         const responseCheckStatusUrl = suppressUnboundPaymentPointers
           ? undefined
           : checkStatusUrl;
@@ -3203,9 +3253,10 @@ export function x402Middleware(
             paymentId: resultPaymentId,
             status: "failed",
             checkStatusUrl: responseCheckStatusUrl,
-            action: releasedBoundPaymentOnTerminalFailure
-              ? settleHints.nextSteps
-              : getRetryAction(classified.code),
+            action:
+              releasedBoundPaymentOnTerminalFailure || guardSuppressesStatusPointers
+                ? settleHints.nextSteps
+                : getRetryAction(classified.code),
           }, {
             requestCorrelationId,
             classification_code: classified.code,

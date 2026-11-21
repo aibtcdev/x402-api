@@ -4,6 +4,7 @@ import {
   MAX_NONCE_GUARD_MISSING_GAP_RETRIES,
   MAX_NONCE_GUARD_UNAVAILABLE_RETRIES,
   MAX_SAME_PAYMENT_RETRIES,
+  MIN_NONCE_GUARD_MEMPOOL_PENDING_ELAPSED_MS,
   PAYER_NONCE_UNVERIFIED_CODE,
   canRetrySamePaymentResubmission,
   classifySenderNonceState,
@@ -273,35 +274,52 @@ describe("payment-status classifier predicates", () => {
       }).resetCounters
     ).toBe(true);
 
-    // Mempool pending preserves counters (`resetCounters: false`) and caps at MAX_NONCE_GUARD_MEMPOOL_PENDING_RETRIES
+    // Mempool pending preserves counters (`resetCounters: false`), stays `retry_later` during fast bursts
+    // (`mempoolElapsedMs < MIN_NONCE_GUARD_MEMPOOL_PENDING_ELAPSED_MS`), and once both count & elapsed stall
+    // threshold are exceeded, returns `rebuild_at_same_nonce` (`rebuild_and_resign` + `mustUseNonce: N`)
+    // so the replacement and original tx at nonce N are mutually exclusive on-chain.
     const mempoolDecision = resolvePayerNonceGuardDecision({
       verdict: { outcome: "pending", reason: "mempool" },
       payerNonce: 42,
       retryAfterSec: 15,
       mempoolCount: MAX_NONCE_GUARD_MEMPOOL_PENDING_RETRIES,
+      mempoolElapsedMs: MIN_NONCE_GUARD_MEMPOOL_PENDING_ELAPSED_MS + 5_000,
     });
     expect(mempoolDecision.kind).toBe("retry_later");
     expect(mempoolDecision.resetCounters).toBe(false);
+
+    const mempoolFastBurst = resolvePayerNonceGuardDecision({
+      verdict: { outcome: "pending", reason: "mempool" },
+      payerNonce: 42,
+      retryAfterSec: 15,
+      mempoolCount: MAX_NONCE_GUARD_MEMPOOL_PENDING_RETRIES + 5,
+      mempoolElapsedMs: 2_500,
+    });
+    expect(mempoolFastBurst.kind).toBe("retry_later");
+    expect(mempoolFastBurst.resetCounters).toBe(false);
 
     const mempoolCapped = resolvePayerNonceGuardDecision({
       verdict: { outcome: "pending", reason: "mempool" },
       payerNonce: 42,
       retryAfterSec: 15,
       mempoolCount: MAX_NONCE_GUARD_MEMPOOL_PENDING_RETRIES + 1,
+      mempoolElapsedMs: MIN_NONCE_GUARD_MEMPOOL_PENDING_ELAPSED_MS,
     });
     expect(mempoolCapped).toMatchObject({
-      kind: "verify_nonce_on_chain",
-      code: PAYER_NONCE_UNVERIFIED_CODE,
+      kind: "rebuild_at_same_nonce",
       status: "failed",
-      terminalReason: "internal_error",
-      errorReason: "payer_nonce_mempool_stalled",
-      nextSteps: "verify_nonce_on_chain",
-      retryable: false,
-      httpStatus: 409,
+      terminalReason: "sender_nonce_duplicate",
+      errorReason: "sender_nonce_duplicate",
+      nextSteps: "rebuild_and_resign",
+      retryable: true,
+      httpStatus: 402,
       payerNonce: 42,
-      unavailableReason: "mempool_tx_stalled",
+      mustUseNonce: 42,
       resetCounters: false,
     });
+    if (mempoolCapped.kind === "rebuild_at_same_nonce") {
+      expect(mempoolCapped.message).toContain("exact nonce 42");
+    }
 
     // Missing-nonce gap caps at MAX_NONCE_GUARD_MISSING_GAP_RETRIES (4), then instructs rebuild_and_resign at exact nonce N
     const gapWithinCap = resolvePayerNonceGuardDecision({
@@ -334,7 +352,8 @@ describe("payment-status classifier predicates", () => {
       expect(gapCapped.message).toContain("exact nonce 42");
     }
 
-    // Unavailable caps at MAX_NONCE_GUARD_UNAVAILABLE_RETRIES (2), then emits HTTP 409 PAYER_NONCE_UNVERIFIED verify_nonce_on_chain
+    // Unavailable caps at MAX_NONCE_GUARD_UNAVAILABLE_RETRIES (2), then emits HTTP 409 PAYER_NONCE_UNVERIFIED
+    // `verify_nonce_on_chain` WITHOUT `terminalReason` (so `internal_error -> retry_later` table readers never loop)
     const unavailWithinCap = resolvePayerNonceGuardDecision({
       verdict: { outcome: "unavailable", reason: "consumed_tx_unparseable" },
       payerNonce: 42,
@@ -354,7 +373,6 @@ describe("payment-status classifier predicates", () => {
       kind: "verify_nonce_on_chain",
       code: PAYER_NONCE_UNVERIFIED_CODE,
       status: "failed",
-      terminalReason: "internal_error",
       nextSteps: "verify_nonce_on_chain",
       retryable: false,
       httpStatus: 409,
@@ -362,5 +380,6 @@ describe("payment-status classifier predicates", () => {
       unavailableReason: "consumed_tx_unparseable",
       resetCounters: false,
     });
+    expect("terminalReason" in unavailCapped).toBe(false);
   });
 });

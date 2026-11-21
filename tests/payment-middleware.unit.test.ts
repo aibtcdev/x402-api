@@ -5305,7 +5305,7 @@ describe("x402Middleware — RPC enqueue vs confirmed settlement, relay ID recov
       expect(bCapped.nextSteps).toBe("verify_nonce_on_chain");
       expect(bCapped.nextSteps).not.toBe("start_new_payment");
       expect(bCapped.retryable).toBe(false);
-      expect(bCapped.terminalReason).toBe("internal_error");
+      expect(bCapped.terminalReason).toBeUndefined();
       expect(bCapped.checkStatusUrl).toBeUndefined();
       expect(bCapped.payerNonce).toBe(8107);
       expect(String(bCapped.error)).toContain("8107");
@@ -5672,8 +5672,11 @@ describe("x402Middleware — RPC enqueue vs confirmed settlement, relay ID recov
         consecHarness.env
       );
       expect(rSyncUCapped.status).toBe(409);
+      expect(rSyncUCapped.headers.get("X-PAYMENT-ID")).toBeNull();
       const bSyncUCapped = (await rSyncUCapped.json()) as Record<string, unknown>;
       expect(bSyncUCapped.code).toBe(PAYER_NONCE_UNVERIFIED_CODE);
+      expect(bSyncUCapped.terminalReason).toBeUndefined();
+      expect(bSyncUCapped.checkStatusUrl).toBeUndefined();
       expect(bSyncUCapped.nextSteps).toBe("verify_nonce_on_chain");
       expect(bSyncUCapped.retryable).toBe(false);
 
@@ -5702,8 +5705,11 @@ describe("x402Middleware — RPC enqueue vs confirmed settlement, relay ID recov
         consecHarness.env
       );
       expect(rThirdReleased.status).toBe(409);
+      expect(rThirdReleased.headers.get("X-PAYMENT-ID")).toBeNull();
       const bThirdReleased = (await rThirdReleased.json()) as Record<string, unknown>;
       expect(bThirdReleased.code).toBe(PAYER_NONCE_UNVERIFIED_CODE);
+      expect(bThirdReleased.terminalReason).toBeUndefined();
+      expect(bThirdReleased.checkStatusUrl).toBeUndefined();
       expect(bThirdReleased.nextSteps).toBe("verify_nonce_on_chain");
 
       // Once a resolved verdict (`unused`) is observed, all guard counters reset cleanly and `mustUseNonce` is carried in both header & body
@@ -5895,18 +5901,74 @@ describe("x402Middleware — RPC enqueue vs confirmed settlement, relay ID recov
       expect(bExactUnused.mustUseNonce).toBe(8120);
       expect((bExactUnused.details as Record<string, unknown>)?.mustUseNonce).toBe(8120);
 
-      // 10c. Stalled `pending` (`mempool`) after relay failure caps at MAX_NONCE_GUARD_MEMPOOL_PENDING_RETRIES (6),
-      //      emitting HTTP 409 `PAYER_NONCE_UNVERIFIED` (`unavailableReason: "mempool_tx_stalled"`)
+      // 10c. Stalled `pending` (`mempool`) after relay failure:
+      //      - Fast bursts within `< nonceGuardMempoolStallMs` stay `402` `retry_later` even past count cap (6)
+      //      - Once both count cap (6) and elapsed stall window are exceeded, emits `402` `rebuild_and_resign`
+      //        with `mustUseNonce: 8125` in both `payment-response` header and JSON body (same-nonce RBF replacement,
+      //        preventing next-nonce N+1 double charge) and suppresses stale `checkStatusUrl` / `X-PAYMENT-ID` on
+      //        both released and non-released paths.
+      const fastBurstMempoolTx = await buildSignedTxHex({ sponsored: true, nonce: 8124n });
+      const fastBurstMempoolSig = encodePaymentSignature({
+        x402Version: 2,
+        payload: { transaction: fastBurstMempoolTx },
+      });
+      let fastBurstSubmits = 0;
+      const fastBurstMempoolHarness = createTestHarness(
+        {
+          async submitPayment() {
+            fastBurstSubmits += 1;
+            return {
+              accepted: true,
+              paymentId: `pay_fast_mempool_${fastBurstSubmits}`,
+              status: "queued",
+            };
+          },
+          async checkPayment(paymentId: string) {
+            return {
+              paymentId,
+              status: "failed",
+              terminalReason: "internal_error",
+              retryable: false,
+            };
+          },
+        },
+        {
+          nonceGuardMempoolStallMs: 90_000,
+          checkPayerNonceBeforeNewPayment: async () => ({
+            outcome: "pending",
+            reason: "mempool",
+          }),
+        }
+      );
+      for (let i = 1; i <= MAX_NONCE_GUARD_MEMPOOL_PENDING_RETRIES + 2; i++) {
+        const rFast = await fastBurstMempoolHarness.app.request(
+          "http://localhost/paid",
+          { method: "POST", headers: { [X402_HEADERS.PAYMENT_SIGNATURE]: fastBurstMempoolSig } },
+          fastBurstMempoolHarness.env
+        );
+        expect(rFast.status).toBe(402);
+        expect(((await rFast.json()) as Record<string, unknown>).nextSteps).toBe("retry_later");
+      }
+
       const stalledMempoolTx = await buildSignedTxHex({ sponsored: true, nonce: 8125n });
       const stalledMempoolSig = encodePaymentSignature({
         x402Version: 2,
         payload: { transaction: stalledMempoolTx },
       });
       let stalledSubmits = 0;
+      let stalledSyncMode = false;
       const stalledMempoolHarness = createTestHarness(
         {
           async submitPayment() {
             stalledSubmits += 1;
+            if (stalledSyncMode) {
+              return {
+                accepted: false,
+                code: "SENDER_NONCE_DUPLICATE",
+                error: "Sender nonce already in mempool",
+                retryable: true,
+              } as never;
+            }
             const pid = `pay_stalled_mempool_${stalledSubmits}`;
             return {
               accepted: true,
@@ -5926,6 +5988,7 @@ describe("x402Middleware — RPC enqueue vs confirmed settlement, relay ID recov
           },
         },
         {
+          nonceGuardMempoolStallMs: 0,
           checkPayerNonceBeforeNewPayment: async () => ({
             outcome: "pending",
             reason: "mempool",
@@ -5943,22 +6006,34 @@ describe("x402Middleware — RPC enqueue vs confirmed settlement, relay ID recov
           "retry_later"
         );
       }
+      stalledSyncMode = true;
       const rMempoolCapped = await stalledMempoolHarness.app.request(
         "http://localhost/paid",
         { method: "POST", headers: { [X402_HEADERS.PAYMENT_SIGNATURE]: stalledMempoolSig } },
         stalledMempoolHarness.env
       );
-      expect(rMempoolCapped.status).toBe(409);
+      expect(rMempoolCapped.status).toBe(402);
+      expect(rMempoolCapped.headers.get("X-PAYMENT-ID")).toBeNull();
+      const mempoolCappedHeader = JSON.parse(
+        atob(rMempoolCapped.headers.get(X402_HEADERS.PAYMENT_RESPONSE)!)
+      ) as Record<string, unknown>;
+      expect(mempoolCappedHeader).toEqual({
+        retryable: true,
+        nextSteps: "rebuild_and_resign",
+        payerNonce: 8125,
+        mustUseNonce: 8125,
+      });
       const bMempoolCapped = (await rMempoolCapped.json()) as Record<string, unknown>;
-      expect(bMempoolCapped.code).toBe(PAYER_NONCE_UNVERIFIED_CODE);
-      expect(bMempoolCapped.nextSteps).toBe("verify_nonce_on_chain");
-      expect(bMempoolCapped.retryable).toBe(false);
+      expect(bMempoolCapped.code).toBe(X402_ERROR_CODES.INVALID_TRANSACTION_STATE);
+      expect(bMempoolCapped.terminalReason).toBe("sender_nonce_duplicate");
+      expect(bMempoolCapped.nextSteps).toBe("rebuild_and_resign");
+      expect(bMempoolCapped.retryable).toBe(true);
+      expect(bMempoolCapped.payerNonce).toBe(8125);
+      expect(bMempoolCapped.mustUseNonce).toBe(8125);
       expect(bMempoolCapped.checkStatusUrl).toBeUndefined();
-      expect((bMempoolCapped.details as Record<string, unknown>)?.unavailableReason).toBe(
-        "mempool_tx_stalled"
-      );
+      expect((bMempoolCapped.details as Record<string, unknown>)?.mustUseNonce).toBe(8125);
 
-      // 10d. AX Discovery endpoints document `mustUseNonce` and `409` `PAYER_NONCE_UNVERIFIED`
+      // 10d. AX Discovery endpoints document `mustUseNonce`, `409` status row, omitted `terminalReason`, and sample `start_new_payment` pin
       const axApp = new Hono<{ Bindings: Env; Variables: AppVariables }>();
       axApp.route("/", axDiscoveryRouter);
       const llmsFullRes = await axApp.request("http://localhost/llms-full.txt");
@@ -5966,13 +6041,14 @@ describe("x402Middleware — RPC enqueue vs confirmed settlement, relay ID recov
       const llmsFullText = await llmsFullRes.text();
       expect(llmsFullText).toContain("mustUseNonce");
       expect(llmsFullText).toContain("PAYER_NONCE_UNVERIFIED");
-      expect(llmsFullText).toContain("HTTP 409");
+      expect(llmsFullText).toContain("| 409    |");
       const flowDocRes = await axApp.request("http://localhost/topics/payment-flow");
       expect(flowDocRes.status).toBe(200);
       const flowDocText = await flowDocRes.text();
       expect(flowDocText).toContain("mustUseNonce");
       expect(flowDocText).toContain("PAYER_NONCE_UNVERIFIED");
-      expect(flowDocText).toContain("HTTP 409");
+      expect(flowDocText).toContain("startNewPayment(exactNonce");
+      expect(flowDocText).toContain("intentionally omits `terminalReason`");
 
       // 11. Stale `clearBoundTx` (`cleared: false` on `bindingId` mismatch with live re-bound DO record)
       //     keeps the payment in-flight (`retry_later` + live `X-PAYMENT-ID`) instead of treating as released

@@ -778,21 +778,25 @@ describe("PaymentPollingDO real tx_guard & alarm() lifecycle", () => {
     await ready();
 
     // Alternating verdicts (unavailable, gap, sync_unavailable, mempool) advance each cap independently
+    const baseNow = Date.now() - 200_000;
     expect(await instance.recordNonceGuardUnavailable("tx_consec")).toBe(1);
     expect(await instance.recordNonceGuardMissingGap("tx_consec")).toBe(1);
     expect(await instance.recordNonceGuardSyncUnavailable("tx_consec")).toBe(1);
-    expect(await instance.recordNonceGuardMempoolPending("tx_consec")).toBe(1);
+    const w1 = await instance.recordNonceGuardMempoolPendingWindow("tx_consec", baseNow);
+    expect(w1).toEqual({ count: 1, elapsedMs: 0 });
     expect(await instance.recordNonceGuardUnavailable("tx_consec")).toBe(2);
     expect(await instance.recordNonceGuardMissingGap("tx_consec")).toBe(2);
-    expect(await instance.recordNonceGuardMempoolPending("tx_consec")).toBe(2);
+    const w2 = await instance.recordNonceGuardMempoolPendingWindow("tx_consec", baseNow + 95_000);
+    expect(w2).toEqual({ count: 2, elapsedMs: 95_000 });
     expect(await instance.recordNonceGuardUnavailable("tx_consec")).toBe(3);
 
-    // Only a resolved verdict (`confirmed`, `unused`, `replaced`, `aborted`) resets all four counters
+    // Only a resolved verdict (`confirmed`, `unused`, `replaced`, `aborted`) resets all four counters and elapsed window
     await instance.resetNonceGuardCounters("tx_consec");
     expect(await instance.recordNonceGuardUnavailable("tx_consec")).toBe(1);
     expect(await instance.recordNonceGuardSyncUnavailable("tx_consec")).toBe(1);
     expect(await instance.recordNonceGuardMissingGap("tx_consec")).toBe(1);
-    expect(await instance.recordNonceGuardMempoolPending("tx_consec")).toBe(1);
+    const wReset = await instance.recordNonceGuardMempoolPendingWindow("tx_consec", baseNow + 200_000);
+    expect(wReset).toEqual({ count: 1, elapsedMs: 0 });
   });
 
   test("alarm() cleans expired tx_guard rows without disrupting active payment_state polling alarms", async () => {

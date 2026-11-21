@@ -660,6 +660,7 @@ All endpoints return structured errors:
 | 400    | Bad request (missing required fields, etc.)      |
 | 402    | Payment required (x402 challenge response)       |
 | 404    | Not found (key, paste, job, lock does not exist) |
+| 409    | Conflict (e.g. \`PAYER_NONCE_UNVERIFIED\` — inspect \`payerNonce\` on-chain; do not auto-retry or re-pay) |
 | 500    | Server error (upstream API, Durable Object, etc) |
 
 ### Payment Error Hints
@@ -1388,20 +1389,26 @@ All non-200 payment error responses include structured retry hints. These appear
 | identity     | expired, unknown_payment_identity                            | start_new_payment    |
 | validation   | invalid_transaction, not_sponsored                           | fix_and_resend       |
 
+> **Note:** HTTP \`409\` \`PAYER_NONCE_UNVERIFIED\` (\`nextSteps: "verify_nonce_on_chain"\`) is emitted by the payer-nonce guard when Hiro cannot verify the submitted \`payerNonce\`; it intentionally omits \`terminalReason\` so category-table clients never map it to \`retry_later\`.
+
 ### Client Retry Pattern
 
 \`\`\`typescript
 const response = await fetch(endpoint, { headers: { "payment-signature": sig } });
 if (!response.ok) {
   const body = await response.json();
+  const exactNonce = body.mustUseNonce ?? body.details?.mustUseNonce;
   if (!body.retryable) {
-    // terminal — start a new x402 flow or fix the payload
+    if (body.nextSteps === "start_new_payment") {
+      // Honor mustUseNonce when starting a new payment after an unused-nonce snapshot
+      return startNewPayment(exactNonce !== undefined ? { nonce: exactNonce } : undefined);
+    }
+    // terminal — e.g. verify_nonce_on_chain (409) or fix_and_resend
     return handleTerminal(body.nextSteps);
   }
   const delay = (body.retryAfter ?? 5) * 1000;
   await sleep(delay);
   if (body.nextSteps === "rebuild_and_resign") {
-    const exactNonce = body.mustUseNonce ?? body.details?.mustUseNonce;
     sig = await rebuildAndSign(paymentRequirements, exactNonce !== undefined ? { nonce: exactNonce } : undefined);
   }
   // retry with same or new sig
