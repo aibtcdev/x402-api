@@ -3070,6 +3070,12 @@ export function x402Middleware(
           mempoolElapsedMs = mempoolWindow.elapsedMs;
         }
 
+        const sanitizedMempoolStallMs =
+          typeof nonceGuardMempoolStallMs === "number" &&
+          Number.isFinite(nonceGuardMempoolStallMs) &&
+          nonceGuardMempoolStallMs >= 0
+            ? nonceGuardMempoolStallMs
+            : MIN_NONCE_GUARD_MEMPOOL_PENDING_ELAPSED_MS;
         const guardDecision = resolvePayerNonceGuardDecision({
           verdict: nonceVerdict,
           payerNonce: parsedTxNonce,
@@ -3078,7 +3084,7 @@ export function x402Middleware(
           gapCount,
           mempoolCount,
           mempoolElapsedMs,
-          minMempoolStallMs: nonceGuardMempoolStallMs,
+          minMempoolStallMs: sanitizedMempoolStallMs,
         });
         if (guardDecision.resetCounters) {
           await resetNonceGuardCountersInDO(c, txHash, log);

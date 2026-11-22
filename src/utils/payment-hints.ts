@@ -33,6 +33,7 @@ const TERMINAL_STATUSES = new Set([
   "failed",
   "replaced",
   "not_found",
+  "unverified",
 ]);
 
 // =============================================================================
@@ -66,6 +67,14 @@ export function computeDerivedHints(
     return {
       retryable: false,
       nextSteps: "wait_for_confirmation",
+    };
+  }
+
+  // unverified — HTTP 409 PAYER_NONCE_UNVERIFIED stop; inspect payerNonce on-chain, never re-pay
+  if (status === "unverified") {
+    return {
+      retryable: false,
+      nextSteps: "verify_nonce_on_chain",
     };
   }
 

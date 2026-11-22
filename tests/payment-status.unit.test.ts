@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { computeDerivedHints } from "../src/utils/payment-hints";
 import {
   MAX_NONCE_GUARD_MEMPOOL_PENDING_RETRIES,
   MAX_NONCE_GUARD_MISSING_GAP_RETRIES,
@@ -298,6 +299,35 @@ describe("payment-status classifier predicates", () => {
     expect(mempoolFastBurst.kind).toBe("retry_later");
     expect(mempoolFastBurst.resetCounters).toBe(false);
 
+    // Missing `mempoolElapsedMs` fails closed (`retry_later`), and `NaN` `minMempoolStallMs` falls back to default 90s
+    const mempoolMissingElapsed = resolvePayerNonceGuardDecision({
+      verdict: { outcome: "pending", reason: "mempool" },
+      payerNonce: 42,
+      retryAfterSec: 15,
+      mempoolCount: MAX_NONCE_GUARD_MEMPOOL_PENDING_RETRIES + 5,
+    });
+    expect(mempoolMissingElapsed.kind).toBe("retry_later");
+
+    const mempoolNanThresholdWithinDefault = resolvePayerNonceGuardDecision({
+      verdict: { outcome: "pending", reason: "mempool" },
+      payerNonce: 42,
+      retryAfterSec: 15,
+      mempoolCount: MAX_NONCE_GUARD_MEMPOOL_PENDING_RETRIES + 2,
+      mempoolElapsedMs: 10_000,
+      minMempoolStallMs: Number.NaN,
+    });
+    expect(mempoolNanThresholdWithinDefault.kind).toBe("retry_later");
+
+    const mempoolNanThresholdPastDefault = resolvePayerNonceGuardDecision({
+      verdict: { outcome: "pending", reason: "mempool" },
+      payerNonce: 42,
+      retryAfterSec: 15,
+      mempoolCount: MAX_NONCE_GUARD_MEMPOOL_PENDING_RETRIES + 2,
+      mempoolElapsedMs: MIN_NONCE_GUARD_MEMPOOL_PENDING_ELAPSED_MS,
+      minMempoolStallMs: Number.NaN,
+    });
+    expect(mempoolNanThresholdPastDefault.kind).toBe("verify_nonce_on_chain");
+
     const mempoolCapped = resolvePayerNonceGuardDecision({
       verdict: { outcome: "pending", reason: "mempool" },
       payerNonce: 42,
@@ -306,20 +336,18 @@ describe("payment-status classifier predicates", () => {
       mempoolElapsedMs: MIN_NONCE_GUARD_MEMPOOL_PENDING_ELAPSED_MS,
     });
     expect(mempoolCapped).toMatchObject({
-      kind: "rebuild_at_same_nonce",
-      status: "failed",
-      terminalReason: "sender_nonce_duplicate",
-      errorReason: "sender_nonce_duplicate",
-      nextSteps: "rebuild_and_resign",
-      retryable: true,
-      httpStatus: 402,
+      kind: "verify_nonce_on_chain",
+      code: PAYER_NONCE_UNVERIFIED_CODE,
+      status: "unverified",
+      errorReason: "payer_nonce_mempool_stalled",
+      nextSteps: "verify_nonce_on_chain",
+      retryable: false,
+      httpStatus: 409,
       payerNonce: 42,
-      mustUseNonce: 42,
       resetCounters: false,
     });
-    if (mempoolCapped.kind === "rebuild_at_same_nonce") {
-      expect(mempoolCapped.message).toContain("exact nonce 42");
-    }
+    expect("mustUseNonce" in mempoolCapped).toBe(false);
+    expect("terminalReason" in mempoolCapped).toBe(false);
 
     // Missing-nonce gap caps at MAX_NONCE_GUARD_MISSING_GAP_RETRIES (4), then instructs rebuild_and_resign at exact nonce N
     const gapWithinCap = resolvePayerNonceGuardDecision({
@@ -372,7 +400,7 @@ describe("payment-status classifier predicates", () => {
     expect(unavailCapped).toMatchObject({
       kind: "verify_nonce_on_chain",
       code: PAYER_NONCE_UNVERIFIED_CODE,
-      status: "failed",
+      status: "unverified",
       nextSteps: "verify_nonce_on_chain",
       retryable: false,
       httpStatus: 409,
@@ -381,5 +409,9 @@ describe("payment-status classifier predicates", () => {
       resetCounters: false,
     });
     expect("terminalReason" in unavailCapped).toBe(false);
+    expect(computeDerivedHints("unverified", undefined)).toEqual({
+      retryable: false,
+      nextSteps: "verify_nonce_on_chain",
+    });
   });
 });
