@@ -5301,6 +5301,7 @@ describe("x402Middleware — RPC enqueue vs confirmed settlement, relay ID recov
       });
       const bCapped = (await rCapped.json()) as Record<string, unknown>;
       expect(bCapped.code).toBe(PAYER_NONCE_UNVERIFIED_CODE);
+      expect(bCapped.status).toBeUndefined();
       expect(bCapped.code).not.toBe(X402_ERROR_CODES.UNEXPECTED_SETTLE_ERROR);
       expect(bCapped.nextSteps).toBe("verify_nonce_on_chain");
       expect(bCapped.nextSteps).not.toBe("start_new_payment");
@@ -5675,7 +5676,7 @@ describe("x402Middleware — RPC enqueue vs confirmed settlement, relay ID recov
       expect(rSyncUCapped.headers.get("X-PAYMENT-ID")).toBeNull();
       const bSyncUCapped = (await rSyncUCapped.json()) as Record<string, unknown>;
       expect(bSyncUCapped.code).toBe(PAYER_NONCE_UNVERIFIED_CODE);
-      expect(bSyncUCapped.status).toBe("unverified");
+      expect(bSyncUCapped.status).toBeUndefined();
       expect(bSyncUCapped.terminalReason).toBeUndefined();
       expect(bSyncUCapped.checkStatusUrl).toBeUndefined();
       expect(bSyncUCapped.nextSteps).toBe("verify_nonce_on_chain");
@@ -5709,7 +5710,7 @@ describe("x402Middleware — RPC enqueue vs confirmed settlement, relay ID recov
       expect(rThirdReleased.headers.get("X-PAYMENT-ID")).toBeNull();
       const bThirdReleased = (await rThirdReleased.json()) as Record<string, unknown>;
       expect(bThirdReleased.code).toBe(PAYER_NONCE_UNVERIFIED_CODE);
-      expect(bThirdReleased.status).toBe("unverified");
+      expect(bThirdReleased.status).toBeUndefined();
       expect(bThirdReleased.terminalReason).toBeUndefined();
       expect(bThirdReleased.checkStatusUrl).toBeUndefined();
       expect(bThirdReleased.nextSteps).toBe("verify_nonce_on_chain");
@@ -6026,7 +6027,18 @@ describe("x402Middleware — RPC enqueue vs confirmed settlement, relay ID recov
       });
       const bMempoolCapped = (await rMempoolCapped.json()) as Record<string, unknown>;
       expect(bMempoolCapped.code).toBe(PAYER_NONCE_UNVERIFIED_CODE);
-      expect(bMempoolCapped.status).toBe("unverified");
+      expect(bMempoolCapped.status).toBeUndefined();
+      expect(String(bMempoolCapped.error)).toContain(
+        "Do not sign a new payment at a different nonce while 8125 is pending: if 8125 confirms, poll the payment (it was paid); if 8125 drops, re-sign at 8125"
+      );
+      expect(
+        stalledMempoolHarness.events.some(
+          (entry) =>
+            entry.message === "payment.failed" &&
+            entry.data?.status === "unverified" &&
+            entry.data?.classification_code === PAYER_NONCE_UNVERIFIED_CODE
+        )
+      ).toBe(true);
       expect(bMempoolCapped.terminalReason).toBeUndefined();
       expect(bMempoolCapped.nextSteps).toBe("verify_nonce_on_chain");
       expect(bMempoolCapped.retryable).toBe(false);
@@ -6039,11 +6051,17 @@ describe("x402Middleware — RPC enqueue vs confirmed settlement, relay ID recov
       // 10d. AX Discovery endpoints document `mustUseNonce`, `409` status row, omitted `terminalReason`, and sample `start_new_payment` pin
       const axApp = new Hono<{ Bindings: Env; Variables: AppVariables }>();
       axApp.route("/", axDiscoveryRouter);
+      const llmsRes = await axApp.request("http://localhost/llms.txt");
+      expect(llmsRes.status).toBe(200);
+      const llmsQuickText = await llmsRes.text();
+      expect(llmsQuickText).toContain("PAYER_NONCE_UNVERIFIED");
+      expect(llmsQuickText).toContain("poll the payment (it was paid)");
       const llmsFullRes = await axApp.request("http://localhost/llms-full.txt");
       expect(llmsFullRes.status).toBe(200);
       const llmsFullText = await llmsFullRes.text();
       expect(llmsFullText).toContain("mustUseNonce");
       expect(llmsFullText).toContain("PAYER_NONCE_UNVERIFIED");
+      expect(llmsFullText).toContain("stalled live in mempool");
       expect(llmsFullText).toContain("| 409    |");
       const flowDocRes = await axApp.request("http://localhost/topics/payment-flow");
       expect(flowDocRes.status).toBe(200);

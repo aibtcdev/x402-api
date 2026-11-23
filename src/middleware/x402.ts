@@ -72,6 +72,7 @@ import {
   derivePaymentInstability,
   logPaymentEvent,
 } from "../utils/payment-observability";
+import { PAYMENT_PUBLIC_STATES } from "../utils/payment-contract";
 import { computeDerivedHints } from "../utils/payment-hints";
 import type { DerivedHints } from "../utils/payment-hints";
 import {
@@ -170,6 +171,8 @@ const IN_FLIGHT_PUBLIC_STATUSES = new Set([
   "broadcasting",
   "mempool",
 ]);
+
+const CALLER_FACING_PUBLIC_STATUSES = new Set<string>(PAYMENT_PUBLIC_STATES);
 
 function normalizeOptionalPublicPaymentStatus(status?: string): string | undefined {
   if (status === "submitted" || status === "queued_with_warning") {
@@ -3257,7 +3260,7 @@ export function x402Middleware(
           logPaymentEvent(log, classified.httpStatus >= 500 ? "error" : "warn", "payment.failed", {
             route: c.req.path,
             paymentId: resultPaymentId,
-            status: "failed",
+            status: canonicalStatus === "unverified" ? "unverified" : "failed",
             checkStatusUrl: responseCheckStatusUrl,
             action:
               releasedBoundPaymentOnTerminalFailure || guardSuppressesStatusPointers
@@ -3289,11 +3292,16 @@ export function x402Middleware(
           c.header("X-PAYMENT-ID", resultPaymentId);
         }
 
+        const callerFacingStatus =
+          canonicalStatus && CALLER_FACING_PUBLIC_STATUSES.has(canonicalStatus)
+            ? canonicalStatus
+            : undefined;
+
         return c.json(
           {
             error: classified.message,
             code: classified.code,
-            ...(canonicalStatus ? { status: canonicalStatus } : {}),
+            ...(callerFacingStatus ? { status: callerFacingStatus } : {}),
             ...(terminalReason ? { terminalReason } : {}),
             retryable: settleHints.retryable,
             nextSteps: settleHints.nextSteps,

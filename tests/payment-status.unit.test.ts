@@ -348,6 +348,11 @@ describe("payment-status classifier predicates", () => {
     });
     expect("mustUseNonce" in mempoolCapped).toBe(false);
     expect("terminalReason" in mempoolCapped).toBe(false);
+    if (mempoolCapped.kind === "verify_nonce_on_chain") {
+      expect(mempoolCapped.message).toContain(
+        "Do not sign a new payment at a different nonce while 42 is pending: if 42 confirms, poll the payment (it was paid); if 42 drops, re-sign at 42"
+      );
+    }
 
     // Missing-nonce gap caps at MAX_NONCE_GUARD_MISSING_GAP_RETRIES (4), then instructs rebuild_and_resign at exact nonce N
     const gapWithinCap = resolvePayerNonceGuardDecision({

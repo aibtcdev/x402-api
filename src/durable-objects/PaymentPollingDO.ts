@@ -169,6 +169,7 @@ const TERMINAL_STATUSES = new Set([
   "failed",
   "replaced",
   "not_found",
+  "unverified",
 ]);
 
 /** Max polling duration: 10 minutes. After this we mark internal_error. */

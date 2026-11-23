@@ -364,8 +364,8 @@ export type PayerNonceGuardDecision =
  *   - Stalling in `mempool` past both `MAX_NONCE_GUARD_MEMPOOL_PENDING_RETRIES`
  *     and `MIN_NONCE_GUARD_MEMPOOL_PENDING_ELAPSED_MS` (where the original tx
  *     at `N` is still live) or exceeding `MAX_NONCE_GUARD_UNAVAILABLE_RETRIES`
- *     returns HTTP `409` + `PAYER_NONCE_UNVERIFIED` (`status: "unverified"`,
- *     `verify_nonce_on_chain`, `retryable: false`, omitting `terminalReason`
+ *     returns HTTP `409` + `PAYER_NONCE_UNVERIFIED` (internal `status: "unverified"`,
+ *     omitted on wire until `@aibtc/tx-schemas` adds `"unverified"`; `verify_nonce_on_chain`, `retryable: false`, omitting `terminalReason`
  *     and `mustUseNonce`) so neither category derivation nor live-mempool
  *     replacement can trigger a double charge.
  */
@@ -471,7 +471,7 @@ export function resolvePayerNonceGuardDecision(params: {
           code: PAYER_NONCE_UNVERIFIED_CODE,
           status: "unverified",
           errorReason: "payer_nonce_mempool_stalled",
-          message: `Transaction at payer nonce ${payerNonce} remains unconfirmed in mempool after relay failure; check payer nonce ${payerNonce} on-chain before re-signing`,
+          message: `Transaction at payer nonce ${payerNonce} remains unconfirmed in mempool after relay failure; check payer nonce ${payerNonce} on-chain before re-signing. Do not sign a new payment at a different nonce while ${payerNonce} is pending: if ${payerNonce} confirms, poll the payment (it was paid); if ${payerNonce} drops, re-sign at ${payerNonce}`,
           nextSteps: "verify_nonce_on_chain",
           retryable: false,
           httpStatus: 409,
