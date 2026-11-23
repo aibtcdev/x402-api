@@ -47,7 +47,7 @@ Canonical public payment lifecycle:
 - \`submitted\` is never caller-facing
 - relay-owned \`paymentId\` is the stable in-flight identity
 - this service keeps immediate pay-per-call behavior during rollout, but any surfaced payment status follows the canonical lifecycle and may include \`checkStatusUrl\`
-- HTTP \`409\` \`PAYER_NONCE_UNVERIFIED\` (\`nextSteps: "verify_nonce_on_chain"\`, \`retryable: false\`) omits \`status\` until \`@aibtc/tx-schemas\` adds \`unverified\`: do not sign a new payment at a different nonce while \`payerNonce\` is pending; if it confirms, poll the payment (it was paid); if it drops, re-sign at \`payerNonce\`
+- HTTP \`409\` \`PAYER_NONCE_UNVERIFIED\` (\`nextSteps: "verify_nonce_on_chain"\`, \`retryable: false\`) omits \`status\` (until \`@aibtc/tx-schemas\` adds \`unverified\`), \`paymentId\`, and \`checkStatusUrl\`: do not sign a new payment at a different nonce while \`payerNonce\` is pending or unverified; if it confirms, resend the same signed transaction so the guard settles it; if it drops, re-sign at \`payerNonce\`
 
 ## Pricing Tiers
 
@@ -661,7 +661,7 @@ All endpoints return structured errors:
 | 400    | Bad request (missing required fields, etc.)      |
 | 402    | Payment required (x402 challenge response)       |
 | 404    | Not found (key, paste, job, lock does not exist) |
-| 409    | Conflict (e.g. \`PAYER_NONCE_UNVERIFIED\` when \`payerNonce\` outcome is unreadable or a live mempool tx remains stalled — do not sign at a different nonce while \`payerNonce\` is pending; if it confirms, poll the payment (it was paid); if it drops, re-sign at \`payerNonce\`) |
+| 409    | Conflict (e.g. \`PAYER_NONCE_UNVERIFIED\` when \`payerNonce\` outcome is unreadable or a live mempool tx remains stalled — do not sign at a different nonce while \`payerNonce\` is pending; if it confirms, resend the same signed tx so the guard settles it; if it drops, re-sign at \`payerNonce\`) |
 | 500    | Server error (upstream API, Durable Object, etc) |
 
 ### Payment Error Hints
@@ -690,7 +690,7 @@ and the \`payment-response\` header (base64 JSON, same convention as success pat
 | \`start_new_payment\`    | Payment replaced or identity lost — begin a new x402 flow (honor \`mustUseNonce\` when present) |
 | \`fix_and_resend\`       | Invalid transaction payload — correct it before retrying      |
 | \`wait_for_confirmation\`| Payment confirmed — resource delivery should proceed         |
-| \`verify_nonce_on_chain\`| Nonce outcome unverified or stalled live in mempool (HTTP 409, \`PAYER_NONCE_UNVERIFIED\`) — check \`payerNonce\` on-chain; do not sign at a different nonce while \`payerNonce\` is pending (if it confirms, poll the payment; if it drops, re-sign at \`payerNonce\`) |
+| \`verify_nonce_on_chain\`| Nonce outcome unverified or stalled live in mempool (HTTP 409, \`PAYER_NONCE_UNVERIFIED\`) — check \`payerNonce\` on-chain; do not sign at a different nonce while \`payerNonce\` is pending (if it confirms, resend the same signed tx; if it drops, re-sign at \`payerNonce\`) |
 
 The \`payment-response\` header on error paths carries
 \`base64({ retryable, nextSteps, retryAfter?, payerNonce?, mustUseNonce? })\` — decode with \`atob()\` + \`JSON.parse()\`.
@@ -1377,7 +1377,7 @@ All non-200 payment error responses include structured retry hints. These appear
 | \`start_new_payment\`    | Payment replaced, expired, or identity not found (at \`mustUseNonce\` when provided) | false     |
 | \`fix_and_resend\`       | Invalid transaction payload — fix before retrying      | false     |
 | \`wait_for_confirmation\`| Payment confirmed — resource delivery should proceed   | false     |
-| \`verify_nonce_on_chain\`| Nonce outcome unverified or stalled live in mempool (HTTP 409, code \`PAYER_NONCE_UNVERIFIED\`) — do not sign at a different nonce while \`payerNonce\` is pending; if it confirms, poll the payment (it was paid); if it drops, re-sign at \`payerNonce\` | false     |
+| \`verify_nonce_on_chain\`| Nonce outcome unverified or stalled live in mempool (HTTP 409, code \`PAYER_NONCE_UNVERIFIED\`) — do not sign at a different nonce while \`payerNonce\` is pending; if it confirms, resend the same signed transaction so the guard settles it; if it drops, re-sign at \`payerNonce\` | false     |
 
 ### Hint Derivation by Terminal Reason Category
 
@@ -1390,7 +1390,7 @@ All non-200 payment error responses include structured retry hints. These appear
 | identity     | expired, unknown_payment_identity                            | start_new_payment    |
 | validation   | invalid_transaction, not_sponsored                           | fix_and_resend       |
 
-> **Note:** HTTP \`409\` \`PAYER_NONCE_UNVERIFIED\` (\`nextSteps: "verify_nonce_on_chain"\`, \`retryable: false\`) is emitted by the payer-nonce guard when Hiro cannot verify the submitted \`payerNonce\` or a live mempool transaction remains stalled after relay failure. Until \`@aibtc/tx-schemas\` adds \`"unverified"\` to \`PAYMENT_STATES\`, the \`409\` body omits \`status\` (keeping \`PaymentStateSchema\` and \`/x402.json\` \`publicStates\` strictly valid) and intentionally omits \`terminalReason\` so neither \`computeDerivedHints\` nor category-table clients map it to \`start_new_payment\` or \`retry_later\`; clients must branch on \`code\` / \`nextSteps\` / \`retryable\` before applying any \`status ?? "failed"\` fallback. When \`payerNonce\` \`N\` is still live in mempool, do not sign a new payment at a different nonce while \`N\` is pending: if \`N\` confirms, poll the payment (it was paid); if \`N\` drops, re-sign at \`N\`.
+> **Note:** HTTP \`409\` \`PAYER_NONCE_UNVERIFIED\` (\`nextSteps: "verify_nonce_on_chain"\`, \`retryable: false\`) is emitted by the payer-nonce guard when Hiro cannot verify the submitted \`payerNonce\` or a live mempool transaction remains stalled after relay failure. Until \`@aibtc/tx-schemas\` adds \`"unverified"\` to \`PAYMENT_STATES\`, the \`409\` body omits \`status\` (keeping \`PaymentStateSchema\` and \`/x402.json\` \`publicStates\` strictly valid) and intentionally omits \`terminalReason\` so neither \`computeDerivedHints\` nor category-table clients map it to \`start_new_payment\` or \`retry_later\`; clients must branch on \`code\` / \`nextSteps\` / \`retryable\` before applying any \`status ?? "failed"\` fallback. Because \`paymentId\` and \`checkStatusUrl\` are suppressed when the guard overrides a released relay failure, do not poll \`/payment-status\`: if \`payerNonce\` \`N\` confirms on-chain, resend the same signed transaction so the guard settles it without re-paying; only after confirming \`N\` dropped (or was never broadcast), re-sign at \`N\`.
 
 ### Client Retry Pattern
 
@@ -1404,7 +1404,13 @@ if (!response.ok) {
       // Honor mustUseNonce when starting a new payment after an unused-nonce snapshot
       return startNewPayment(exactNonce !== undefined ? { nonce: exactNonce } : undefined);
     }
-    // terminal — e.g. verify_nonce_on_chain (409) or fix_and_resend
+    if (body.nextSteps === "verify_nonce_on_chain") {
+      const pendingNonce = body.payerNonce ?? body.details?.payerNonce;
+      // Check pendingNonce on-chain: if confirmed, resend the same sig so the guard settles it;
+      // only after confirming pendingNonce dropped, rebuild and re-sign at pendingNonce (never N+1).
+      return verifyOnChainBeforeResigning(sig, pendingNonce);
+    }
+    // terminal — e.g. fix_and_resend
     return handleTerminal(body.nextSteps);
   }
   const delay = (body.retryAfter ?? 5) * 1000;

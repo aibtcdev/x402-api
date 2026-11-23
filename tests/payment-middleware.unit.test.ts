@@ -5307,6 +5307,7 @@ describe("x402Middleware — RPC enqueue vs confirmed settlement, relay ID recov
       expect(bCapped.nextSteps).not.toBe("start_new_payment");
       expect(bCapped.retryable).toBe(false);
       expect(bCapped.terminalReason).toBeUndefined();
+      expect(bCapped.paymentId).toBeUndefined();
       expect(bCapped.checkStatusUrl).toBeUndefined();
       expect(bCapped.payerNonce).toBe(8107);
       expect(String(bCapped.error)).toContain("8107");
@@ -5678,6 +5679,7 @@ describe("x402Middleware — RPC enqueue vs confirmed settlement, relay ID recov
       expect(bSyncUCapped.code).toBe(PAYER_NONCE_UNVERIFIED_CODE);
       expect(bSyncUCapped.status).toBeUndefined();
       expect(bSyncUCapped.terminalReason).toBeUndefined();
+      expect(bSyncUCapped.paymentId).toBeUndefined();
       expect(bSyncUCapped.checkStatusUrl).toBeUndefined();
       expect(bSyncUCapped.nextSteps).toBe("verify_nonce_on_chain");
       expect(bSyncUCapped.retryable).toBe(false);
@@ -5712,6 +5714,7 @@ describe("x402Middleware — RPC enqueue vs confirmed settlement, relay ID recov
       expect(bThirdReleased.code).toBe(PAYER_NONCE_UNVERIFIED_CODE);
       expect(bThirdReleased.status).toBeUndefined();
       expect(bThirdReleased.terminalReason).toBeUndefined();
+      expect(bThirdReleased.paymentId).toBeUndefined();
       expect(bThirdReleased.checkStatusUrl).toBeUndefined();
       expect(bThirdReleased.nextSteps).toBe("verify_nonce_on_chain");
 
@@ -6029,8 +6032,17 @@ describe("x402Middleware — RPC enqueue vs confirmed settlement, relay ID recov
       expect(bMempoolCapped.code).toBe(PAYER_NONCE_UNVERIFIED_CODE);
       expect(bMempoolCapped.status).toBeUndefined();
       expect(String(bMempoolCapped.error)).toContain(
-        "Do not sign a new payment at a different nonce while 8125 is pending: if 8125 confirms, poll the payment (it was paid); if 8125 drops, re-sign at 8125"
+        "Do not sign a new payment at a different nonce while 8125 is pending: if 8125 confirms, resend the same signed transaction so the guard settles it; if 8125 drops, re-sign at 8125"
       );
+      expect(bMempoolCapped.paymentId).toBeUndefined();
+      expect(
+        stalledMempoolHarness.events.some(
+          (entry) =>
+            entry.level === "warn" &&
+            entry.message === "Dropping non-public payment status from wire response" &&
+            entry.data?.status === "unverified"
+        )
+      ).toBe(true);
       expect(
         stalledMempoolHarness.events.some(
           (entry) =>
@@ -6055,7 +6067,7 @@ describe("x402Middleware — RPC enqueue vs confirmed settlement, relay ID recov
       expect(llmsRes.status).toBe(200);
       const llmsQuickText = await llmsRes.text();
       expect(llmsQuickText).toContain("PAYER_NONCE_UNVERIFIED");
-      expect(llmsQuickText).toContain("poll the payment (it was paid)");
+      expect(llmsQuickText).toContain("resend the same signed transaction so the guard settles it");
       const llmsFullRes = await axApp.request("http://localhost/llms-full.txt");
       expect(llmsFullRes.status).toBe(200);
       const llmsFullText = await llmsFullRes.text();
@@ -6070,6 +6082,7 @@ describe("x402Middleware — RPC enqueue vs confirmed settlement, relay ID recov
       expect(flowDocText).toContain("PAYER_NONCE_UNVERIFIED");
       expect(flowDocText).toContain("startNewPayment(exactNonce");
       expect(flowDocText).toContain("intentionally omits `terminalReason`");
+      expect(flowDocText).toContain("verifyOnChainBeforeResigning(sig, pendingNonce)");
 
       // 11. Stale `clearBoundTx` (`cleared: false` on `bindingId` mismatch with live re-bound DO record)
       //     keeps the payment in-flight (`retry_later` + live `X-PAYMENT-ID`) instead of treating as released

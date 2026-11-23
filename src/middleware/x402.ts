@@ -3296,6 +3296,13 @@ export function x402Middleware(
           canonicalStatus && CALLER_FACING_PUBLIC_STATUSES.has(canonicalStatus)
             ? canonicalStatus
             : undefined;
+        if (canonicalStatus && !callerFacingStatus) {
+          log.warn("Dropping non-public payment status from wire response", {
+            status: canonicalStatus,
+            code: classified.code,
+            route: c.req.path,
+          });
+        }
 
         return c.json(
           {
@@ -3308,7 +3315,7 @@ export function x402Middleware(
             ...(settleHints.retryAfter !== undefined ? { retryAfter: settleHints.retryAfter } : {}),
             ...(settleHints.payerNonce !== undefined ? { payerNonce: settleHints.payerNonce } : {}),
             ...(settleHints.mustUseNonce !== undefined ? { mustUseNonce: settleHints.mustUseNonce } : {}),
-            paymentId: resultPaymentId,
+            ...(!guardSuppressesStatusPointers ? { paymentId: resultPaymentId } : {}),
             requestCorrelationId,
             ...(responseCheckStatusUrl ? { checkStatusUrl: responseCheckStatusUrl } : {}),
             asset,

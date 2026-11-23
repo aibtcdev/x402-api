@@ -350,7 +350,7 @@ describe("payment-status classifier predicates", () => {
     expect("terminalReason" in mempoolCapped).toBe(false);
     if (mempoolCapped.kind === "verify_nonce_on_chain") {
       expect(mempoolCapped.message).toContain(
-        "Do not sign a new payment at a different nonce while 42 is pending: if 42 confirms, poll the payment (it was paid); if 42 drops, re-sign at 42"
+        "Do not sign a new payment at a different nonce while 42 is pending: if 42 confirms, resend the same signed transaction so the guard settles it; if 42 drops, re-sign at 42"
       );
     }
 
@@ -414,6 +414,11 @@ describe("payment-status classifier predicates", () => {
       resetCounters: false,
     });
     expect("terminalReason" in unavailCapped).toBe(false);
+    if (unavailCapped.kind === "verify_nonce_on_chain") {
+      expect(unavailCapped.message).toContain(
+        "Do not sign a new payment at a different nonce while 42 is unverified: if 42 confirms, resend the same signed transaction so the guard settles it; if 42 drops or was never broadcast, re-sign at 42"
+      );
+    }
     expect(computeDerivedHints("unverified", undefined)).toEqual({
       retryable: false,
       nextSteps: "verify_nonce_on_chain",
