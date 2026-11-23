@@ -19,7 +19,9 @@ import type { TerminalReason } from "../services/payment-contract";
 export interface DerivedHints {
   retryable: boolean;
   retryAfter?: number;   // seconds
-  nextSteps: string;     // stable token: rebuild_and_resign | retry_later | start_new_payment | fix_and_resend | wait_for_confirmation
+  nextSteps: string;     // stable token: rebuild_and_resign | retry_later | start_new_payment | fix_and_resend | wait_for_confirmation | verify_nonce_on_chain
+  payerNonce?: number;   // submitted sender nonce inspected by the payer-nonce guard
+  mustUseNonce?: number; // exact sender nonce the client must sign at to stay mutually exclusive with the prior tx
 }
 
 // =============================================================================
@@ -31,6 +33,7 @@ const TERMINAL_STATUSES = new Set([
   "failed",
   "replaced",
   "not_found",
+  "unverified",
 ]);
 
 // =============================================================================
@@ -64,6 +67,14 @@ export function computeDerivedHints(
     return {
       retryable: false,
       nextSteps: "wait_for_confirmation",
+    };
+  }
+
+  // unverified — HTTP 409 PAYER_NONCE_UNVERIFIED stop; inspect payerNonce on-chain, never re-pay
+  if (status === "unverified") {
+    return {
+      retryable: false,
+      nextSteps: "verify_nonce_on_chain",
     };
   }
 
