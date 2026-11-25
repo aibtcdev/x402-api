@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { X402_ERROR_CODES } from "x402-stacks";
-import { classifyPaymentError } from "../src/middleware/x402";
+import { classifyPaymentError, encodeBase64Json, decodeBase64Json } from "../src/middleware/x402";
 import { computeDerivedHints } from "../src/utils/payment-hints";
 
 // =============================================================================
@@ -180,5 +180,29 @@ describe("payment error hints — exception path (no canonical status)", () => {
     expect(hints).not.toBeNull();
     expect(hints!.retryable).toBe(false);
     expect(hints!.nextSteps).toBe("start_new_payment");
+  });
+});
+
+describe("encodeBase64Json / decodeBase64Json UTF-8 support (#153)", () => {
+  test("encodes and decodes non-Latin-1 characters above U+00FF without throwing", () => {
+    const challenge = {
+      description: "x402 API - /storage/kv/—",
+      amount: 1000n,
+    };
+    const header = encodeBase64Json(challenge);
+    const utf8Decoded = JSON.parse(Buffer.from(header, "base64").toString("utf-8"));
+    expect(utf8Decoded).toEqual({
+      description: "x402 API - /storage/kv/—",
+      amount: "1000",
+    });
+    expect(decodeBase64Json(header)).toEqual(utf8Decoded);
+  });
+
+  test("encodes Latin-1 characters (café) as valid UTF-8 matching x402-stacks interceptor decoding", () => {
+    const challenge = { description: "x402 API - /storage/kv/café" };
+    const header = encodeBase64Json(challenge);
+    const utf8Decoded = JSON.parse(Buffer.from(header, "base64").toString("utf-8"));
+    expect(utf8Decoded.description).toBe("x402 API - /storage/kv/café");
+    expect(decodeBase64Json(header)).toEqual(utf8Decoded);
   });
 });

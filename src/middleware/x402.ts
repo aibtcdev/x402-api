@@ -84,21 +84,27 @@ const TOKEN_CONTRACTS: Record<"mainnet" | "testnet", Record<"sBTC" | "USDCx", To
 // =============================================================================
 
 /**
- * Encode object to base64 JSON for headers
+ * Encode object to UTF-8 base64 JSON for headers
  */
-function encodeBase64Json(obj: unknown): string {
+export function encodeBase64Json(obj: unknown): string {
   const json = JSON.stringify(obj, (_, value) =>
     typeof value === "bigint" ? value.toString() : value
   );
-  return btoa(json);
+  const bytes = new TextEncoder().encode(json);
+  let bin = "";
+  for (const b of bytes) bin += String.fromCharCode(b);
+  return btoa(bin);
 }
 
 /**
- * Decode base64 JSON from header
+ * Decode UTF-8 base64 JSON from header
  */
-function decodeBase64Json<T>(base64: string): T | null {
+export function decodeBase64Json<T>(base64: string): T | null {
   try {
-    const json = atob(base64);
+    const bin = atob(base64);
+    const bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    const json = new TextDecoder().decode(bytes);
     return JSON.parse(json) as T;
   } catch {
     return null;
